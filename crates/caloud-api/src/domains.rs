@@ -24,20 +24,13 @@ pub async fn verify(State(s): State<AppState>, me: CurrentUser, Path(hostname): 
     Ok(Json(service::verify_domain(&s, &me, &hostname).await?))
 }
 
-#[derive(Deserialize)]
-pub struct Bind {
-    app_id: Option<String>,
-    service: Option<String>,
-    port: Option<u16>,
-}
-
 pub async fn bind(
     State(s): State<AppState>,
     me: CurrentUser,
     Path(hostname): Path<String>,
-    Json(b): Json<Bind>,
+    Json(b): Json<service::BindInput>,
 ) -> ApiResult<Json<Domain>> {
-    let d = service::bind_domain(&s, &me, &hostname, b.app_id.as_deref(), b.service.as_deref(), b.port).await?;
+    let d = service::bind_domain(&s, &me, &hostname, b).await?;
     Ok(Json(d))
 }
 

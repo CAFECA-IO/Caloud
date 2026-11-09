@@ -65,6 +65,8 @@
       <label class="c-field"><span class="c-field__label">網域</span><input class="c-input" value="Blog_Example" aria-invalid="true"><span class="c-field__error">網域格式錯誤，請輸入完整主機名稱，例如 app.example.com。</span></label>
       <label class="c-field"><span class="c-field__label">Service</span><select class="c-select"><option>web</option><option>db</option></select></label>
     </div>
+    <label class="c-field"><span class="c-field__label">環境變數</span><textarea class="c-textarea c-textarea--sm" placeholder="KEY=value">LIVEKIT_DOMAIN=livekit.cafeca.io</textarea><span class="c-field__hint">存檔後只顯示變數名稱。</span></label>
+    <label class="c-check"><input type="checkbox" checked><span>TLS 直通：443 的連線原封不動轉給 App</span></label>
     <div class="l-row">
       <label class="c-search" id="demo-search"><span class="u-sr-only">搜尋</span><input class="c-input" placeholder="搜尋名稱"></label>
       <div class="c-segmented" role="group" aria-label="篩選"><button class="c-segmented__item is-active">全部</button><button class="c-segmented__item">運作中</button><button class="c-segmented__item">失敗</button></div>
@@ -140,7 +142,7 @@ matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawSwatch
 $("#demo-plus").innerHTML = `${icon("plus")}<span>新增 App</span>`;
 $("#demo-icon").innerHTML = icon("refresh");
 $("#demo-busy").addEventListener("click", (e) => busy(e.currentTarget, new Promise((r) => setTimeout(r, 1500))));
-$("#demo-badges").innerHTML = [["app", "running"], ["app", "deploying"], ["app", "failed"], ["app", "stopped"], ["domain", true], ["domain", false], ["route", "live"], ["route", "idle"], ["tls", "issued"], ["role", "super_admin"], ["role", "pending"]].map(([k, v]) => statusPill(k, v)).join("");
+$("#demo-badges").innerHTML = [["app", "running"], ["app", "deploying"], ["app", "failed"], ["app", "stopped"], ["domain", true], ["domain", false], ["route", "live"], ["route", "idle"], ["tls", "issued"], ["tls", "passthrough"], ["role", "super_admin"], ["role", "pending"]].map(([k, v]) => statusPill(k, v)).join("");
 $("#demo-search").insertAdjacentHTML("afterbegin", icon("search"));
 $("#demo-stat-meta").innerHTML = `${statusPill("app", "failed")} 2 個`;
 $("#demo-table").innerHTML = sampleRows.map(([n, st, d, t]) => `<tr class="is-clickable" tabindex="0"><td><div class="c-table__primary">${n}</div><div class="c-table__secondary u-mono">3f9a1c2e</div></td><td>${statusPill("app", st)}</td><td class="u-small">${d}</td><td class="u-muted u-small">${UI.relTime(t)}</td></tr>`).join("");

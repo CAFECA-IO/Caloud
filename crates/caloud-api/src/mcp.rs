@@ -3,6 +3,7 @@
 //! 只處理協定：JSON-RPC 解析、工具清單、參數檢查、結果與錯誤格式。
 //! 所有資源操作都經由 `service`，權限與稽核和 REST 完全相同。
 use crate::error::ApiError;
+use crate::service::{AppInput, BindInput};
 use crate::{service, tokens, AppState, CurrentUser};
 use axum::body::Bytes;
 use axum::extract::State;
@@ -145,7 +146,7 @@ struct Tool {
 }
 
 fn is_admin_tool(t: &Tool) -> bool {
-    matches!(t.def["name"].as_str(), Some("list_users" | "set_user_role"))
+    matches!(t.def["name"].as_str(), Some("list_users" | "set_user_role" | "create_git_app"))
 }
 
 #[derive(Clone, Copy, Default)]
@@ -198,6 +199,8 @@ fn tools() -> Vec<Tool> {
     let app_id = json!({ "type": "string", "description": "App ID（UUID），可由 list_apps 取得" });
     let hostname = json!({ "type": "string", "description": "網域主機名稱，例如 blog.example.com" });
     let confirm = json!({ "type": "boolean", "const": true, "description": "必須為 true，表示已向使用者確認要刪除" });
+    let env = json!({ "type": "string", "description": ".env 內容，每行 KEY=value；之後查詢只回傳變數名稱" });
+    let services = json!({ "type": "array", "items": { "type": "string" }, "description": "只啟動這些 service；省略為全部" });
     vec![
         tool("whoami", "目前身分", "回傳此 API 權杖所屬的 Caloud 使用者與角色。", json!({}), &[], R),
         tool(
@@ -223,22 +226,45 @@ fn tools() -> Vec<Tool> {
             json!({
                 "compose_yaml": { "type": "string", "description": "docker compose YAML 全文" },
                 "name": { "type": "string", "description": "App 名稱；省略時以第一個 service 命名" },
+                "env": env,
+                "services": services,
                 "deploy": { "type": "boolean", "description": "建立後立即部署，預設 true" },
             }),
             &["compose_yaml"],
             W,
         ),
         tool(
+            "create_git_app",
+            "從 Git 建立 App",
+            "（Admin）從公開 Git 儲存庫建立 App：取得指定 ref，以 git_path 目錄中的 compose 檔部署（可使用 build）。privileged 為 true 時允許 network_mode: host、主機連接埠（含 UDP）、env_file、tmpfs；Caloud 保留的 80、443、API 埠會自動移除並改由網域轉發。",
+            json!({
+                "git_url": { "type": "string", "description": "https:// 公開儲存庫，例如 https://github.com/CAFECA-IO/SwarmStorage" },
+                "git_ref": { "type": "string", "description": "分支、標籤或 commit，預設 main" },
+                "git_path": { "type": "string", "description": "compose 所在目錄，例如 deploy/livekit；省略為根目錄" },
+                "compose_file": { "type": "string", "description": "compose 檔名，預設 docker-compose.yml" },
+                "name": { "type": "string", "description": "App 名稱" },
+                "env": env,
+                "services": services,
+                "privileged": { "type": "boolean", "description": "特權 App，預設 false" },
+                "deploy": { "type": "boolean", "description": "建立後立即部署（含建置），預設 true" },
+            }),
+            &["git_url"],
+            W,
+        ),
+        tool(
             "update_app",
             "更新 App",
-            "以新的 compose YAML 取代 App 設定，預設立即重新部署。",
+            "更新 App 設定，省略的欄位維持原值，預設立即重新部署。上傳的 App 可換 compose_yaml；Git 來源 App（Admin）可換 git_ref 並會重新取得。",
             json!({
                 "app_id": app_id,
-                "compose_yaml": { "type": "string", "description": "新的 docker compose YAML 全文" },
-                "name": { "type": "string", "description": "新的 App 名稱（選填）" },
+                "compose_yaml": { "type": "string", "description": "新的 docker compose YAML 全文（上傳的 App）" },
+                "git_ref": { "type": "string", "description": "新的分支、標籤或 commit（Git 來源 App）" },
+                "name": { "type": "string", "description": "新的 App 名稱" },
+                "env": { "type": "string", "description": "新的 .env 內容（整份取代；空字串表示清除）" },
+                "services": services,
                 "deploy": { "type": "boolean", "description": "更新後立即重新部署，預設 true" },
             }),
-            &["app_id", "compose_yaml"],
+            &["app_id"],
             W,
         ),
         tool(
@@ -299,7 +325,8 @@ fn tools() -> Vec<Tool> {
                 "hostname": hostname,
                 "app_id": { "type": ["string", "null"], "description": "目標 App ID；null 表示解除綁定" },
                 "service": { "type": "string", "description": "compose 中的 service 名稱" },
-                "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "容器內監聽的 port" },
+                "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "HTTP 轉發的容器內 port（TLS 直通時供 App 的 ACME HTTP-01 使用）" },
+                "tls_passthrough_port": { "type": ["integer", "null"], "minimum": 1, "maximum": 65535, "description": "設定時啟用 TLS 直通：443 的連線依 SNI 原封不動轉到此 port，由 App 自己處理 TLS 與憑證" },
             }),
             &["hostname"],
             I,
@@ -355,6 +382,21 @@ impl Args<'_> {
             Some(_) => Err(invalid_params(format!("{k} 必須是字串"))),
         }
     }
+    fn opt_list(&self, k: &str) -> Result<Option<Vec<String>>, RpcError> {
+        match self.0.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Array(v)) => v
+                .iter()
+                .map(|x| {
+                    x.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| invalid_params(format!("{k} 必須是字串陣列")))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Some),
+            Some(_) => Err(invalid_params(format!("{k} 必須是字串陣列"))),
+        }
+    }
     fn opt_bool(&self, k: &str) -> Result<Option<bool>, RpcError> {
         match self.0.get(k) {
             None | Some(Value::Null) => Ok(None),
@@ -393,14 +435,49 @@ async fn call(s: &AppState, me: &CurrentUser, name: &str, a: Args<'_>) -> CallRe
             }))
         }
         "get_app" => biz(service::get_app(s, me, a.str("app_id")?).await),
-        "create_app" => {
-            let name = a.opt_str("name")?.map(str::to_string);
-            biz(service::create_app(s, me, name, a.str("compose_yaml")?, a.opt_bool("deploy")?.unwrap_or(true)).await)
-        }
+        "create_app" => biz(service::create_app(
+            s,
+            me,
+            AppInput {
+                name: a.opt_str("name")?.map(str::to_string),
+                source: Some("compose".into()),
+                compose_yaml: Some(a.str("compose_yaml")?.to_string()),
+                env: a.opt_str("env")?.map(str::to_string),
+                services: a.opt_list("services")?,
+                deploy: a.opt_bool("deploy")?.unwrap_or(true),
+                ..Default::default()
+            },
+        )
+        .await),
+        "create_git_app" => biz(service::create_app(
+            s,
+            me,
+            AppInput {
+                name: a.opt_str("name")?.map(str::to_string),
+                source: Some("git".into()),
+                git_url: Some(a.str("git_url")?.to_string()),
+                git_ref: a.opt_str("git_ref")?.map(str::to_string),
+                git_path: a.opt_str("git_path")?.map(str::to_string),
+                compose_file: a.opt_str("compose_file")?.map(str::to_string),
+                env: a.opt_str("env")?.map(str::to_string),
+                services: a.opt_list("services")?,
+                privileged: a.opt_bool("privileged")?,
+                deploy: a.opt_bool("deploy")?.unwrap_or(true),
+                ..Default::default()
+            },
+        )
+        .await),
         "update_app" => {
-            let name = a.opt_str("name")?.map(str::to_string);
-            let deploy = a.opt_bool("deploy")?.unwrap_or(true);
-            biz(service::update_app(s, me, a.str("app_id")?, name, a.str("compose_yaml")?, deploy).await)
+            let input = AppInput {
+                name: a.opt_str("name")?.map(str::to_string),
+                compose_yaml: a.opt_str("compose_yaml")?.map(str::to_string),
+                git_ref: a.opt_str("git_ref")?.map(str::to_string),
+                env: a.opt_str("env")?.map(str::to_string),
+                services: a.opt_list("services")?,
+                deploy: a.opt_bool("deploy")?.unwrap_or(true),
+                ..Default::default()
+            };
+            biz(service::update_app(s, me, a.str("app_id")?, input).await)
         }
         "deploy_app" => {
             let id = a.str("app_id")?;
@@ -437,8 +514,15 @@ async fn call(s: &AppState, me: &CurrentUser, name: &str, a: Args<'_>) -> CallRe
         })),
         "verify_domain" => biz(service::verify_domain(s, me, a.str("hostname")?).await),
         "bind_domain" => {
-            let port = a.opt_u64("port", 65535)?.map(|n| n as u16);
-            biz(service::bind_domain(s, me, a.str("hostname")?, a.opt_str("app_id")?, a.opt_str("service")?, port).await)
+            let tls_port = a.opt_u64("tls_passthrough_port", 65535)?.map(|n| n as u16);
+            let input = BindInput {
+                app_id: a.opt_str("app_id")?.map(str::to_string),
+                service: a.opt_str("service")?.map(str::to_string),
+                port: a.opt_u64("port", 65535)?.map(|n| n as u16),
+                tls_mode: Some(if tls_port.is_some() { "passthrough" } else { "none" }.into()),
+                tls_port,
+            };
+            biz(service::bind_domain(s, me, a.str("hostname")?, input).await)
         }
         "delete_domain" => {
             let host = a.str("hostname")?;

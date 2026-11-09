@@ -232,17 +232,43 @@ async function appAction(act, app, btn) {
   } catch (err) { toast(err.message, "danger"); return false; }
 }
 
+const parseList = (v) => v.split(/[\s,，]+/).map((x) => x.trim()).filter(Boolean);
+const envHint = (app) => app.env_keys?.length ? `目前變數：${app.env_keys.join("、")}。留空表示不變。` : "每行 KEY=value；存檔後只顯示變數名稱。";
+
+/** FR-APP-01、FR-APP-13～16：上傳 compose 或（Admin）從 Git 儲存庫建立 */
 function openNewApp() {
-  const dr = drawer({ title: "新增 App", subtitle: "上傳或貼上 docker compose 檔，建立後立即部署。" });
+  const dr = drawer({ title: "新增 App", subtitle: "上傳 compose 檔或從 Git 儲存庫建立，建立後立即部署。" });
+  const sources = [["compose", "上傳 compose"], ...(isAdmin() ? [["git", "Git 儲存庫"]] : [])];
   dr.body.innerHTML = `
+    ${sources.length > 1 ? `<div class="c-segmented" role="group" aria-label="來源" id="na-source">${sources.map(([v, l], i) => `<button class="c-segmented__item ${i ? "" : "is-active"}" data-v="${v}" aria-pressed="${!i}">${l}</button>`).join("")}</div>` : ""}
     <label class="c-field"><span class="c-field__label">名稱</span><input class="c-input" id="na-name" placeholder="例如 blog" autocomplete="off"><span class="c-field__hint">留空時以第一個 service 命名。</span></label>
-    <div class="c-field"><span class="c-field__label">compose 檔</span>
-      <div><label class="c-btn">${icon("upload")}<span>選擇 .yml 檔案</span><input type="file" id="na-file" accept=".yml,.yaml" class="u-sr-only"></label></div>
-      <textarea class="c-textarea" id="na-yaml" aria-label="compose YAML" spellcheck="false" placeholder="services:&#10;  web:&#10;    image: nginx:alpine"></textarea>
-      <span class="c-field__error" id="na-err" role="alert"></span></div>
-    <div class="c-banner">${icon("shield")}<div class="c-banner__body"><strong>安全限制</strong><span class="u-small">不可使用 <code class="c-code">ports</code>、<code class="c-code">privileged</code>、主機路徑掛載與 <code class="c-code">build</code>。對外流量請在「網域」綁定。</span></div></div>`;
+    <div class="l-stack" data-src="compose">
+      <div class="c-field"><span class="c-field__label">compose 檔</span>
+        <div><label class="c-btn">${icon("upload")}<span>選擇 .yml 檔案</span><input type="file" id="na-file" accept=".yml,.yaml" class="u-sr-only"></label></div>
+        <textarea class="c-textarea" id="na-yaml" aria-label="compose YAML" spellcheck="false" placeholder="services:&#10;  web:&#10;    image: nginx:alpine"></textarea></div>
+    </div>
+    <div class="l-stack u-hidden" data-src="git">
+      <label class="c-field"><span class="c-field__label">儲存庫網址</span><input class="c-input u-mono" id="na-git-url" placeholder="https://github.com/CAFECA-IO/SwarmStorage" autocomplete="off" spellcheck="false"><span class="c-field__hint">只支援公開的 https:// 儲存庫。</span></label>
+      <div class="l-grid">
+        <label class="c-field"><span class="c-field__label">分支／標籤</span><input class="c-input u-mono" id="na-git-ref" placeholder="main"></label>
+        <label class="c-field"><span class="c-field__label">目錄</span><input class="c-input u-mono" id="na-git-path" placeholder="deploy/livekit"></label>
+        <label class="c-field"><span class="c-field__label">compose 檔名</span><input class="c-input u-mono" id="na-git-file" placeholder="docker-compose.yml"></label>
+      </div>
+    </div>
+    <label class="c-field"><span class="c-field__label">只啟動這些 service（選填）</span><input class="c-input u-mono" id="na-services" placeholder="例如 caddy, livekit" autocomplete="off"><span class="c-field__hint">以逗號分隔；留空啟動全部。</span></label>
+    <label class="c-field"><span class="c-field__label">環境變數（選填）</span><textarea class="c-textarea c-textarea--sm" id="na-env" spellcheck="false" placeholder="LIVEKIT_DOMAIN=livekit.example.com"></textarea><span class="c-field__hint">${envHint({})}</span></label>
+    ${isAdmin() ? `<label class="c-check"><input type="checkbox" id="na-priv"><span>特權 App：允許 build、host 網路與主機連接埠（僅 Admin）</span></label>` : ""}
+    <span class="c-field__error" id="na-err" role="alert"></span>
+    <div class="c-banner" id="na-rules">${icon("shield")}<div class="c-banner__body"><strong>安全限制</strong><span class="u-small">一般 App 不可使用 <code class="c-code">ports</code>、<code class="c-code">privileged</code>、主機路徑掛載與 <code class="c-code">build</code>；對外流量請在「網域」綁定。特權 App 規則見安全規範 §3.5。</span></div></div>`;
   dr.footer.classList.remove("u-hidden");
   dr.footer.innerHTML = `<button class="c-btn" data-close>取消</button><button class="c-btn c-btn--primary" id="na-submit">${icon("play")}<span>建立並部署</span></button>`;
+  let source = "compose";
+  $("#na-source", dr.el)?.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-v]"); if (!b) return;
+    source = b.dataset.v;
+    $$("#na-source .c-segmented__item", dr.el).forEach((x) => { x.classList.toggle("is-active", x === b); x.setAttribute("aria-pressed", x === b); });
+    $$("[data-src]", dr.el).forEach((x) => x.classList.toggle("u-hidden", x.dataset.src !== source));
+  });
   $("#na-file", dr.el).addEventListener("change", async (e) => {
     const f = e.target.files[0]; if (!f) return;
     $("#na-yaml", dr.el).value = await f.text();
@@ -250,14 +276,21 @@ function openNewApp() {
     if (!$("#na-name", dr.el).value && !/^(docker-)?compose$/.test(base)) $("#na-name", dr.el).value = base;
   });
   $("#na-submit", dr.el).addEventListener("click", async (e) => {
-    const btn = e.currentTarget, yaml = $("#na-yaml", dr.el);
-    showMsg($("#na-err", dr.el), null); yaml.removeAttribute("aria-invalid");
-    if (!yaml.value.trim()) { yaml.setAttribute("aria-invalid", "true"); return showMsg($("#na-err", dr.el), new Error("請上傳或貼上 compose 檔。")); }
+    const btn = e.currentTarget, v = (id) => $(id, dr.el)?.value.trim() || null;
+    showMsg($("#na-err", dr.el), null);
+    const body = { name: v("#na-name"), source, env: v("#na-env"), services: parseList($("#na-services", dr.el).value), privileged: $("#na-priv", dr.el)?.checked || false };
+    if (source === "compose") {
+      if (!v("#na-yaml")) return showMsg($("#na-err", dr.el), new Error("請上傳或貼上 compose 檔。"));
+      body.compose_yaml = $("#na-yaml", dr.el).value;
+    } else {
+      if (!v("#na-git-url")) return showMsg($("#na-err", dr.el), new Error("請輸入儲存庫網址。"));
+      Object.assign(body, { git_url: v("#na-git-url"), git_ref: v("#na-git-ref"), git_path: v("#na-git-path"), compose_file: v("#na-git-file") });
+    }
     try {
-      const app = await busy(btn, api("/api/apps", { method: "POST", body: { name: $("#na-name", dr.el).value || null, compose_yaml: yaml.value } }));
+      const app = await busy(btn, api("/api/apps", { method: "POST", body }));
       dr.close(); toast(`已建立 ${app.name}，開始部署`);
       if (currentPage() === "apps") loadApps(); else location.hash = "apps";
-    } catch (err) { yaml.setAttribute("aria-invalid", "true"); showMsg($("#na-err", dr.el), err); }
+    } catch (err) { showMsg($("#na-err", dr.el), err); }
   });
 }
 
@@ -279,19 +312,32 @@ async function openApp(id) {
     try { detail ??= await api(`/api/apps/${id}`); } catch (err) { return (panel.innerHTML = `<p class="c-msg c-msg--danger">${esc(err.message)}</p>`); }
     if (tab === "info") {
       const doms = state.domains.filter((d) => d.app_id === id);
-      panel.innerHTML = `<dl class="c-kv"><dt class="c-kv__key">狀態</dt><dd class="c-kv__value">${statusPill("app", app.status)}</dd>
-        <dt class="c-kv__key">Services</dt><dd class="c-kv__value u-mono">${detail.services.map(esc).join(", ")}</dd>
-        <dt class="c-kv__key">網域</dt><dd class="c-kv__value">${doms.length ? doms.map((d) => `<a href="http://${esc(d.hostname)}" target="_blank" rel="noopener">${esc(d.hostname)}</a> → <span class="u-mono">${esc(d.service)}:${esc(d.port)}</span>`).join("<br>") : '<span class="u-muted">尚未綁定，請到「網域」設定。</span>'}</dd>
+      const a = detail.app;
+      const src = a.source === "git" ? `<span class="u-mono">${esc(a.git_url)}</span><br><span class="u-muted u-small">ref <code class="c-code">${esc(a.git_ref)}</code> · 目錄 <code class="c-code">${esc(a.git_path || "/")}</code> · <code class="c-code">${esc(a.compose_file)}</code></span>` : "上傳的 compose";
+      panel.innerHTML = `<dl class="c-kv"><dt class="c-kv__key">狀態</dt><dd class="c-kv__value">${statusPill("app", app.status)}${a.privileged ? ` <span class="c-badge c-badge--accent"><span class="c-badge__dot" aria-hidden="true"></span>特權</span>` : ""}</dd>
+        <dt class="c-kv__key">來源</dt><dd class="c-kv__value">${src}</dd>
+        <dt class="c-kv__key">Services</dt><dd class="c-kv__value u-mono">${detail.services.map((x) => !a.services || a.services.includes(x) ? esc(x) : `<span class="u-muted">${esc(x)}（不啟動）</span>`).join(", ")}</dd>
+        <dt class="c-kv__key">環境變數</dt><dd class="c-kv__value u-mono">${a.env_keys.length ? a.env_keys.map(esc).join(", ") : '<span class="u-muted">無</span>'}</dd>
+        <dt class="c-kv__key">網域</dt><dd class="c-kv__value">${doms.length ? doms.map((d) => `<a href="${d.tls_mode === "passthrough" ? "https" : "http"}://${esc(d.hostname)}" target="_blank" rel="noopener">${esc(d.hostname)}</a> → <span class="u-mono">${esc(d.service)}:${esc(d.port)}${d.tls_mode === "passthrough" ? ` · TLS ${esc(d.tls_port)}` : ""}</span>`).join("<br>") : '<span class="u-muted">尚未綁定，請到「網域」設定。</span>'}</dd>
         <dt class="c-kv__key">更新</dt><dd class="c-kv__value">${relTime(app.updated_at)}</dd></dl>
         ${app.last_error ? `<div class="c-banner c-banner--danger">${icon("alert")}<div class="c-banner__body"><strong>上次部署失敗</strong><span class="u-small u-mono">${esc(app.last_error)}</span></div></div>` : ""}
         <h3 class="c-section-title">容器</h3>
         <div class="c-table-wrap"><table class="c-table"><thead><tr><th>Service</th><th>容器</th><th>狀態</th></tr></thead><tbody>${detail.containers.map((c) => `<tr><td class="u-mono">${esc(c.Service)}</td><td class="u-mono u-small">${esc(c.Name)}</td><td>${esc(c.State)} ${c.Health ? `<span class="u-muted">(${esc(c.Health)})</span>` : ""}</td></tr>`).join("") || `<tr><td colspan="3">${empty({ iconName: "box", title: "沒有容器", body: "按「重新部署」啟動。" })}</td></tr>`}</tbody></table></div>`;
     } else if (tab === "compose") {
-      panel.innerHTML = `<label class="c-field"><span class="c-field__label">compose.yml</span><textarea class="c-textarea" id="ad-yaml" spellcheck="false">${esc(detail.compose_yaml)}</textarea><span class="c-field__error" id="ad-err" role="alert"></span></label><div class="l-row"><span class="l-spacer"></span><button class="c-btn c-btn--primary" id="ad-save">${icon("check")}<span>儲存並重新部署</span></button></div>`;
+      const a = detail.app, git = a.source === "git";
+      panel.innerHTML = `
+        ${git ? `<label class="c-field"><span class="c-field__label">分支／標籤</span><input class="c-input u-mono" id="ad-ref" value="${esc(a.git_ref)}"><span class="c-field__hint">儲存後會重新取得此版本並建置。</span></label>` : ""}
+        <label class="c-field"><span class="c-field__label">${git ? `${esc(a.compose_file)}（唯讀，來自儲存庫）` : "compose.yml"}</span><textarea class="c-textarea" id="ad-yaml" spellcheck="false" ${git ? "readonly" : ""}>${esc(detail.compose_yaml)}</textarea></label>
+        <label class="c-field"><span class="c-field__label">只啟動這些 service</span><input class="c-input u-mono" id="ad-services" value="${esc((a.services || []).join(", "))}" placeholder="留空啟動全部"></label>
+        <label class="c-field"><span class="c-field__label">環境變數</span><textarea class="c-textarea c-textarea--sm" id="ad-env" spellcheck="false" placeholder="KEY=value"></textarea><span class="c-field__hint">${esc(envHint(a))}</span></label>
+        <span class="c-field__error" id="ad-err" role="alert"></span>
+        <div class="l-row"><span class="l-spacer"></span><button class="c-btn c-btn--primary" id="ad-save">${icon("check")}<span>儲存並重新部署</span></button></div>`;
       $("#ad-save", dr.el).addEventListener("click", async (e) => {
-        const btn = e.currentTarget;
+        const btn = e.currentTarget, body = { services: parseList($("#ad-services", dr.el).value) };
+        if (git) body.git_ref = $("#ad-ref", dr.el).value.trim(); else body.compose_yaml = $("#ad-yaml", dr.el).value;
+        if ($("#ad-env", dr.el).value.trim()) body.env = $("#ad-env", dr.el).value;
         showMsg($("#ad-err", dr.el), null);
-        try { await busy(btn, api(`/api/apps/${id}`, { method: "PUT", body: { compose_yaml: $("#ad-yaml", dr.el).value } })); detail = null; toast("已儲存，開始重新部署"); loadApps(); }
+        try { await busy(btn, api(`/api/apps/${id}`, { method: "PUT", body })); detail = null; toast("已儲存，開始重新部署"); loadApps(); }
         catch (err) { showMsg($("#ad-err", dr.el), err); }
       });
     } else {
@@ -336,7 +382,7 @@ function drawDomains() {
     <td class="c-table__primary">${esc(d.hostname)}</td>
     <td>${statusPill("domain", d.verified)}</td>
     <td>${statusPill("route", routeState(d))}${d.app_id ? `<div class="c-table__secondary">${esc(appName(d.app_id))} → <span class="u-mono">${esc(d.service)}:${esc(d.port)}</span></div>` : ""}</td>
-    <td>${statusPill("tls", d.tls_status)}</td></tr>`).join("");
+    <td>${d.tls_mode === "passthrough" ? statusPill("tls", "passthrough") : statusPill("tls", d.tls_status)}</td></tr>`).join("");
 }
 document.addEventListener("click", (e) => {
   if (!e.target.closest("#domains")) return;
@@ -371,7 +417,9 @@ function openDomain(hostname) {
         ${d?.verified ? `<div class="l-grid">
             <label class="c-field"><span class="c-field__label">App</span><select class="c-select" id="dm-app">${appOpts}</select></label>
             <label class="c-field"><span class="c-field__label">Service</span><select class="c-select" id="dm-svc"></select></label>
-            <label class="c-field"><span class="c-field__label">容器 port</span><input class="c-input" id="dm-port" inputmode="numeric" placeholder="80" value="${esc(d.port ?? "")}"></label></div>
+            <label class="c-field"><span class="c-field__label">容器 port（HTTP）</span><input class="c-input" id="dm-port" inputmode="numeric" placeholder="80" value="${esc(d.port ?? "")}"></label></div>
+          <label class="c-check"><input type="checkbox" id="dm-pass" ${d.tls_mode === "passthrough" ? "checked" : ""}><span>TLS 直通：443 的連線原封不動轉給 App，由 App 自己處理 HTTPS 與憑證</span></label>
+          <label class="c-field ${d.tls_mode === "passthrough" ? "" : "u-hidden"}" id="dm-tls-field"><span class="c-field__label">App 的 TLS port</span><input class="c-input" id="dm-tls" inputmode="numeric" placeholder="443" value="${esc(d.tls_port ?? "")}"><span class="c-field__hint">HTTP port 仍會轉發，供 App 申請憑證（HTTP-01）。</span></label>
           <span class="c-field__error" id="dm-berr" role="alert"></span><div><button class="c-btn c-btn--primary" id="dm-bind">${icon("link")}<span>套用</span></button></div>` : ""}</div></li></ol>`;
     dr.footer.classList.toggle("u-hidden", !d);
     dr.footer.innerHTML = d ? `<button class="c-btn c-btn--danger" id="dm-del">${icon("trash")}<span>刪除網域</span></button><span class="l-spacer"></span><button class="c-btn" data-close>完成</button>` : "";
@@ -405,12 +453,13 @@ function openDomain(hostname) {
         catch (err) { svc.innerHTML = ""; showMsg($("#dm-berr", dr.el), err); }
       };
       appSel.addEventListener("change", fillSvc);
+      $("#dm-pass", dr.el).addEventListener("change", (e) => $("#dm-tls-field", dr.el).classList.toggle("u-hidden", !e.target.checked));
       fillSvc();
       $("#dm-bind", dr.el).addEventListener("click", async (e) => {
         const btn = e.currentTarget, app_id = appSel.value || null;
         showMsg($("#dm-berr", dr.el), null);
         try {
-          d = await busy(btn, api(`/api/domains/${encodeURIComponent(d.hostname)}/bind`, { method: "PUT", body: { app_id, service: app_id ? $("#dm-svc", dr.el).value : null, port: app_id ? Number($("#dm-port", dr.el).value) || null : null } }));
+          d = await busy(btn, api(`/api/domains/${encodeURIComponent(d.hostname)}/bind`, { method: "PUT", body: { app_id, service: app_id ? $("#dm-svc", dr.el).value : null, port: app_id ? Number($("#dm-port", dr.el).value) || null : null, tls_mode: $("#dm-pass", dr.el).checked ? "passthrough" : "none", tls_port: Number($("#dm-tls", dr.el).value) || null } }));
           toast(app_id ? `${d.hostname} 已轉發到 ${appName(app_id)}` : `${d.hostname} 已解除綁定`);
           draw();
         } catch (err) { showMsg($("#dm-berr", dr.el), err); }

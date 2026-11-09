@@ -38,12 +38,11 @@ async fn handle(
     routes: RouteTable,
     client: Client<HttpConnector, Incoming>,
 ) -> Result<Response<Body>, hyper::Error> {
-    // ACME HTTP-01
+    // ACME HTTP-01：Caloud 自己的 token 優先；不認得的 token 依 Host 轉給 App（App 自行申請憑證，ADR 0009）
     if let Some(token) = req.uri().path().strip_prefix("/.well-known/acme-challenge/") {
-        return Ok(match routes.acme_challenge(token) {
-            Some(k) => text(StatusCode::OK, k),
-            None => text(StatusCode::NOT_FOUND, "unknown challenge".into()),
-        });
+        if let Some(k) = routes.acme_challenge(token) {
+            return Ok(text(StatusCode::OK, k));
+        }
     }
 
     let host = req

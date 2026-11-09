@@ -45,8 +45,18 @@ pub async fn upsert_login(db: &Db, account: &str, handle: Option<&str>, default_
 
 /// 目前所有可用路由（已驗證網域 + 綁定到 running 的 App）
 pub async fn load_routes(db: &Db) -> anyhow::Result<Vec<Route>> {
-    let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
-        "SELECT d.hostname, d.app_id, d.service, d.port FROM domains d
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        hostname: String,
+        app_id: String,
+        service: String,
+        port: i64,
+        tls_mode: String,
+        tls_port: Option<i64>,
+        target_host: Option<String>,
+    }
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT d.hostname, d.app_id, d.service, d.port, d.tls_mode, d.tls_port, d.target_host FROM domains d
          JOIN apps a ON a.id = d.app_id
          WHERE d.verified = 1 AND a.status = 'running' AND d.service IS NOT NULL AND d.port IS NOT NULL",
     )
@@ -54,9 +64,16 @@ pub async fn load_routes(db: &Db) -> anyhow::Result<Vec<Route>> {
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(hostname, app_id, service, port)| Route {
-            hostname,
-            upstream: format!("http://{}:{}", crate::model_upstream_host(&app_id, &service), port),
+        .map(|r| {
+            // FR-DOM-10：host 網路 service 以主機轉發；其餘使用 edge 網路 alias
+            let host = r.target_host.unwrap_or_else(|| crate::model_upstream_host(&r.app_id, &r.service));
+            Route {
+                upstream: format!("http://{host}:{}", r.port),
+                passthrough: (r.tls_mode == "passthrough")
+                    .then(|| r.tls_port.map(|p| format!("{host}:{p}")))
+                    .flatten(),
+                hostname: r.hostname,
+            }
         })
         .collect())
 }

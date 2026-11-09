@@ -134,14 +134,33 @@ impl Env {
             std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
+        // 替身 git：checkout 時把 gitrepo/ 的內容複製到工作目錄；網址含 missing 時失敗
+        let git = dir.join("fake-git.sh");
+        std::fs::write(
+            &git,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> '{log}'\nsrc=$2\ncase \"$*\" in *missing*) echo 'repository not found' >&2; exit 128;; *' checkout '*) cp -R '{repo}/.' \"$src\";; esac\nexit 0\n",
+                log = dir.join("git.log").display(),
+                repo = dir.join("gitrepo").display()
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("gitrepo")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let origin = format!("http://{addr}");
         let cfg = Config {
             public_origin: origin.clone(),
             api_listen: addr.to_string(),
-            http_listen: "127.0.0.1:0".into(),
-            https_listen: "127.0.0.1:0".into(),
+            // 測試只啟動 API router；代理埠用正式值，讓保留連接埠（FR-APP-16）與正式環境一致
+            http_listen: "0.0.0.0:80".into(),
+            https_listen: "0.0.0.0:443".into(),
             cafeca_wallet: mock_base.clone(),
             cafeca_rpc: None,
             data_dir: dir.join("data"),
@@ -151,12 +170,18 @@ impl Env {
             default_role: "pending".into(),
             docker_bin: docker.display().to_string(),
             doh_url: format!("{mock_base}/dns-query"),
+            git_bin: git.display().to_string(),
         };
         let db = caloud_core::db::connect(&cfg.data_dir).await.unwrap();
         let routes = RouteTable::default();
         let state = AppState {
             verifier: Arc::new(CafecaVerifier::new(cfg.cafeca_wallet.clone(), None)),
-            runner: ComposeRunner::new(cfg.data_dir.join("apps"), cfg.edge_network.clone(), cfg.docker_bin.clone()),
+            runner: ComposeRunner::new(
+                cfg.data_dir.join("apps"),
+                cfg.edge_network.clone(),
+                cfg.docker_bin.clone(),
+                cfg.git_bin.clone(),
+            ),
             routes: routes.clone(),
             db: db.clone(),
             http: reqwest::Client::new(),
@@ -491,7 +516,7 @@ async fn app_lifecycle_runs_compose_with_isolated_project() {
 
     let project = caloud_core::project_name(&id);
     let log = env.docker_log();
-    assert!(log.contains(&format!("compose -p {project} -f")), "{log}");
+    assert!(log.contains(&format!("compose -p {project} --project-directory")), "{log}");
     assert!(log.contains("up -d --remove-orphans --wait"), "{log}");
 
     // override 讓每個 service 加入 edge 網路並設 alias（FR-APP-07）
@@ -958,4 +983,240 @@ async fn mcp_tools_manage_apps_and_domains() {
         }
     }
     assert!(rows.iter().any(|(a, _)| a == "token_create"));
+}
+
+// ───────────────────────── Git 來源、特權 App、TLS 直通（ADR 0009） ─────────────────────────
+
+const LIVEKIT_COMPOSE: &str = "services:
+  init:
+    build: .
+    env_file: .env
+    restart: 'no'
+  caddy:
+    image: caddy:2
+    network_mode: host
+  relay:
+    build: {context: ., dockerfile: Dockerfile}
+    ports: ['80:80', '443:443', '7842:7842/udp']
+";
+
+// FR-APP-13～16：Git 來源只限 Admin；特權政策；.env 只回傳名稱；指定 service；保留連接埠移除
+#[tokio::test]
+async fn git_privileged_app_builds_from_repo() {
+    let env = Env::new().await;
+    let (admin, member) = admin_and_member(&env).await;
+    std::fs::create_dir_all(env.dir.join("gitrepo/deploy/livekit")).unwrap();
+    std::fs::write(env.dir.join("gitrepo/deploy/livekit/docker-compose.yml"), LIVEKIT_COMPOSE).unwrap();
+    let body = json!({
+        "source": "git", "git_url": "https://github.com/CAFECA-IO/SwarmStorage", "git_ref": "main", "git_path": "deploy/livekit",
+        "env": "LIVEKIT_DOMAIN=livekit.cafeca.io\n# 註解\nACME_EMAIL=ops@example.com\n", "services": ["caddy", "relay"], "privileged": true,
+    });
+
+    // member 不可使用 Git 來源或特權
+    assert_eq!(
+        env.call("POST", "/api/apps", &member, Some(body.clone())).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (st, _) = env
+        .call(
+            "POST",
+            "/api/apps",
+            &member,
+            Some(json!({ "compose_yaml": "services: {a: {image: x, network_mode: host}}", "privileged": true })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // 非特權的 Git App 不可 build；不合法的網址被拒絕
+    let mut plain = body.clone();
+    plain["privileged"] = json!(false);
+    let (st, err) = env.call("POST", "/api/apps", &admin, Some(plain)).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{err}");
+    for url in ["http://github.com/x", "https://user:pw@github.com/x", "file:///etc"] {
+        let mut b = body.clone();
+        b["git_url"] = json!(url);
+        assert_eq!(
+            env.call("POST", "/api/apps", &admin, Some(b)).await.0,
+            StatusCode::BAD_REQUEST,
+            "{url}"
+        );
+    }
+    let mut b = body.clone();
+    b["git_url"] = json!("https://github.com/CAFECA-IO/missing");
+    let (st, err) = env.call("POST", "/api/apps", &admin, Some(b)).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert!(err["error"].as_str().unwrap().contains("無法取得"), "{err}");
+
+    let (st, app) = env.call("POST", "/api/apps", &admin, Some(body)).await;
+    assert_eq!(st, StatusCode::CREATED, "{app}");
+    assert_eq!(app["env_keys"], json!(["LIVEKIT_DOMAIN", "ACME_EMAIL"]));
+    assert!(!app.to_string().contains("ops@example.com"), "API 不可回傳環境變數值");
+    assert_eq!(app["services"], json!(["caddy", "relay"]));
+    assert_eq!((app["source"].as_str(), app["privileged"].as_bool()), (Some("git"), Some(true)));
+    let id = app["id"].as_str().unwrap().to_string();
+    env.wait_app_status(&admin, &id, "running").await;
+
+    let proj = env.dir.join("data/apps").join(&id).join("src/deploy/livekit");
+    assert!(std::fs::read_to_string(proj.join(".env"))
+        .unwrap()
+        .contains("ACME_EMAIL=ops@example.com"));
+    let log = env.docker_log();
+    assert!(log.contains(&format!("--project-directory {}", proj.display())), "{log}");
+    assert!(
+        log.contains("--build") && log.contains("--wait-timeout 300 --build caddy relay"),
+        "{log}"
+    );
+    let ov = std::fs::read_to_string(env.dir.join("data/apps").join(&id).join("caloud.override.yml")).unwrap();
+    assert!(
+        ov.contains("!override") && ov.contains("7842:7842/udp") && !ov.contains("443:443"),
+        "{ov}"
+    );
+    assert!(!ov.contains("mem_limit"), "特權 App 不設資源上限");
+
+    // 更新只換 env，省略的欄位維持原值
+    let (st, app) = env
+        .call(
+            "PUT",
+            &format!("/api/apps/{id}"),
+            &admin,
+            Some(json!({ "env": "TURN_DOMAIN=turn.cafeca.io", "deploy": false })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{app}");
+    assert_eq!(app["env_keys"], json!(["TURN_DOMAIN"]));
+    assert_eq!(app["services"], json!(["caddy", "relay"]));
+    assert_eq!(app["git_path"], "deploy/livekit");
+}
+
+// FR-DOM-09、FR-DOM-10：TLS 直通與 host 網路 service 的轉發目標
+#[tokio::test]
+async fn passthrough_domain_routes_by_sni_and_host_gateway() {
+    let env = Env::new().await;
+    let (admin, _) = env.login(acct(0xa1)).await;
+    std::fs::create_dir_all(env.dir.join("gitrepo")).unwrap();
+    std::fs::write(env.dir.join("gitrepo/docker-compose.yml"), LIVEKIT_COMPOSE).unwrap();
+    let (_, app) = env
+        .call(
+            "POST",
+            "/api/apps",
+            &admin,
+            Some(json!({ "git_url": "https://github.com/CAFECA-IO/x", "privileged": true })),
+        )
+        .await;
+    let id = app["id"].as_str().unwrap().to_string();
+    env.wait_app_status(&admin, &id, "running").await;
+
+    for host in ["livekit.example.com", "relay.example.com"] {
+        let (_, d) = env.call("POST", "/api/domains", &admin, Some(json!({ "hostname": host }))).await;
+        env.mock
+            .txt
+            .lock()
+            .unwrap()
+            .insert(format!("_caloud-challenge.{host}"), d["verify_token"].as_str().unwrap().into());
+        env.call("POST", &format!("/api/domains/{host}/verify"), &admin, None).await;
+    }
+    // 直通需要 tls_port
+    let (st, _) = env
+        .call(
+            "PUT",
+            "/api/domains/livekit.example.com/bind",
+            &admin,
+            Some(json!({ "app_id": id, "service": "caddy", "port": 8088, "tls_mode": "passthrough" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, d) = env
+        .call(
+            "PUT",
+            "/api/domains/livekit.example.com/bind",
+            &admin,
+            Some(json!({ "app_id": id, "service": "caddy", "port": 8088, "tls_mode": "passthrough", "tls_port": 7443 })),
+        )
+        .await;
+    assert_eq!(
+        (st, d["tls_mode"].as_str(), d["tls_port"].as_i64()),
+        (StatusCode::OK, Some("passthrough"), Some(7443))
+    );
+    // host 網路 service → 主機閘道
+    assert_eq!(
+        env.routes.lookup_passthrough("livekit.example.com").as_deref(),
+        Some("host.docker.internal:7443")
+    );
+    assert_eq!(
+        env.routes.lookup("livekit.example.com").as_deref(),
+        Some("http://host.docker.internal:8088")
+    );
+
+    // 一般 service → edge 網路 alias
+    env.call(
+        "PUT",
+        "/api/domains/relay.example.com/bind",
+        &admin,
+        Some(json!({ "app_id": id, "service": "relay", "port": 80, "tls_mode": "passthrough", "tls_port": 443 })),
+    )
+    .await;
+    let alias = caloud_core::model_upstream_host(&id, "relay");
+    assert_eq!(env.routes.lookup_passthrough("relay.example.com"), Some(format!("{alias}:443")));
+
+    // 改回一般轉發 → 直通移除
+    env.call(
+        "PUT",
+        "/api/domains/relay.example.com/bind",
+        &admin,
+        Some(json!({ "app_id": id, "service": "relay", "port": 80 })),
+    )
+    .await;
+    assert!(env.routes.lookup_passthrough("relay.example.com").is_none());
+    assert_eq!(env.routes.lookup("relay.example.com"), Some(format!("http://{alias}:80")));
+}
+
+// FR-MCP-04：create_git_app 只給 Admin，bind_domain 支援 TLS 直通
+#[tokio::test]
+async fn mcp_git_app_and_passthrough_tools() {
+    let env = Env::new().await;
+    let (admin, member) = admin_and_member(&env).await;
+    std::fs::write(env.dir.join("gitrepo/docker-compose.yml"), LIVEKIT_COMPOSE).unwrap();
+    let admin_token = env.create_token(&admin, "admin").await;
+    let member_token = env.create_token(&member, "member").await;
+    let names = |v: Value| {
+        v["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert!(!names(env.rpc(&member_token, "tools/list", json!({})).await).contains(&"create_git_app".to_string()));
+    let r = env
+        .tool(
+            &admin_token,
+            "create_git_app",
+            json!({ "git_url": "https://github.com/CAFECA-IO/x", "privileged": true, "services": ["caddy"], "env": "A=1" }),
+        )
+        .await;
+    assert_eq!(r["isError"], false, "{r}");
+    assert_eq!(r["structuredContent"]["env_keys"], json!(["A"]));
+    let id = r["structuredContent"]["id"].as_str().unwrap().to_string();
+    env.wait_app_status(&admin, &id, "running").await;
+    let (_, d) = env
+        .call("POST", "/api/domains", &admin, Some(json!({ "hostname": "lk.example.com" })))
+        .await;
+    env.mock.txt.lock().unwrap().insert(
+        "_caloud-challenge.lk.example.com".into(),
+        d["verify_token"].as_str().unwrap().into(),
+    );
+    env.tool(&admin_token, "verify_domain", json!({ "hostname": "lk.example.com" }))
+        .await;
+    let r = env
+        .tool(
+            &admin_token,
+            "bind_domain",
+            json!({ "hostname": "lk.example.com", "app_id": id, "service": "caddy", "port": 8088, "tls_passthrough_port": 7443 }),
+        )
+        .await;
+    assert_eq!(r["structuredContent"]["tls_mode"], "passthrough", "{r}");
+    assert_eq!(
+        env.routes.lookup_passthrough("lk.example.com").as_deref(),
+        Some("host.docker.internal:7443")
+    );
 }

@@ -45,7 +45,7 @@ const UI = (() => {
     app: { running: ["運作中", "success"], deploying: ["部署中", "warning", true], failed: ["失敗", "danger"], stopped: ["已停止", ""] },
     domain: { true: ["已驗證", "success"], false: ["待驗證", "warning"] },
     route: { live: ["轉發中", "success"], idle: ["App 未運作", "warning"], none: ["未綁定", ""] },
-    tls: { issued: ["已簽發", "success"], pending: ["申請中", "warning"], failed: ["失敗", "danger"], none: ["未啟用", ""] },
+    tls: { issued: ["已簽發", "success"], pending: ["申請中", "warning"], failed: ["失敗", "danger"], none: ["未啟用", ""], passthrough: ["TLS 直通", "accent"] },
     role: { super_admin: ["Super Admin", "accent"], admin: ["Admin", "accent"], member: ["Member", ""], pending: ["待核准", "warning"], disabled: ["已停用", "danger"] },
   };
   /** 產生 Badge（StatusPill）HTML；kind 為 app／domain／route／tls／role */

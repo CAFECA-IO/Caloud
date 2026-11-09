@@ -118,6 +118,9 @@ p { margin: 0; }
 .c-input::placeholder, .c-textarea::placeholder { color: var(--color-text-subtle); }
 .c-select { padding-right: var(--space-6); }
 .c-textarea { min-height: 240px; padding: var(--space-3); font-family: var(--font-mono); font-size: var(--text-sm); line-height: var(--leading); border-radius: var(--radius-card); resize: vertical; }
+.c-textarea--sm { min-height: 96px; }
+.c-check { display: inline-flex; align-items: flex-start; gap: var(--space-2); cursor: pointer; font-size: var(--text-sm); }
+.c-check input { width: 16px; height: 16px; margin: 2px 0 0; flex: none; accent-color: var(--color-accent); }
 .c-search { position: relative; flex: 1 1 240px; max-width: 360px; }
 .c-search .c-icon { position: absolute; left: var(--space-3); top: 50%; transform: translateY(-50%); color: var(--color-text-subtle); pointer-events: none; }
 .c-search .c-input { padding-left: calc(var(--space-3) * 2 + 16px); }

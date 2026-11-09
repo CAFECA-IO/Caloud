@@ -60,6 +60,47 @@ pub struct App {
     pub last_error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// `compose`（上傳）或 `git`（FR-APP-13）
+    pub source: String,
+    pub git_url: Option<String>,
+    pub git_ref: Option<String>,
+    pub git_path: Option<String>,
+    pub compose_file: Option<String>,
+    /// JSON 陣列；None = 全部 service（FR-APP-15）
+    #[serde(serialize_with = "ser_json_list")]
+    pub services: Option<String>,
+    /// `.env` 內容；對外只輸出變數名稱（FR-APP-14）
+    #[serde(rename = "env_keys", serialize_with = "ser_env_keys")]
+    pub env: Option<String>,
+    pub privileged: bool,
+}
+
+impl App {
+    pub fn service_list(&self) -> Option<Vec<String>> {
+        self.services.as_deref().and_then(|s| serde_json::from_str(s).ok())
+    }
+}
+
+/// `.env` 內容中的變數名稱（忽略註解與空行）
+pub fn env_keys(env: &str) -> Vec<String> {
+    env.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| {
+            l.split_once('=')
+                .map(|(k, _)| k.trim().trim_start_matches("export ").trim().to_string())
+        })
+        .filter(|k| !k.is_empty())
+        .collect()
+}
+
+fn ser_env_keys<S: serde::Serializer>(env: &Option<String>, s: S) -> Result<S::Ok, S::Error> {
+    env_keys(env.as_deref().unwrap_or_default()).serialize(s)
+}
+
+fn ser_json_list<S: serde::Serializer>(v: &Option<String>, s: S) -> Result<S::Ok, S::Error> {
+    let list: Option<Vec<String>> = v.as_deref().and_then(|x| serde_json::from_str(x).ok());
+    list.serialize(s)
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -73,14 +114,25 @@ pub struct Domain {
     pub port: Option<i64>,
     pub tls_status: String,
     pub created_at: i64,
+    /// `none` 或 `passthrough`（FR-DOM-09）
+    pub tls_mode: String,
+    pub tls_port: Option<i64>,
+    #[serde(skip_serializing)]
+    pub target_host: Option<String>,
 }
 
 /// 反向代理使用的一條路由：hostname → upstream
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Route {
     pub hostname: String,
-    pub upstream: String, // 例：http://caloud-<app>-web-1:3000
+    /// HTTP 轉發目標，例：http://caloud-<app>-web:3000
+    pub upstream: String,
+    /// TLS 直通目標（FR-DOM-09），例：caloud-<app>-relay:443
+    pub passthrough: Option<String>,
 }
+
+/// host 網路 service 的轉發目標（FR-DOM-10）
+pub const HOST_GATEWAY: &str = "host.docker.internal";
 
 /// 個人 API 權杖（不含雜湊）
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]

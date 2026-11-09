@@ -30,9 +30,19 @@ pub struct Config {
     pub docker_bin: String,
     /// 網域 TXT 驗證用的 DNS-over-HTTPS JSON 端點
     pub doh_url: String,
+    /// git CLI 路徑（Git 來源 App，ADR 0009）
+    pub git_bin: String,
 }
 
 impl Config {
+    /// Caloud 自己佔用的主機連接埠（HTTP、HTTPS、API），特權 App 的 `ports` 會移除這些（FR-APP-16）
+    pub fn reserved_ports(&self) -> Vec<u16> {
+        [&self.http_listen, &self.https_listen, &self.api_listen]
+            .iter()
+            .filter_map(|a| a.rsplit(':').next().and_then(|p| p.parse().ok()))
+            .collect()
+    }
+
     pub fn from_env() -> anyhow::Result<Self> {
         let get = |k: &str, d: &str| std::env::var(format!("CALOUD_{k}")).unwrap_or_else(|_| d.to_string());
         let opt = |k: &str| std::env::var(format!("CALOUD_{k}")).ok().filter(|s| !s.is_empty());
@@ -50,6 +60,7 @@ impl Config {
             default_role: get("DEFAULT_ROLE", "pending"),
             docker_bin: get("DOCKER_BIN", "docker"),
             doh_url: get("DOH_URL", "https://cloudflare-dns.com/dns-query"),
+            git_bin: get("GIT_BIN", "git"),
         })
     }
 }

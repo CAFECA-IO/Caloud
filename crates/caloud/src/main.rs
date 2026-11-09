@@ -19,7 +19,12 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(origin = %cfg.public_origin, wallet = %cfg.cafeca_wallet, "starting caloud");
 
     let db = caloud_core::db::connect(&cfg.data_dir).await?;
-    let runner = ComposeRunner::new(cfg.data_dir.join("apps"), cfg.edge_network.clone(), cfg.docker_bin.clone());
+    let runner = ComposeRunner::new(
+        cfg.data_dir.join("apps"),
+        cfg.edge_network.clone(),
+        cfg.docker_bin.clone(),
+        cfg.git_bin.clone(),
+    );
     if let Err(e) = runner.ensure_edge_network().await {
         tracing::error!(error = %e, "docker unavailable; deployments will fail until it is reachable");
     }
@@ -39,11 +44,13 @@ async fn main() -> anyhow::Result<()> {
     let api = tokio::net::TcpListener::bind(&cfg.api_listen).await?;
     tracing::info!(addr = %cfg.api_listen, "api listening");
     let api = axum::serve(api, caloud_api::router(state));
-    let proxy = caloud_proxy::serve_http(cfg.http_listen.parse()?, routes);
+    let proxy = caloud_proxy::serve_http(cfg.http_listen.parse()?, routes.clone());
+    let tls = caloud_proxy::serve_tls_passthrough(cfg.https_listen.parse()?, routes);
 
     tokio::select! {
         r = async { api.await } => r?,
         r = proxy => r?,
+        r = tls => r?,
         _ = tokio::signal::ctrl_c() => tracing::info!("shutting down"),
     }
     Ok(())

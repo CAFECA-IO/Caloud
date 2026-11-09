@@ -83,7 +83,7 @@ if grep -nE '<style|[[:space:]]style="' "$WEB" >/dev/null; then err "$WEB 不得
 
 # ---------------------------------------------------------------- 6
 section "compose 政策規則皆列於 $SEC"
-for list in FORBIDDEN_KEYS NAMESPACE_KEYS; do
+for list in FORBIDDEN_KEYS NAMESPACE_KEYS PRIVILEGED_ALLOWED; do
   keys=$(awk -v l="$list" '$0 ~ "const " l {f=1} f {print} f && /\];/ {exit}' "$POLICY" | grep -oE '"[a-z_]+"' | tr -d '"')
   [ -z "$keys" ] && err "找不到 $list"
   for k in $keys; do

@@ -7,20 +7,31 @@ use std::sync::Arc;
 #[derive(Default, Clone)]
 pub struct RouteTable {
     inner: Arc<ArcSwap<HashMap<String, String>>>,
+    /// TLS 直通：hostname → host:port（FR-DOM-09）
+    passthrough: Arc<ArcSwap<HashMap<String, String>>>,
     /// ACME HTTP-01：token → key authorization
     acme: Arc<ArcSwap<HashMap<String, String>>>,
 }
 
 impl RouteTable {
     pub fn lookup(&self, host: &str) -> Option<String> {
-        let host = host.split(':').next().unwrap_or(host).trim_end_matches('.').to_ascii_lowercase();
-        self.inner.load().get(&host).cloned()
+        self.inner.load().get(&normalize(host)).cloned()
+    }
+
+    /// FR-DOM-09：SNI 對應的直通目標
+    pub fn lookup_passthrough(&self, sni: &str) -> Option<String> {
+        self.passthrough.load().get(&normalize(sni)).cloned()
     }
 
     pub fn replace(&self, routes: Vec<Route>) {
+        let pass: HashMap<_, _> = routes
+            .iter()
+            .filter_map(|r| r.passthrough.clone().map(|p| (r.hostname.clone(), p)))
+            .collect();
         let map: HashMap<_, _> = routes.into_iter().map(|r| (r.hostname, r.upstream)).collect();
-        tracing::info!(count = map.len(), "route table reloaded");
+        tracing::info!(count = map.len(), passthrough = pass.len(), "route table reloaded");
         self.inner.store(Arc::new(map));
+        self.passthrough.store(Arc::new(pass));
     }
 
     /// 從資料庫重新載入（網域、App 狀態變動後呼叫）
@@ -44,6 +55,10 @@ impl RouteTable {
     }
 }
 
+fn normalize(host: &str) -> String {
+    host.split(':').next().unwrap_or(host).trim_end_matches('.').to_ascii_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,9 +70,11 @@ mod tests {
         t.replace(vec![Route {
             hostname: "app.example.com".into(),
             upstream: "http://x:80".into(),
+            passthrough: Some("relay:443".into()),
         }]);
         assert_eq!(t.lookup("App.Example.com:443").as_deref(), Some("http://x:80"));
         assert_eq!(t.lookup("app.example.com.").as_deref(), Some("http://x:80"));
         assert!(t.lookup("other.example.com").is_none());
+        assert_eq!(t.lookup_passthrough("APP.example.com").as_deref(), Some("relay:443"));
     }
 }
