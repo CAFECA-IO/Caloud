@@ -79,6 +79,9 @@
 | --- | --- |
 | 必須有 `image` | 每個 service 都要指定映像 |
 | 只允許具名 volume 與 tmpfs | 短語法 `來源:目標` 中來源以 `/`、`.`、`~` 開頭視為 bind mount 而拒絕；長語法 `type` 須為 `volume` 或 `tmpfs` |
+| 先展開 YAML 合併鍵 | 檢查前先套用 `<<: *anchor`，避免禁用鍵藏在 anchor（如 `x-*` 擴充欄位）中；寫出的 compose 也是展開後的結果 |
+| 不可使用 YAML tag | `!reset`、`!override` 等 tag 會改變值的型別而繞過檢查；Caloud 自己的 override 檔不受此限 |
+| 檢查欄位不可含 `$` | volume 來源與 `type`、namespace 鍵的值、`build` 的 `context`／`dockerfile`、`env_file` 路徑不可使用 `${VAR}` 變數替換，避免經 App env 或主機環境變數改寫成主機路徑或 `host` |
 | 頂層 `volumes` | 不可有 `driver_opts`（可綁主機路徑）、`external` |
 | 頂層 `networks` | 不可有 `external` |
 | 頂層 `secrets`／`configs` | 不可使用 `file` |
