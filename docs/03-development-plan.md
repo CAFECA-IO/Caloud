@@ -43,7 +43,7 @@
 | M1-25 | 「API 權杖」頁與 MCP 用戶端設定範例 | FR-MCP-08 | ✅ |
 | M1-13 | 文件體系、`check-docs.sh`、CI | NFR-QA-01 | ✅ |
 | M1-14 | API 整合測試（模擬 RPC、模擬 docker） | NFR-QA-01 | ✅ |
-| M1-15 | 測試主機端到端驗收（真實 CAFECA 錢包 + Docker） | M1 出場條件 | ⬜ |
+| M1-15 | 測試主機端到端驗收（真實 CAFECA 錢包 + Docker）：2026-11-09 於 57.182.212.18 完成 Docker 部署、MCP 部署／轉發流程與真實 CAFECA 登入（第一位成為 Super Admin）；待以真實網域完成 DNS 驗證 | M1 出場條件 | 🚧 |
 
 ### M2 可上線
 
