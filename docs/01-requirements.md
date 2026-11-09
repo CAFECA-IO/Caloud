@@ -70,6 +70,10 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-APP-10 | log 即時串流（SSE） | P1 | M3 |
 | FR-APP-11 | App 環境變數與 secrets 管理，加密儲存 | P1 | M3 |
 | FR-APP-12 | 每位使用者的 App 數量與資源配額 | P2 | M3 |
+| FR-APP-13 | Admin 以上可從 **Git 儲存庫**建立 App：指定公開 HTTPS 儲存庫網址、分支或標籤、compose 所在目錄與檔名；部署時 Caloud 取得指定版本並以該目錄為專案目錄執行（可使用 `build`） | P0 | M2 |
+| FR-APP-14 | App 可設定環境變數（`.env` 內容），部署時寫入專案目錄供 compose 變數替換與 `env_file` 使用；API 回應不回傳內容，只回傳變數名稱 | P0 | M2 |
+| FR-APP-15 | App 可指定只啟動 compose 中的部分 service；未指定時啟動全部 | P0 | M2 |
+| FR-APP-16 | Admin 以上可把 App 設為**特權 App**，套用[特權政策](07-security.md#35-特權-app-政策)：允許 `build`、`network_mode: host`、發布主機連接埠（含 UDP）、`env_file`、`tmpfs`；Caloud 保留的主機連接埠（80、443、`CALOUD_API_LISTEN` 的埠）會自動從 `ports` 移除並改由網域轉發 | P0 | M2 |
 
 ### 2.4 網域 DOM
 
@@ -83,6 +87,8 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-DOM-06 | 支援 WebSocket／HTTP Upgrade 轉發 | P0 | M2 |
 | FR-DOM-07 | 未綁定或 App 未運作的網域回應 404 頁面；upstream 無回應回 502 | P0 | M1 |
 | FR-DOM-08 | 同一 App 可綁多個網域；支援萬用字元網域（DNS-01） | P2 | M3 |
+| FR-DOM-09 | 網域可設為 **TLS 直通**：Caloud 在 443 依 TLS ClientHello 的 SNI 判斷網域，把整條 TCP 連線原封不動轉給 App 的指定 port，由 App 自己處理 TLS 與憑證（含 TLS-ALPN-01）；同一網域的 HTTP（80）仍依綁定的 port 轉發，供 App 的 HTTP-01 驗證使用 | P0 | M2 |
+| FR-DOM-10 | 綁定到 `network_mode: host` 的 service 時，Caloud 改以主機（`host.docker.internal`）的對應 port 轉發 | P0 | M2 |
 
 ### 2.5 MCP 與 API 權杖 MCP
 

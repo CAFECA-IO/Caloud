@@ -52,19 +52,21 @@
 ### App
 
 ```json
-{ "id": "uuid", "name": "blog", "owner": "0x…", "status": "running", "last_error": null, "created_at": 0, "updated_at": 0 }
+{ "id": "uuid", "name": "blog", "owner": "0x…", "status": "running", "last_error": null, "created_at": 0, "updated_at": 0,
+  "source": "git", "git_url": "https://github.com/CAFECA-IO/SwarmStorage", "git_ref": "main", "git_path": "deploy/livekit",
+  "compose_file": "docker-compose.yml", "services": ["caddy", "livekit"], "privileged": true, "env_keys": ["LIVEKIT_DOMAIN", "TURN_DOMAIN"] }
 ```
 
-`status`：`stopped` | `deploying` | `running` | `failed`。`compose_yaml` 不在列表回應中出現，只在單筆查詢回傳。
+`status`：`stopped` | `deploying` | `running` | `failed`。`source`：`compose`（上傳）| `git`（FR-APP-13）。`services` 為 null 時啟動全部（FR-APP-15）。`env_keys` 只列變數名稱，**不回傳值**（FR-APP-14）。`compose_yaml` 不在列表回應中出現，只在單筆查詢回傳；Git 來源 App 為最近一次取得的內容。
 
 ### Domain
 
 ```json
 { "hostname": "blog.example.com", "owner": "0x…", "verify_token": "caloud-…", "verified": true,
-  "app_id": "uuid", "service": "web", "port": 80, "tls_status": "none", "created_at": 0 }
+  "app_id": "uuid", "service": "web", "port": 80, "tls_status": "none", "tls_mode": "none", "tls_port": null, "created_at": 0 }
 ```
 
-`tls_status`：`none` | `pending` | `issued` | `failed`
+`tls_status`：`none` | `pending` | `issued` | `failed`。`tls_mode`：`none`（HTTP 轉發）| `passthrough`（443 TLS 直通到 `tls_port`，FR-DOM-09）。
 
 ### ContainerStatus
 
@@ -123,7 +125,7 @@
 
 **POST /api/domains/{hostname}/verify** → `200 Domain`；`400`「找不到 TXT 紀錄 _caloud-challenge.<host> = <token>」
 
-**PUT /api/domains/{hostname}/bind** `{ "app_id": "uuid" | null, "service": "web", "port": 80 }` → `200 Domain`。`app_id: null` 表示解除綁定。`400`：缺 service／port、service 不在 compose 中。
+**PUT /api/domains/{hostname}/bind** `{ "app_id": "uuid" | null, "service": "web", "port": 80, "tls_mode": "none" | "passthrough", "tls_port": 443 }` → `200 Domain`。`tls_mode: passthrough` 時 `tls_port` 必填（FR-DOM-09）。`app_id: null` 表示解除綁定。`400`：缺 service／port、service 不在 compose 中。
 
 ### 3.4 App
 
@@ -138,11 +140,25 @@
 | POST | `/api/apps/{id}/stop` | 擁有者 | FR-APP-05 |
 | GET | `/api/apps/{id}/logs` | 擁有者 | FR-APP-06 |
 
-**POST /api/apps** `{ "name": "blog" | null, "compose_yaml": "services: …", "deploy": true }` → `201 App`（`deploy` 預設 true，背景執行）；`400` compose 不合規（訊息指出 service 與欄位）
+**POST /api/apps** → `201 App`（`deploy` 預設 true，背景執行）；`400` compose 不合規（訊息指出 service 與欄位）、Git 取得失敗；`403` 非 Admin 使用 Git 來源或特權。
+
+| 欄位 | 型別 | 說明 |
+| --- | --- | --- |
+| `name` | string? | 省略時以第一個 service 命名 |
+| `source` | `"compose"` \| `"git"` | 預設 `compose` |
+| `compose_yaml` | string | `source: compose` 時必填 |
+| `git_url` | string | `source: git` 時必填；`https://` 公開儲存庫（admin+） |
+| `git_ref` | string? | 分支、標籤或 commit，預設 `main` |
+| `git_path` | string? | compose 所在目錄（相對儲存庫根目錄），預設根目錄 |
+| `compose_file` | string? | 預設 `docker-compose.yml` |
+| `services` | string[]? | 只啟動這些 service（FR-APP-15） |
+| `env` | string? | `.env` 內容（`KEY=value` 每行一個，FR-APP-14） |
+| `privileged` | bool? | 特權 App（admin+，FR-APP-16），預設 false |
+| `deploy` | bool? | 預設 true |
 
 **GET /api/apps/{id}** → `200 { "app": App, "compose_yaml": "…", "services": ["web","db"], "containers": [ContainerStatus] }`
 
-**PUT /api/apps/{id}** 請求同 POST → `200 App`
+**PUT /api/apps/{id}** 欄位同 POST，省略的欄位維持原值（`env` 省略表示不變）；Git 來源 App 會重新取得指定 ref → `200 App`
 
 **DELETE /api/apps/{id}?purge_volumes=false** → `204`
 
@@ -177,7 +193,8 @@
 | `POST /mcp` | MCP 端點（§5） |
 | `GET /assets/{*path}` | Design System 靜態檔，只提供 `caloud-api::assets::FILES` 白名單：`ds/tokens.css`、`ds/components.css`、`ds/theme.css`、`ds/ui.js`；其餘回 404 |
 | 代理 `:80` `/.well-known/acme-challenge/{token}` | ACME HTTP-01 回應（M2） |
-| 代理 `:80`／`:443` 其他路徑 | 依 Host 轉發至容器（FR-DOM-04、FR-DOM-07） |
+| 代理 `:80` 其他路徑 | 依 Host 轉發至容器（FR-DOM-04、FR-DOM-07） |
+| 代理 `:443` | 依 TLS SNI：直通網域轉發整條 TCP 連線到 `tls_port`（FR-DOM-09）；其他網域在 Caloud HTTPS 完成（M2-01）前關閉連線 |
 
 ## 5. MCP 介面
 
@@ -214,8 +231,9 @@
 | `whoami` | — | User | R | `GET /api/me` | member+ |
 | `list_apps` | `status?` | `{ apps: [App] }` | R | `GET /api/apps` | member+ |
 | `get_app` | `app_id` | 同 `GET /api/apps/{id}` | R | `GET /api/apps/{id}` | 擁有者 |
-| `create_app` | `compose_yaml`、`name?`、`deploy?`（預設 true） | App | — | `POST /api/apps` | member+ |
-| `update_app` | `app_id`、`compose_yaml`、`name?`、`deploy?` | App | — | `PUT /api/apps/{id}` | 擁有者 |
+| `create_app` | `compose_yaml`、`name?`、`env?`、`services?`、`deploy?`（預設 true） | App | — | `POST /api/apps` | member+ |
+| `create_git_app` | `git_url`、`git_ref?`、`git_path?`、`compose_file?`、`name?`、`env?`、`services?`、`privileged?`、`deploy?` | App | — | `POST /api/apps`（`source: git`） | admin+ |
+| `update_app` | `app_id`、`compose_yaml?`、`git_ref?`、`name?`、`env?`、`services?`、`deploy?` | App | — | `PUT /api/apps/{id}` | 擁有者（Git 來源需 admin+） |
 | `deploy_app` | `app_id` | `{ app_id, status: "deploying" }` | I | `POST /api/apps/{id}/deploy` | 擁有者 |
 | `stop_app` | `app_id` | `{ app_id, status: "stopped" }` | I | `POST /api/apps/{id}/stop` | 擁有者 |
 | `delete_app` | `app_id`、`confirm: true`、`purge_volumes?` | `{ deleted: app_id }` | D | `DELETE /api/apps/{id}` | 擁有者 |
@@ -223,7 +241,7 @@
 | `list_domains` | — | `{ domains: [Domain] }` | R | `GET /api/domains` | member+ |
 | `create_domain` | `hostname` | Domain ＋ `dns_records`（需設定的 A 與 TXT） | — | `POST /api/domains` | member+ |
 | `verify_domain` | `hostname` | Domain | I | `POST /api/domains/{hostname}/verify` | 擁有者 |
-| `bind_domain` | `hostname`、`app_id?`（null 解除）、`service?`、`port?` | Domain | I | `PUT /api/domains/{hostname}/bind` | 擁有者 |
+| `bind_domain` | `hostname`、`app_id?`（null 解除）、`service?`、`port?`、`tls_passthrough_port?` | Domain | I | `PUT /api/domains/{hostname}/bind` | 擁有者 |
 | `delete_domain` | `hostname`、`confirm: true` | `{ deleted: hostname }` | D | `DELETE /api/domains/{hostname}` | 擁有者 |
 | `list_users` | — | `{ users: [User] }` | R | `GET /api/users` | admin+ |
 | `set_user_role` | `account`、`role` | User | I | `PUT /api/users/{account}` | admin+ |

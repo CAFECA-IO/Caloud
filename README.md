@@ -235,6 +235,7 @@ volumes:
 | `ACME_EMAIL` / `ACME_STAGING` | — / `false` | Let's Encrypt（M2） |
 | `DOCKER_BIN` | `docker` | docker CLI 路徑 |
 | `DOH_URL` | `https://cloudflare-dns.com/dns-query` | 網域 TXT 驗證使用的 DNS-over-HTTPS 端點（JSON API） |
+| `GIT_BIN` | `git` | git CLI 路徑（Git 來源 App） |
 | `RUST_LOG` | `info,caloud=debug` | log 層級 |
 
 ## 疑難排解

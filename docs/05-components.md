@@ -46,7 +46,8 @@
 | SectionTitle / Label | `c-section-title`、`c-label` | 區塊標題／小標籤 | — |
 | Button | `c-btn`、`c-btn--primary`、`c-btn--ghost`、`c-btn--danger`、`c-btn--sm`、`c-btn--icon` | 操作 | — |
 | Field | `c-field`、`c-field__label`、`c-field__hint`、`c-field__error` | 標籤＋輸入＋說明＋錯誤 | — |
-| Input / Select / Textarea | `c-input`、`c-select`、`c-textarea` | 表單輸入；錯誤時設 `aria-invalid="true"` | — |
+| Input / Select / Textarea | `c-input`、`c-select`、`c-textarea`、`c-textarea--sm` | 表單輸入；錯誤時設 `aria-invalid="true"`；`--sm` 為較矮的多行輸入（環境變數） | — |
+| Checkbox | `c-check` | 勾選項目（`<label class="c-check"><input type="checkbox">說明</label>`） | FR-APP-16、FR-DOM-09 |
 | Search | `c-search` | 帶圖示的搜尋框 | FR-UI-08 |
 | Segmented | `c-segmented`、`c-segmented__item` | 篩選切換（`aria-pressed`） | FR-UI-08 |
 | Tabs | `c-tabs`、`c-tabs__item` | Drawer 內分頁（`role="tab"`） | FR-UI-10 |
@@ -209,6 +210,8 @@
 | `policy::validate(yaml)` | `caloud-orchestrator` | compose 檢查 | 任何使用 compose 內容前都要先呼叫 |
 | `ComposeRunner` | `caloud-orchestrator` | 部署／停止／刪除／狀態／log | 唯一可執行 `docker` 指令的地方；執行檔由 `Config.docker_bin` 指定 |
 | `RouteTable::reload(db)` | `caloud-proxy` | 重新載入路由 | 網域或 App 狀態改變後必呼叫（FR-DOM-04） |
+| `AppInput`、`BindInput` | `caloud-api::service` | App 建立／更新、網域綁定的輸入（REST 與 MCP 共用） | 新欄位只加在這裡，兩個入口同時生效 |
+| `GitSource`、`DeploySpec` | `caloud-orchestrator::compose` | Git 來源與一次部署的設定 | 部署前先 `fetch_git` 並依政策檢查 |
 | `service::*` | `caloud-api::service` | App、網域、使用者的業務操作（權限、驗證、稽核） | REST handler 與 MCP 工具**只能**經由服務層操作資源，不得直接寫 SQL 或呼叫 `ComposeRunner` |
 | `tokens::authenticate(state, bearer)` | `caloud-api::tokens` | API 權杖驗證，回傳 `CurrentUser` | `/mcp` 唯一的身分來源 |
 | `ApiError`、`ApiResult<T>` | `caloud-api::error` | 錯誤型別與 HTTP 對應 | handler 一律回傳 `ApiResult`；訊息依 [04 §5.5](04-design-language.md#55-錯誤訊息) |

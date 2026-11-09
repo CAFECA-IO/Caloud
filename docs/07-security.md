@@ -10,6 +10,8 @@
 | Super Admin 權限 | 部署後被他人搶先登入 | 部署後立即登入；`CALOUD_BOOTSTRAP_ACCOUNT` | FR-AUTH-03、FR-AUTH-08 |
 | 登入 | 重放簽章、仿冒網站轉用簽章 | nonce 一次性＋5 分鐘；驗證 `message.domain` 完全相同；EIP-712 綁定 chainId 與帳戶 | FR-AUTH-01、FR-AUTH-02 |
 | Session | 竊取 cookie、CSRF | HttpOnly、SameSite=Strict、Secure；DB 只存雜湊；M2 檢查 Origin | FR-AUTH-05 |
+| 特權 App | 經由 build、host 網路或主機連接埠影響主機 | 只限 Admin；仍禁止 privileged、主機路徑掛載等（§3.5）；建立與修改寫入稽核 | FR-APP-16 |
+| TLS 直通 | 直通網域的流量 Caloud 無法檢視 | 只轉發已驗證網域；SNI 不符或未綁定即關閉連線 | FR-DOM-09 |
 | 網域 | 綁定不屬於自己的網域並簽發憑證 | DNS TXT 驗證後才進路由與申請憑證；DoH 端點只能由維運者以 `CALOUD_DOH_URL` 設定 | FR-DOM-02、FR-DOM-05 |
 | 租戶隔離 | App 互相存取、搶占名稱 | 每 App 獨立 project 與 default 網路；禁止 `container_name`、`ports` | FR-APP-07 |
 | 管理介面 | XSS | 前端所有動態值經 `esc()`；不使用 `eval`／inline 事件屬性 | FR-UI-04 |
@@ -92,6 +94,39 @@
 | `pids_limit` | `512` |
 | `restart` | `unless-stopped` |
 
+### 3.5 特權 App 政策
+
+特權 App（FR-APP-16，[ADR 0009](adr/0009-system-apps.md)）只有 Admin 以上可以建立或啟用，用於部署需要主機網路的基礎服務（例如 LiveKit、iroh-relay）。特權 App 套用以下例外，**§3.1～3.3 其餘規則仍然適用**。
+
+#### 允許的鍵（PRIVILEGED_ALLOWED）
+
+| 鍵 | 條件 |
+| --- | --- |
+| `build` | 只能是 Git 來源 App；`context`、`dockerfile` 必須是相對路徑且不超出儲存庫根目錄；不可使用 `additional_contexts`、`secrets`、`ssh` |
+| `network_mode` | 只能是 `host` |
+| `ports` | 可發布 TCP／UDP；Caloud 保留的主機連接埠（80、443、API 埠）會被移除 |
+| `env_file` | 必須是相對路徑且不超出儲存庫根目錄 |
+| `tmpfs` | 允許 |
+
+#### 仍然禁止
+
+`privileged`、`cap_add`、`devices`、`device_cgroup_rules`、`security_opt`、`userns_mode`、`cgroup_parent`、`container_name`、`extends`、`sysctls`、`volumes_from`、`pid`／`ipc`／`uts`／`cgroup` namespace、主機路徑掛載（含 docker.sock）、頂層 `include` 與 external volume／network。
+
+#### Caloud 對特權 App 的 override 差異
+
+| 設定 | 一般 App | 特權 App |
+| --- | --- | --- |
+| `mem_limit`、`pids_limit` | 1g、512 | 不設（由 Admin 負責） |
+| `restart` | 未設定時補 `unless-stopped` | 同左（已設定的 `restart` 一律保留，例如一次性的初始化 service 用 `"no"`） |
+| networks | `default`＋edge | host 網路 service 不加入；其他同一般 App |
+| `ports` | 禁止 | 以 `!override` 移除保留連接埠後保留其餘 |
+
+#### Git 來源
+
+- 只接受 `https://` 網址，不接受帳密、`file://`、`ssh://`；ref 只能是分支、標籤或 commit（`[A-Za-z0-9._/-]`）。
+- 以淺層 clone 取得，部署前完整重新取得指定 ref，不保留上一次的工作目錄修改。
+- 建置在主機的 Docker 上執行；建置過程可存取網路，因此只開放給 Admin。
+
 ## 4. 機密處理
 
 | 項目 | 規則 |
@@ -101,6 +136,7 @@
 | nonce | 128 bit，`new_nonce()` 產生 |
 | log | 不記錄 token、cookie、完整簽章、compose 中的環境變數值 |
 | 設定檔 | `.env` 不進版控（`.gitignore`）；只提交 `.env.example` |
+| App 環境變數 | 存在資料庫（M3 改為加密，FR-APP-11）；API 與 MCP 只回傳變數名稱，不回傳值；稽核不記錄值 |
 
 ## 5. 安全相關變更的審查要求
 

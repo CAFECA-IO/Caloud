@@ -152,8 +152,8 @@ MCP 用戶端 ──POST /mcp (Bearer cld_…)──► mcp.rs ──► service
 | `users` | `account`（小寫 0x 地址） | 角色、代稱、登入時間 | FR-AUTH-03/04、FR-USER-* |
 | `sessions` | `token_hash` | session token 雜湊、到期時間 | FR-AUTH-05/06 |
 | `login_nonces` | `nonce` | 一次性登入 nonce | FR-AUTH-02 |
-| `apps` | `id`（UUID） | compose 原文、狀態、最後錯誤 | FR-APP-* |
-| `domains` | `hostname` | 驗證 token、是否已驗證、綁定的 app/service/port、TLS 狀態 | FR-DOM-* |
+| `apps` | `id`（UUID） | compose 原文、狀態、最後錯誤；來源（上傳／Git：網址、ref、目錄、檔名）、環境變數、指定 service、特權 | FR-APP-* |
+| `domains` | `hostname` | 驗證 token、是否已驗證、綁定的 app/service/port、轉發目標主機、TLS 模式（一般／直通）與直通 port、TLS 狀態 | FR-DOM-* |
 | `audit_log` | 自增 `id` | 操作者、動作、對象、細節、時間 | FR-AUD-01 |
 | `api_tokens` | `id`（UUID） | 擁有者、名稱、token 雜湊、前綴、建立／到期／最後使用時間 | FR-MCP-02、FR-MCP-03 |
 
@@ -213,3 +213,4 @@ Internet ──:80/:443──► [caloud 容器] ──docker.sock──► Dock
 | [0006](adr/0006-design-system-files.md) | Design System 拆為 `web/ds/` 多檔，經 `/assets/` 提供 |
 | [0007](adr/0007-ui-style-proposals.md) | 介面風格採用「企業儀表板」 |
 | [0008](adr/0008-mcp-interface.md) | MCP 介面採 Streamable HTTP 與個人 API 權杖 |
+| [0009](adr/0009-system-apps.md) | Git 來源的特權 App 與 443 TLS 直通 |

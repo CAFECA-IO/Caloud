@@ -57,6 +57,11 @@
 | M2-06 | 啟動對帳與定期對帳 | FR-APP-09 | ⬜ |
 | M2-07 | 寫入 API 檢查 `Origin` header、速率限制 | NFR-SEC-01 | ⬜ |
 | M2-08 | 代理效能基準測試 | NFR-PERF-01 | ⬜ |
+| M2-09 | Git 來源 App、環境變數、指定 service | FR-APP-13、FR-APP-14、FR-APP-15 | ✅ |
+| M2-10 | 特權 App 政策與保留連接埠移除（`!override`） | FR-APP-16 | ✅ |
+| M2-11 | 443 SNI 路由與 TLS 直通；host 網路 service 轉發 | FR-DOM-09、FR-DOM-10 | ✅ |
+| M2-12 | 網頁與 MCP 支援上述設定 | FR-APP-13～16、FR-DOM-09 | ✅ |
+| M2-13 | 以 Caloud 部署 LiveKit（livekit.cafeca.io、turn.cafeca.io）與 iroh-relay（relay.cafeca.io） | FR-APP-13、FR-DOM-09 | 🚧 |
 
 ### M3 營運
 
