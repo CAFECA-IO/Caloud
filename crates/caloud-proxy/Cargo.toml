@@ -1,0 +1,14 @@
+[package]
+name = "caloud-proxy"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+arc-swap.workspace = true
+caloud-core.workspace = true

@@ -1,0 +1,23 @@
+# Caloud 本體部署：docker compose -f deploy/docker-compose.yml up -d
+services:
+  caloud:
+    build: ..
+    image: caloud:latest
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "127.0.0.1:8080:8080"   # 管理介面；M2 之後改由 :443 以 CALOUD_PUBLIC_ORIGIN 的網域提供
+    env_file: .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - caloud-data:/data
+    networks:
+      - edge
+
+volumes:
+  caloud-data:
+
+networks:
+  edge:
+    name: caloud-edge

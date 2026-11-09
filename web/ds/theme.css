@@ -1,0 +1,115 @@
+/* Caloud Design System — 語意 Token（正式風格：企業儀表板，ADR 0007）
+ * 規格：docs/04-design-language.md §2.2–2.3。
+ * 三個區塊都必須定義完整的語意 Token（scripts/check-docs.sh 檢查）：
+ *   1. 淺色（含字體、圓角等非色彩 Token）
+ *   2. 跟隨系統深色（data-theme="light" 可強制淺色）
+ *   3. data-theme="dark" 強制深色 */
+
+:root {
+  --font-ui: system-ui, -apple-system, "Segoe UI", "Noto Sans TC", "PingFang TC", sans-serif;
+  --font-display: var(--font-ui);
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --radius-control: 6px;
+  --radius-card: 8px;
+  --radius-overlay: 10px;
+  --control-height: 32px;
+  --brand-mark: linear-gradient(135deg, #2563eb, #1d4ed8);
+  --color-bg: #f6f7f9;
+  --color-surface: #ffffff;
+  --color-surface-raised: #ffffff;
+  --color-surface-sunken: #f1f3f6;
+  --color-surface-hover: #f1f3f6;
+  --color-text: #111827;
+  --color-text-muted: #4b5563;
+  --color-text-subtle: #5f6774;
+  --color-border: #e4e7ec;
+  --color-border-strong: #cfd4dc;
+  --color-accent: #1d4ed8;
+  --color-accent-hover: #1e40af;
+  --color-accent-subtle: #eef3ff;
+  --color-on-accent: #ffffff;
+  --color-success: #15803d;
+  --color-success-subtle: #ecfdf3;
+  --color-warning: #a15c07;
+  --color-warning-subtle: #fef6e7;
+  --color-danger: #b42318;
+  --color-danger-subtle: #fef3f2;
+  --color-focus: #2563eb;
+  --color-sidebar-bg: #0f172a;
+  --color-sidebar-text: #a8b3c4;
+  --color-sidebar-text-active: #ffffff;
+  --color-sidebar-active-bg: #1e293b;
+  --color-sidebar-border: #1e293b;
+  --color-overlay: rgb(15 23 42 / 0.45);
+  --shadow-card: 0 1px 2px rgb(16 24 40 / 0.06);
+  --shadow-overlay: 0 16px 40px rgb(16 24 40 / 0.18);
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-bg: #0b0f17;
+    --color-surface: #111722;
+    --color-surface-raised: #18202d;
+    --color-surface-sunken: #0d121b;
+    --color-surface-hover: #18202d;
+    --color-text: #e6e9ef;
+    --color-text-muted: #a3acb9;
+    --color-text-subtle: #8c95a3;
+    --color-border: #222b38;
+    --color-border-strong: #334052;
+    --color-accent: #6ea2ff;
+    --color-accent-hover: #93bbff;
+    --color-accent-subtle: #14223d;
+    --color-on-accent: #08101f;
+    --color-success: #4ade80;
+    --color-success-subtle: #0f2a1b;
+    --color-warning: #fbbf24;
+    --color-warning-subtle: #2b2210;
+    --color-danger: #f87171;
+    --color-danger-subtle: #2d1515;
+    --color-focus: #6ea2ff;
+    --color-sidebar-bg: #070b12;
+    --color-sidebar-text: #9aa4b2;
+    --color-sidebar-text-active: #f8fafc;
+    --color-sidebar-active-bg: #162030;
+    --color-sidebar-border: #161d29;
+    --color-overlay: rgb(0 0 0 / 0.6);
+    --shadow-card: none;
+    --shadow-overlay: 0 16px 40px rgb(0 0 0 / 0.5);
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --color-bg: #0b0f17;
+  --color-surface: #111722;
+  --color-surface-raised: #18202d;
+  --color-surface-sunken: #0d121b;
+  --color-surface-hover: #18202d;
+  --color-text: #e6e9ef;
+  --color-text-muted: #a3acb9;
+  --color-text-subtle: #8c95a3;
+  --color-border: #222b38;
+  --color-border-strong: #334052;
+  --color-accent: #6ea2ff;
+  --color-accent-hover: #93bbff;
+  --color-accent-subtle: #14223d;
+  --color-on-accent: #08101f;
+  --color-success: #4ade80;
+  --color-success-subtle: #0f2a1b;
+  --color-warning: #fbbf24;
+  --color-warning-subtle: #2b2210;
+  --color-danger: #f87171;
+  --color-danger-subtle: #2d1515;
+  --color-focus: #6ea2ff;
+  --color-sidebar-bg: #070b12;
+  --color-sidebar-text: #9aa4b2;
+  --color-sidebar-text-active: #f8fafc;
+  --color-sidebar-active-bg: #162030;
+  --color-sidebar-border: #161d29;
+  --color-overlay: rgb(0 0 0 / 0.6);
+  --shadow-card: none;
+  --shadow-overlay: 0 16px 40px rgb(0 0 0 / 0.5);
+  color-scheme: dark;
+}

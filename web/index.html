@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Caloud</title>
+<link rel="stylesheet" href="/assets/ds/tokens.css">
+<link rel="stylesheet" href="/assets/ds/theme.css">
+<link rel="stylesheet" href="/assets/ds/components.css">
+<script src="/assets/ds/ui.js"></script>
+<script>UI.initTheme();</script>
+</head>
+<body>
+
+<!-- FR-AUTH-01 登入 -->
+<main class="c-login u-hidden" id="login">
+  <section class="c-login__panel">
+    <div class="c-login__mark" aria-hidden="true">C</div>
+    <h1 class="c-login__title">登入 Caloud</h1>
+    <p class="c-login__desc">使用 CAFECA 身分登入。部署後第一位登入的人會成為 Super Admin。</p>
+    <button class="c-btn c-btn--primary" id="login-btn">以 CAFECA 登入</button>
+    <p class="c-msg c-msg--danger" id="login-msg" role="alert"></p>
+  </section>
+</main>
+
+<!-- FR-UI-11 AppShell -->
+<div class="c-shell u-hidden" id="shell">
+  <aside class="c-sidebar">
+    <div class="c-sidebar__brand"><span class="c-sidebar__mark" aria-hidden="true">C</span>Caloud</div>
+    <nav class="c-sidebar__nav" aria-label="主要導覽" id="nav"></nav>
+    <div class="c-sidebar__footer">
+      <div class="c-account" id="account"></div>
+      <div class="l-row">
+        <button class="c-btn c-btn--ghost c-btn--sm" id="theme-btn" aria-label="切換淺色／深色"></button>
+        <button class="c-btn c-btn--ghost c-btn--sm" id="logout-btn"></button>
+      </div>
+    </div>
+  </aside>
+  <main class="c-shell__main"><div class="c-page" id="page"></div></main>
+</div>
+
+<script>
+"use strict";
+const { $, $$, esc, api, relTime, statusPill, showMsg, toast, confirmDialog, drawer, busy, copyField, empty, skeletonRows, icon } = UI;
+
+// ─────────────── 狀態 ───────────────
+const state = { me: null, apps: [], domains: [], users: [], cafeca: null, appFilter: "all", appQuery: "", domainQuery: "" };
+const isAdmin = () => ["super_admin", "admin"].includes(state.me?.role);
+const appName = (id) => state.apps.find((a) => a.id === id)?.name ?? "（已刪除）";
+const roleLabel = (r) => ({ super_admin: "Super Admin", admin: "Admin", member: "Member", pending: "待核准", disabled: "已停用" }[r] || r);
+const currentPage = () => location.hash.slice(1) || "overview";
+
+// ─────────────── 登入 FR-AUTH-01 ───────────────
+async function loadSdk() {
+  const cfg = await api("/api/auth/config");
+  await new Promise((ok, fail) => {
+    const s = document.createElement("script");
+    s.src = cfg.wallet + "/sdk/cafeca-connect.js";
+    s.onload = ok;
+    s.onerror = () => fail(new Error("無法載入 CAFECA 登入元件，請檢查網路後重新整理。"));
+    document.head.append(s);
+  });
+  return CafecaConnect.create({ wallet: cfg.wallet });
+}
+$("#login-btn").addEventListener("click", async (e) => {
+  const btn = e.currentTarget;
+  showMsg($("#login-msg"), null);
+  if (!state.cafeca) return showMsg($("#login-msg"), new Error("登入元件載入中，請稍候再按一次。"));
+  try {
+    // signIn 必須在點擊事件中同步呼叫（之前不可 await），否則彈出視窗會被擋下
+    const response = await state.cafeca.signIn({
+      nonce: () => api("/api/auth/nonce", { method: "POST" }).then((j) => j.nonce),
+      statement: "登入 Caloud 管理介面",
+      claims: ["handle"],
+    });
+    state.me = await busy(btn, api("/api/auth/login", { method: "POST", body: response }));
+    boot();
+  } catch (err) { showMsg($("#login-msg"), err); }
+});
+
+// ─────────────── AppShell FR-UI-11 ───────────────
+const PAGES = [
+  { id: "overview", label: "總覽", icon: "home", render: renderOverview },
+  { id: "apps", label: "Apps", icon: "box", render: renderApps },
+  { id: "domains", label: "網域", icon: "globe", render: renderDomains },
+  { id: "users", label: "使用者", icon: "users", render: renderUsers, admin: true },
+  { id: "tokens", label: "API 權杖", icon: "key", render: renderTokens },
+];
+function renderShell() {
+  const pendingUsers = state.users.filter((u) => u.role === "pending").length;
+  $("#nav").innerHTML = PAGES.filter((p) => !p.admin || isAdmin()).map((p) =>
+    `<a class="c-sidebar__item" href="#${p.id}" data-page="${p.id}">${icon(p.icon)}<span>${p.label}</span>${p.id === "users" && pendingUsers ? `<span class="c-sidebar__count" aria-label="${pendingUsers} 位待核准">${pendingUsers}</span>` : ""}</a>`).join("");
+  const m = state.me;
+  $("#account").innerHTML = `<span class="c-account__avatar" aria-hidden="true"></span><span class="c-account__text"><span class="c-account__name" title="${esc(m.account)}">${esc(m.handle || m.account.slice(0, 6) + "…" + m.account.slice(-4))}</span><span class="c-account__role">${esc(roleLabel(m.role))}</span></span>`;
+  $("#theme-btn").innerHTML = `${icon("moon")}<span>主題</span>`;
+  $("#logout-btn").innerHTML = `${icon("logout")}<span>登出</span>`;
+  markNav();
+}
+function markNav() {
+  $$(".c-sidebar__item").forEach((a) => {
+    const on = a.dataset.page === currentPage();
+    a.classList.toggle("is-active", on);
+    on ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current");
+  });
+}
+$("#theme-btn").addEventListener("click", UI.toggleTheme);
+$("#logout-btn").addEventListener("click", async () => { await api("/api/auth/logout", { method: "POST" }); location.replace("/"); });
+
+function route() {
+  const page = PAGES.find((p) => p.id === currentPage() && (!p.admin || isAdmin())) || PAGES[0];
+  markNav();
+  document.title = `${page.label} · Caloud`;
+  page.render();
+}
+window.addEventListener("hashchange", route);
+
+function pageHeader(title, desc, actions = "") {
+  return `<header class="c-page-header"><div class="c-page-header__text"><h1 class="c-page-header__title">${esc(title)}</h1><p class="c-page-header__desc">${esc(desc)}</p></div>${actions ? `<div class="c-page-header__actions">${actions}</div>` : ""}</header>`;
+}
+
+async function refresh(...what) {
+  const jobs = { apps: () => api("/api/apps"), domains: () => api("/api/domains"), users: () => (isAdmin() ? api("/api/users") : []) };
+  const res = await Promise.all(what.map((k) => jobs[k]()));
+  what.forEach((k, i) => (state[k] = res[i]));
+}
+
+// ─────────────── 總覽 FR-UI-09 ───────────────
+async function renderOverview() {
+  const page = $("#page");
+  page.innerHTML = pageHeader("總覽", "所有 App 與網域的目前狀態，以及需要你處理的事項。") +
+    `<div class="l-grid" id="stats">${Array(4).fill('<div class="c-stat"><span class="c-skeleton"></span><span class="c-skeleton"></span></div>').join("")}</div><div id="todo"></div>`;
+  try { await refresh("apps", "domains", "users"); renderShell(); }
+  catch (err) { return page.insertAdjacentHTML("beforeend", `<p class="c-msg c-msg--danger" role="alert">${esc(err.message)}</p>`); }
+  const running = state.apps.filter((a) => a.status === "running").length;
+  const failed = state.apps.filter((a) => a.status === "failed");
+  const live = state.domains.filter((d) => routeState(d) === "live").length;
+  const unverified = state.domains.filter((d) => !d.verified);
+  const unbound = state.domains.filter((d) => d.verified && !d.app_id);
+  const pending = state.users.filter((u) => u.role === "pending");
+  const todoCount = failed.length + unverified.length + unbound.length + pending.length;
+  const stat = (label, value, total, meta, href) => `<a class="c-stat" href="${href}"><span class="c-stat__label">${label}</span><span class="c-stat__value">${value}${total !== null ? `<span class="u-muted u-small"> / ${total}</span>` : ""}</span><span class="c-stat__meta">${meta}</span></a>`;
+  $("#stats").innerHTML =
+    stat("運作中的 App", running, state.apps.length, failed.length ? `${statusPill("app", "failed")} ${failed.length} 個` : "沒有失敗的 App", "#apps") +
+    stat("轉發中的網域", live, state.domains.length, unverified.length ? `${statusPill("domain", false)} ${unverified.length} 個` : "全部已驗證", "#domains") +
+    stat("待處理", todoCount, null, todoCount ? "見下方清單" : "目前沒有", "#overview") +
+    (isAdmin() ? stat("使用者", state.users.length, null, pending.length ? `${statusPill("role", "pending")} ${pending.length} 位` : "沒有待核准", "#users") : "");
+  const items = [
+    ...failed.map((a) => ({ tone: "danger", icon: "alert", title: `${a.name} 部署失敗`, body: a.last_error || "請查看 log 了解原因。", href: "#apps", action: "查看" })),
+    ...unverified.map((d) => ({ tone: "warning", icon: "globe", title: `${d.hostname} 尚未驗證`, body: "設定 DNS TXT 紀錄後按「驗證」。", href: "#domains", action: "前往設定" })),
+    ...unbound.map((d) => ({ tone: "", icon: "link", title: `${d.hostname} 尚未綁定 App`, body: "選擇要轉發的 App 與 port。", href: "#domains", action: "綁定" })),
+    ...pending.map((u) => ({ tone: "warning", icon: "users", title: `${u.handle || u.account.slice(0, 10) + "…"} 等待核准`, body: "核准後才能部署 App 與托管網域。", href: "#users", action: "審核" })),
+  ];
+  $("#todo").innerHTML = `<section class="c-card"><div class="c-card__header"><h2 class="c-card__title">需要處理</h2></div><div class="c-card__body">${
+    items.length
+      ? items.map((i) => `<div class="c-banner ${i.tone ? "c-banner--" + i.tone : ""}">${icon(i.icon)}<div class="c-banner__body"><strong>${esc(i.title)}</strong><span class="u-muted u-small">${esc(i.body)}</span></div><a class="c-btn c-btn--sm" href="${i.href}">${i.action}</a></div>`).join("")
+      : empty({ iconName: "check", title: "目前沒有待處理事項", body: "所有 App 與網域都運作正常。" })}</div></section>`;
+}
+
+// ─────────────── Apps FR-APP-* / FR-UI-08 / FR-UI-10 ───────────────
+let pollTimer = null;
+async function renderApps() {
+  $("#page").innerHTML = pageHeader("Apps", "每個 App 是一份 docker compose。上傳後立即部署，再到「網域」把流量轉過來。",
+    `<button class="c-btn c-btn--primary" id="new-app">${icon("plus")}<span>新增 App</span></button>`) +
+    `<section class="c-card"><div class="c-card__header">
+      <label class="c-search">${icon("search")}<span class="u-sr-only">搜尋 App</span><input class="c-input" id="app-q" placeholder="搜尋名稱" value="${esc(state.appQuery)}"></label>
+      <div class="c-segmented" role="group" aria-label="狀態篩選" id="app-filter">${[["all", "全部"], ["running", "運作中"], ["deploying", "部署中"], ["failed", "失敗"], ["stopped", "已停止"]].map(([v, l]) => `<button class="c-segmented__item ${state.appFilter === v ? "is-active" : ""}" data-v="${v}" aria-pressed="${state.appFilter === v}">${l}</button>`).join("")}</div>
+    </div><div class="c-card__body c-card__body--flush"><div class="c-table-wrap"><table class="c-table">
+      <thead><tr><th>名稱</th><th>狀態</th><th>網域</th><th>更新</th><th><span class="u-sr-only">操作</span></th></tr></thead>
+      <tbody id="apps">${skeletonRows(5)}</tbody></table></div></div></section>
+    <p class="c-msg c-msg--danger" id="apps-msg" role="alert"></p>`;
+  $("#new-app").addEventListener("click", openNewApp);
+  $("#app-q").addEventListener("input", (e) => { state.appQuery = e.target.value; drawApps(); });
+  $("#app-filter").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-v]"); if (!b) return;
+    state.appFilter = b.dataset.v;
+    $$("#app-filter .c-segmented__item").forEach((x) => { x.classList.toggle("is-active", x === b); x.setAttribute("aria-pressed", x === b); });
+    drawApps();
+  });
+  await loadApps();
+}
+async function loadApps() {
+  try { await refresh("apps", "domains"); if ($("#apps-msg")) showMsg($("#apps-msg"), null); }
+  catch (err) { return $("#apps-msg") ? showMsg($("#apps-msg"), err) : toast(err.message, "danger"); }
+  drawApps();
+  clearTimeout(pollTimer); // FR-UI-02
+  if (state.apps.some((a) => a.status === "deploying") && currentPage() === "apps") pollTimer = setTimeout(loadApps, 3000);
+}
+function drawApps() {
+  const tbody = $("#apps"); if (!tbody) return;
+  const q = state.appQuery.trim().toLowerCase();
+  const list = state.apps.filter((a) => (state.appFilter === "all" || a.status === state.appFilter) && (!q || a.name.toLowerCase().includes(q)));
+  if (!state.apps.length) return (tbody.innerHTML = `<tr><td colspan="5">${empty({ iconName: "box", title: "還沒有 App", body: "上傳一份 docker compose 檔，Caloud 會立即啟動容器。", action: `<button class="c-btn c-btn--primary" data-act="new">${icon("plus")}<span>新增 App</span></button>` })}</td></tr>`);
+  if (!list.length) return (tbody.innerHTML = `<tr><td colspan="5">${empty({ iconName: "search", title: "沒有符合條件的 App", body: "調整搜尋文字或狀態篩選。" })}</td></tr>`);
+  tbody.innerHTML = list.map((a) => {
+    const doms = state.domains.filter((d) => d.app_id === a.id);
+    return `<tr class="is-clickable" data-id="${esc(a.id)}" tabindex="0">
+      <td><div class="c-table__primary">${esc(a.name)}</div><div class="c-table__secondary u-mono">${esc(a.id.slice(0, 8))}</div></td>
+      <td>${statusPill("app", a.status)}${a.last_error ? `<div class="c-table__secondary u-truncate" title="${esc(a.last_error)}">${esc(a.last_error)}</div>` : ""}</td>
+      <td class="u-small">${doms.length ? doms.map((d) => esc(d.hostname)).join("<br>") : '<span class="u-muted">—</span>'}</td>
+      <td class="u-muted u-small u-nowrap">${relTime(a.updated_at)}</td>
+      <td><div class="c-table__actions">
+        <button class="c-btn c-btn--ghost c-btn--icon c-btn--sm" data-act="deploy" aria-label="部署 ${esc(a.name)}" title="部署">${icon(a.status === "running" ? "refresh" : "play")}</button>
+        <button class="c-btn c-btn--ghost c-btn--icon c-btn--sm" data-act="stop" aria-label="停止 ${esc(a.name)}" title="停止" ${a.status === "stopped" ? "disabled" : ""}>${icon("stop")}</button>
+        <button class="c-btn c-btn--ghost c-btn--icon c-btn--sm c-btn--danger" data-act="delete" aria-label="刪除 ${esc(a.name)}" title="刪除">${icon("trash")}</button>
+      </div></td></tr>`;
+  }).join("");
+}
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("#apps")) return;
+  const btn = e.target.closest("[data-act]");
+  if (btn?.dataset.act === "new") return openNewApp();
+  const tr = e.target.closest("tr[data-id]"); if (!tr) return;
+  const app = state.apps.find((a) => a.id === tr.dataset.id);
+  if (!btn) return openApp(app.id);
+  appAction(btn.dataset.act, app, btn);
+});
+// 可點擊的表格列：Enter 開啟
+document.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.matches?.("tr.is-clickable")) e.target.click(); });
+
+async function appAction(act, app, btn) {
+  try {
+    if (act === "delete") {
+      if (!(await confirmDialog({ title: `刪除 ${app.name}？`, body: "容器會被移除，綁定的網域會停止轉發。資料 volume 會保留。", confirmText: "刪除 App" }))) return false;
+      await api(`/api/apps/${app.id}`, { method: "DELETE" });
+      toast(`已刪除 ${app.name}`);
+    } else {
+      await busy(btn, api(`/api/apps/${app.id}/${act}`, { method: "POST" }));
+      toast(act === "deploy" ? `${app.name} 開始部署` : `已停止 ${app.name}`);
+    }
+    await loadApps();
+    return true;
+  } catch (err) { toast(err.message, "danger"); return false; }
+}
+
+function openNewApp() {
+  const dr = drawer({ title: "新增 App", subtitle: "上傳或貼上 docker compose 檔，建立後立即部署。" });
+  dr.body.innerHTML = `
+    <label class="c-field"><span class="c-field__label">名稱</span><input class="c-input" id="na-name" placeholder="例如 blog" autocomplete="off"><span class="c-field__hint">留空時以第一個 service 命名。</span></label>
+    <div class="c-field"><span class="c-field__label">compose 檔</span>
+      <div><label class="c-btn">${icon("upload")}<span>選擇 .yml 檔案</span><input type="file" id="na-file" accept=".yml,.yaml" class="u-sr-only"></label></div>
+      <textarea class="c-textarea" id="na-yaml" aria-label="compose YAML" spellcheck="false" placeholder="services:&#10;  web:&#10;    image: nginx:alpine"></textarea>
+      <span class="c-field__error" id="na-err" role="alert"></span></div>
+    <div class="c-banner">${icon("shield")}<div class="c-banner__body"><strong>安全限制</strong><span class="u-small">不可使用 <code class="c-code">ports</code>、<code class="c-code">privileged</code>、主機路徑掛載與 <code class="c-code">build</code>。對外流量請在「網域」綁定。</span></div></div>`;
+  dr.footer.classList.remove("u-hidden");
+  dr.footer.innerHTML = `<button class="c-btn" data-close>取消</button><button class="c-btn c-btn--primary" id="na-submit">${icon("play")}<span>建立並部署</span></button>`;
+  $("#na-file", dr.el).addEventListener("change", async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    $("#na-yaml", dr.el).value = await f.text();
+    const base = f.name.replace(/\.(ya?ml)$/i, "");
+    if (!$("#na-name", dr.el).value && !/^(docker-)?compose$/.test(base)) $("#na-name", dr.el).value = base;
+  });
+  $("#na-submit", dr.el).addEventListener("click", async (e) => {
+    const btn = e.currentTarget, yaml = $("#na-yaml", dr.el);
+    showMsg($("#na-err", dr.el), null); yaml.removeAttribute("aria-invalid");
+    if (!yaml.value.trim()) { yaml.setAttribute("aria-invalid", "true"); return showMsg($("#na-err", dr.el), new Error("請上傳或貼上 compose 檔。")); }
+    try {
+      const app = await busy(btn, api("/api/apps", { method: "POST", body: { name: $("#na-name", dr.el).value || null, compose_yaml: yaml.value } }));
+      dr.close(); toast(`已建立 ${app.name}，開始部署`);
+      if (currentPage() === "apps") loadApps(); else location.hash = "apps";
+    } catch (err) { yaml.setAttribute("aria-invalid", "true"); showMsg($("#na-err", dr.el), err); }
+  });
+}
+
+async function openApp(id) {
+  const app = state.apps.find((a) => a.id === id);
+  const dr = drawer({ title: app.name, subtitle: `${statusPill("app", app.status)} <span class="u-mono">${esc(app.id)}</span>` });
+  dr.body.innerHTML = `<div class="c-tabs" role="tablist">${[["info", "概覽"], ["compose", "compose"], ["logs", "Logs"]].map(([v, l], i) => `<button class="c-tabs__item ${i ? "" : "is-active"}" role="tab" data-tab="${v}" aria-selected="${!i}">${l}</button>`).join("")}</div><div id="ad-panel" class="l-stack"></div>`;
+  dr.footer.classList.remove("u-hidden");
+  dr.footer.innerHTML = `<button class="c-btn c-btn--danger" data-a="delete">${icon("trash")}<span>刪除</span></button><span class="l-spacer"></span><button class="c-btn" data-a="stop">${icon("stop")}<span>停止</span></button><button class="c-btn c-btn--primary" data-a="deploy">${icon("refresh")}<span>重新部署</span></button>`;
+  dr.footer.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-a]"); if (!b) return;
+    if ((await appAction(b.dataset.a, app, b)) && b.dataset.a === "delete") dr.close();
+  });
+  let detail = null;
+  const show = async (tab) => {
+    $$(".c-tabs__item", dr.el).forEach((t) => { t.classList.toggle("is-active", t.dataset.tab === tab); t.setAttribute("aria-selected", t.dataset.tab === tab); });
+    const panel = $("#ad-panel", dr.el);
+    panel.innerHTML = '<span class="c-skeleton"></span><span class="c-skeleton"></span>';
+    try { detail ??= await api(`/api/apps/${id}`); } catch (err) { return (panel.innerHTML = `<p class="c-msg c-msg--danger">${esc(err.message)}</p>`); }
+    if (tab === "info") {
+      const doms = state.domains.filter((d) => d.app_id === id);
+      panel.innerHTML = `<dl class="c-kv"><dt class="c-kv__key">狀態</dt><dd class="c-kv__value">${statusPill("app", app.status)}</dd>
+        <dt class="c-kv__key">Services</dt><dd class="c-kv__value u-mono">${detail.services.map(esc).join(", ")}</dd>
+        <dt class="c-kv__key">網域</dt><dd class="c-kv__value">${doms.length ? doms.map((d) => `<a href="http://${esc(d.hostname)}" target="_blank" rel="noopener">${esc(d.hostname)}</a> → <span class="u-mono">${esc(d.service)}:${esc(d.port)}</span>`).join("<br>") : '<span class="u-muted">尚未綁定，請到「網域」設定。</span>'}</dd>
+        <dt class="c-kv__key">更新</dt><dd class="c-kv__value">${relTime(app.updated_at)}</dd></dl>
+        ${app.last_error ? `<div class="c-banner c-banner--danger">${icon("alert")}<div class="c-banner__body"><strong>上次部署失敗</strong><span class="u-small u-mono">${esc(app.last_error)}</span></div></div>` : ""}
+        <h3 class="c-section-title">容器</h3>
+        <div class="c-table-wrap"><table class="c-table"><thead><tr><th>Service</th><th>容器</th><th>狀態</th></tr></thead><tbody>${detail.containers.map((c) => `<tr><td class="u-mono">${esc(c.Service)}</td><td class="u-mono u-small">${esc(c.Name)}</td><td>${esc(c.State)} ${c.Health ? `<span class="u-muted">(${esc(c.Health)})</span>` : ""}</td></tr>`).join("") || `<tr><td colspan="3">${empty({ iconName: "box", title: "沒有容器", body: "按「重新部署」啟動。" })}</td></tr>`}</tbody></table></div>`;
+    } else if (tab === "compose") {
+      panel.innerHTML = `<label class="c-field"><span class="c-field__label">compose.yml</span><textarea class="c-textarea" id="ad-yaml" spellcheck="false">${esc(detail.compose_yaml)}</textarea><span class="c-field__error" id="ad-err" role="alert"></span></label><div class="l-row"><span class="l-spacer"></span><button class="c-btn c-btn--primary" id="ad-save">${icon("check")}<span>儲存並重新部署</span></button></div>`;
+      $("#ad-save", dr.el).addEventListener("click", async (e) => {
+        const btn = e.currentTarget;
+        showMsg($("#ad-err", dr.el), null);
+        try { await busy(btn, api(`/api/apps/${id}`, { method: "PUT", body: { compose_yaml: $("#ad-yaml", dr.el).value } })); detail = null; toast("已儲存，開始重新部署"); loadApps(); }
+        catch (err) { showMsg($("#ad-err", dr.el), err); }
+      });
+    } else {
+      const load = async () => {
+        const out = $("#ad-log", dr.el); out.textContent = "載入中…";
+        out.textContent = (await api(`/api/apps/${id}/logs?tail=500`).catch((e) => e.message)) || "（沒有 log）";
+        out.scrollTop = out.scrollHeight;
+      };
+      panel.innerHTML = `<div class="l-row"><span class="c-label">最近 500 行</span><span class="l-spacer"></span><button class="c-btn c-btn--sm" id="ad-reload">${icon("refresh")}<span>重新整理</span></button></div><pre class="c-log" id="ad-log"></pre>`;
+      $("#ad-reload", dr.el).addEventListener("click", load);
+      load();
+    }
+  };
+  $(".c-tabs", dr.el).addEventListener("click", (e) => { const t = e.target.closest("[data-tab]"); if (t) show(t.dataset.tab); });
+  show("info");
+}
+
+// ─────────────── 網域 FR-DOM-* / FR-UI-06 / FR-UI-07 ───────────────
+function routeState(d) {
+  if (!d.verified || !d.app_id) return "none";
+  return state.apps.find((a) => a.id === d.app_id)?.status === "running" ? "live" : "idle";
+}
+async function renderDomains() {
+  $("#page").innerHTML = pageHeader("網域", "托管網域並轉發到 App。新增後依步驟設定 DNS、驗證擁有權，再綁定 App。",
+    `<button class="c-btn c-btn--primary" id="new-dom">${icon("plus")}<span>新增網域</span></button>`) +
+    `<section class="c-card"><div class="c-card__header"><label class="c-search">${icon("search")}<span class="u-sr-only">搜尋網域</span><input class="c-input" id="dom-q" placeholder="搜尋網域" value="${esc(state.domainQuery)}"></label></div>
+    <div class="c-card__body c-card__body--flush"><div class="c-table-wrap"><table class="c-table">
+      <thead><tr><th>網域</th><th>驗證</th><th>轉發</th><th>TLS</th></tr></thead><tbody id="domains">${skeletonRows(4)}</tbody></table></div></div></section>
+    <p class="c-msg c-msg--danger" id="domains-msg" role="alert"></p>`;
+  $("#new-dom").addEventListener("click", () => openDomain(null));
+  $("#dom-q").addEventListener("input", (e) => { state.domainQuery = e.target.value; drawDomains(); });
+  try { await refresh("domains", "apps"); showMsg($("#domains-msg"), null); } catch (err) { return showMsg($("#domains-msg"), err); }
+  drawDomains();
+}
+function drawDomains() {
+  const tbody = $("#domains"); if (!tbody) return;
+  const q = state.domainQuery.trim().toLowerCase();
+  const list = state.domains.filter((d) => !q || d.hostname.includes(q));
+  if (!state.domains.length) return (tbody.innerHTML = `<tr><td colspan="4">${empty({ iconName: "globe", title: "還沒有網域", body: "新增網域後，依步驟設定 DNS 即可把流量轉到 App。", action: `<button class="c-btn c-btn--primary" data-new>${icon("plus")}<span>新增網域</span></button>` })}</td></tr>`);
+  if (!list.length) return (tbody.innerHTML = `<tr><td colspan="4">${empty({ iconName: "search", title: "沒有符合的網域" })}</td></tr>`);
+  tbody.innerHTML = list.map((d) => `<tr class="is-clickable" data-host="${esc(d.hostname)}" tabindex="0">
+    <td class="c-table__primary">${esc(d.hostname)}</td>
+    <td>${statusPill("domain", d.verified)}</td>
+    <td>${statusPill("route", routeState(d))}${d.app_id ? `<div class="c-table__secondary">${esc(appName(d.app_id))} → <span class="u-mono">${esc(d.service)}:${esc(d.port)}</span></div>` : ""}</td>
+    <td>${statusPill("tls", d.tls_status)}</td></tr>`).join("");
+}
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("#domains")) return;
+  if (e.target.closest("[data-new]")) return openDomain(null);
+  const tr = e.target.closest("tr[data-host]"); if (tr) openDomain(tr.dataset.host);
+});
+
+/** 網域設定精靈：1 輸入 → 2 DNS → 3 驗證 → 4 綁定（FR-UI-07） */
+function openDomain(hostname) {
+  let d = hostname ? state.domains.find((x) => x.hostname === hostname) : null;
+  const dr = drawer({ title: hostname || "新增網域", subtitle: "依序完成以下步驟，網域就會開始轉發。", onClose: () => currentPage() === "domains" && renderDomains() });
+  const stepClass = (n) => {
+    const step = !d ? 1 : !d.verified ? 2 : 4;
+    if (n < step || (n === 4 && d?.app_id)) return "is-done";
+    if (n === step || (step === 2 && n === 3)) return "is-current";
+    return "";
+  };
+  const index = (n) => `<span class="c-stepper__index">${stepClass(n) === "is-done" ? icon("check") : n}</span>`;
+  const draw = () => {
+    const appOpts = `<option value="">（不轉發）</option>` + state.apps.map((a) => `<option value="${esc(a.id)}" ${a.id === d?.app_id ? "selected" : ""}>${esc(a.name)}</option>`).join("");
+    dr.body.innerHTML = `<ol class="c-stepper">
+      <li class="c-stepper__step ${stepClass(1)}">${index(1)}<div class="c-stepper__content"><span class="c-stepper__label">輸入網域</span>
+        ${d ? `<span class="u-mono">${esc(d.hostname)}</span>` : `<label class="c-field"><span class="u-sr-only">主機名稱</span><input class="c-input" id="dm-host" placeholder="app.example.com" autocomplete="off" autocapitalize="off" spellcheck="false"><span class="c-field__error" id="dm-err" role="alert"></span></label><div><button class="c-btn c-btn--primary" id="dm-create">下一步</button></div>`}</div></li>
+      <li class="c-stepper__step ${stepClass(2)}">${index(2)}<div class="c-stepper__content"><span class="c-stepper__label">設定 DNS</span>
+        ${d && !d.verified ? `<p class="u-muted u-small">到你的 DNS 服務商新增以下兩筆紀錄：</p>
+          <div class="c-field"><span class="c-label">A 紀錄 · 名稱</span>${copyField(d.hostname, "紀錄名稱")}<span class="c-field__hint">值為 Caloud 主機的 IP。</span></div>
+          <div class="c-field"><span class="c-label">TXT 紀錄 · 名稱</span>${copyField("_caloud-challenge." + d.hostname, "紀錄名稱")}</div>
+          <div class="c-field"><span class="c-label">TXT 紀錄 · 值</span>${copyField(d.verify_token, "驗證值")}</div>` : d ? '<span class="u-muted u-small">已完成</span>' : ""}</div></li>
+      <li class="c-stepper__step ${stepClass(3)}">${index(3)}<div class="c-stepper__content"><span class="c-stepper__label">驗證擁有權</span>
+        ${d && !d.verified ? `<p class="u-muted u-small">DNS 生效可能需要幾分鐘。</p><span class="c-field__error" id="dm-verr" role="alert"></span><div><button class="c-btn c-btn--primary" id="dm-verify">${icon("shield")}<span>驗證</span></button></div>` : d?.verified ? statusPill("domain", true) : ""}</div></li>
+      <li class="c-stepper__step ${stepClass(4)}">${index(4)}<div class="c-stepper__content"><span class="c-stepper__label">綁定 App</span>
+        ${d?.verified ? `<div class="l-grid">
+            <label class="c-field"><span class="c-field__label">App</span><select class="c-select" id="dm-app">${appOpts}</select></label>
+            <label class="c-field"><span class="c-field__label">Service</span><select class="c-select" id="dm-svc"></select></label>
+            <label class="c-field"><span class="c-field__label">容器 port</span><input class="c-input" id="dm-port" inputmode="numeric" placeholder="80" value="${esc(d.port ?? "")}"></label></div>
+          <span class="c-field__error" id="dm-berr" role="alert"></span><div><button class="c-btn c-btn--primary" id="dm-bind">${icon("link")}<span>套用</span></button></div>` : ""}</div></li></ol>`;
+    dr.footer.classList.toggle("u-hidden", !d);
+    dr.footer.innerHTML = d ? `<button class="c-btn c-btn--danger" id="dm-del">${icon("trash")}<span>刪除網域</span></button><span class="l-spacer"></span><button class="c-btn" data-close>完成</button>` : "";
+    wire();
+  };
+  const wire = () => {
+    const host = $("#dm-host", dr.el);
+    if (host) {
+      host.focus();
+      host.addEventListener("keydown", (e) => { if (e.key === "Enter") $("#dm-create", dr.el).click(); });
+      $("#dm-create", dr.el).addEventListener("click", async (e) => {
+        const btn = e.currentTarget;
+        host.removeAttribute("aria-invalid"); showMsg($("#dm-err", dr.el), null);
+        try { d = await busy(btn, api("/api/domains", { method: "POST", body: { hostname: host.value } })); state.domains.push(d); $(".c-drawer__title", dr.el).textContent = d.hostname; draw(); }
+        catch (err) { host.setAttribute("aria-invalid", "true"); showMsg($("#dm-err", dr.el), err); }
+      });
+    }
+    $("#dm-verify", dr.el)?.addEventListener("click", async (e) => {
+      const btn = e.currentTarget;
+      showMsg($("#dm-verr", dr.el), null);
+      try { d = await busy(btn, api(`/api/domains/${encodeURIComponent(d.hostname)}/verify`, { method: "POST" })); toast(`${d.hostname} 已驗證`); draw(); }
+      catch (err) { showMsg($("#dm-verr", dr.el), err); }
+    });
+    const appSel = $("#dm-app", dr.el);
+    if (appSel) {
+      const fillSvc = async () => {
+        const svc = $("#dm-svc", dr.el);
+        if (!appSel.value) { svc.innerHTML = ""; svc.disabled = true; return; }
+        svc.disabled = false; svc.innerHTML = "<option>載入中…</option>";
+        try { const det = await api(`/api/apps/${appSel.value}`); svc.innerHTML = det.services.map((s) => `<option ${s === d.service ? "selected" : ""}>${esc(s)}</option>`).join(""); }
+        catch (err) { svc.innerHTML = ""; showMsg($("#dm-berr", dr.el), err); }
+      };
+      appSel.addEventListener("change", fillSvc);
+      fillSvc();
+      $("#dm-bind", dr.el).addEventListener("click", async (e) => {
+        const btn = e.currentTarget, app_id = appSel.value || null;
+        showMsg($("#dm-berr", dr.el), null);
+        try {
+          d = await busy(btn, api(`/api/domains/${encodeURIComponent(d.hostname)}/bind`, { method: "PUT", body: { app_id, service: app_id ? $("#dm-svc", dr.el).value : null, port: app_id ? Number($("#dm-port", dr.el).value) || null : null } }));
+          toast(app_id ? `${d.hostname} 已轉發到 ${appName(app_id)}` : `${d.hostname} 已解除綁定`);
+          draw();
+        } catch (err) { showMsg($("#dm-berr", dr.el), err); }
+      });
+    }
+    $("#dm-del", dr.el)?.addEventListener("click", async () => {
+      if (!(await confirmDialog({ title: `刪除 ${d.hostname}？`, body: "此網域會立即停止轉發流量。", confirmText: "刪除網域" }))) return;
+      try { await api(`/api/domains/${encodeURIComponent(d.hostname)}`, { method: "DELETE" }); toast(`已刪除 ${d.hostname}`); dr.close(); }
+      catch (err) { toast(err.message, "danger"); }
+    });
+  };
+  draw();
+}
+
+// ─────────────── 使用者 FR-USER-01～02 ───────────────
+async function renderUsers() {
+  $("#page").innerHTML = pageHeader("使用者", "以 CAFECA 身分登入的所有人。新使用者預設待核准，核准為 Member 後才能部署。") +
+    `<div id="users-banner"></div><section class="c-card"><div class="c-card__body c-card__body--flush"><div class="c-table-wrap"><table class="c-table">
+    <thead><tr><th>使用者</th><th>角色</th><th>最後登入</th><th><span class="u-sr-only">變更角色</span></th></tr></thead><tbody id="users">${skeletonRows(4)}</tbody></table></div></div></section>
+    <p class="c-msg c-msg--danger" id="users-msg" role="alert"></p>`;
+  try { await refresh("users"); renderShell(); showMsg($("#users-msg"), null); } catch (err) { return showMsg($("#users-msg"), err); }
+  const pending = state.users.filter((u) => u.role === "pending").length;
+  $("#users-banner").innerHTML = pending ? `<div class="c-banner c-banner--warning">${icon("users")}<div class="c-banner__body"><strong>${pending} 位使用者等待核准</strong><span class="u-small">將角色改為 Member 即可讓對方部署 App。</span></div></div>` : "";
+  const order = { pending: 0, super_admin: 1, admin: 2, member: 3, disabled: 4 };
+  // 權限規則同 docs/07-security.md §2
+  const canEdit = (u) => u.role !== "super_admin" && u.account !== state.me.account && (state.me.role === "super_admin" || u.role !== "admin");
+  const roles = state.me.role === "super_admin" ? ["admin", "member", "pending", "disabled"] : ["member", "pending", "disabled"];
+  $("#users").innerHTML = [...state.users].sort((a, b) => order[a.role] - order[b.role]).map((u) => `<tr data-account="${esc(u.account)}">
+    <td><div class="c-table__primary">${esc(u.handle || "（未提供代稱）")}${u.account === state.me.account ? ' <span class="u-muted u-small">（你）</span>' : ""}</div><div class="c-table__secondary u-mono" title="${esc(u.account)}">${esc(u.account)}</div></td>
+    <td>${statusPill("role", u.role)}</td>
+    <td class="u-muted u-small u-nowrap">${relTime(u.last_login)}</td>
+    <td>${canEdit(u) ? `<label><span class="u-sr-only">變更 ${esc(u.handle || u.account)} 的角色</span><select class="c-select" data-role>${roles.map((r) => `<option value="${r}" ${r === u.role ? "selected" : ""}>${roleLabel(r)}</option>`).join("")}</select></label>` : ""}</td></tr>`).join("");
+}
+document.addEventListener("change", async (e) => {
+  if (!e.target.matches("#users [data-role]")) return;
+  const tr = e.target.closest("tr");
+  try { await api(`/api/users/${tr.dataset.account}`, { method: "PUT", body: { role: e.target.value } }); toast(`已變更為 ${roleLabel(e.target.value)}`); }
+  catch (err) { toast(err.message, "danger"); }
+  renderUsers();
+});
+
+// ─────────────── API 權杖與 MCP FR-MCP-02／08 ───────────────
+const mcpUrl = () => `${location.origin}/mcp`;
+async function renderTokens() {
+  $("#page").innerHTML = pageHeader("API 權杖", "讓 AI 助手透過 MCP 以你的身分操作 Caloud。權杖權限與你的角色相同，請像密碼一樣保管。",
+    `<button class="c-btn c-btn--primary" id="new-token">${icon("plus")}<span>建立權杖</span></button>`) +
+    `<section class="c-card"><div class="c-card__header"><h2 class="c-card__title">MCP 端點</h2></div><div class="c-card__body">
+      ${copyField(mcpUrl(), "MCP 端點")}
+      <p class="u-muted u-small">傳輸方式為 Streamable HTTP，以 <code class="c-code">Authorization: Bearer &lt;權杖&gt;</code> 驗證。建立權杖後會顯示用戶端設定範例。</p>
+    </div></section>
+    <section class="c-card"><div class="c-card__body c-card__body--flush"><div class="c-table-wrap"><table class="c-table">
+      <thead><tr><th>名稱</th><th>建立</th><th>最後使用</th><th>到期</th><th><span class="u-sr-only">操作</span></th></tr></thead>
+      <tbody id="tokens">${skeletonRows(5)}</tbody></table></div></div></section>
+    <p class="c-msg c-msg--danger" id="tokens-msg" role="alert"></p>`;
+  $("#new-token").addEventListener("click", openNewToken);
+  let list;
+  try { list = await api("/api/tokens"); showMsg($("#tokens-msg"), null); } catch (err) { return showMsg($("#tokens-msg"), err); }
+  const now = Date.now() / 1000;
+  $("#tokens").innerHTML = list.map((t) => `<tr data-id="${esc(t.id)}">
+      <td><div class="c-table__primary">${esc(t.name)}</div><div class="c-table__secondary u-mono">${esc(t.prefix)}…</div></td>
+      <td class="u-muted u-small u-nowrap">${relTime(t.created_at)}</td>
+      <td class="u-muted u-small u-nowrap">${t.last_used_at ? relTime(t.last_used_at) : "從未使用"}</td>
+      <td class="u-small u-nowrap">${t.expires_at < now ? '<span class="c-badge c-badge--danger"><span class="c-badge__dot" aria-hidden="true"></span>已過期</span>' : relTime(t.expires_at)}</td>
+      <td><div class="c-table__actions"><button class="c-btn c-btn--ghost c-btn--icon c-btn--sm c-btn--danger" data-revoke aria-label="撤銷 ${esc(t.name)}" title="撤銷">${icon("trash")}</button></div></td></tr>`).join("")
+    || `<tr><td colspan="5">${empty({ iconName: "key", title: "還沒有 API 權杖", body: "建立權杖後，就能在 Claude 等 MCP 用戶端部署 App、查 log、設定網域。", action: `<button class="c-btn c-btn--primary" data-new-token>${icon("plus")}<span>建立權杖</span></button>` })}</td></tr>`;
+}
+document.addEventListener("click", async (e) => {
+  if (!e.target.closest("#tokens")) return;
+  if (e.target.closest("[data-new-token]")) return openNewToken();
+  const btn = e.target.closest("[data-revoke]"); if (!btn) return;
+  const tr = btn.closest("tr"), name = tr.querySelector(".c-table__primary").textContent;
+  if (!(await confirmDialog({ title: `撤銷 ${name}？`, body: "使用此權杖的 MCP 用戶端會立即無法連線。", confirmText: "撤銷權杖" }))) return;
+  try { await api(`/api/tokens/${tr.dataset.id}`, { method: "DELETE" }); toast(`已撤銷 ${name}`); renderTokens(); }
+  catch (err) { toast(err.message, "danger"); }
+});
+function openNewToken() {
+  const dr = drawer({ title: "建立 API 權杖", subtitle: "權杖只會顯示一次，請立即複製到 MCP 用戶端。", onClose: () => currentPage() === "tokens" && renderTokens() });
+  dr.body.innerHTML = `
+    <label class="c-field"><span class="c-field__label">名稱</span><input class="c-input" id="tk-name" placeholder="例如 Claude Desktop" maxlength="60" autocomplete="off"><span class="c-field__hint">用來辨識是哪個用戶端，稽核紀錄會標示此名稱。</span><span class="c-field__error" id="tk-err" role="alert"></span></label>
+    <label class="c-field"><span class="c-field__label">有效期限</span><select class="c-select" id="tk-days"><option value="30">30 天</option><option value="90" selected>90 天</option><option value="180">180 天</option><option value="365">365 天</option></select></label>`;
+  dr.footer.classList.remove("u-hidden");
+  dr.footer.innerHTML = `<button class="c-btn" data-close>取消</button><button class="c-btn c-btn--primary" id="tk-submit">${icon("key")}<span>建立權杖</span></button>`;
+  $("#tk-name", dr.el).focus();
+  $("#tk-submit", dr.el).addEventListener("click", async (e) => {
+    const btn = e.currentTarget, input = $("#tk-name", dr.el);
+    showMsg($("#tk-err", dr.el), null); input.removeAttribute("aria-invalid");
+    try {
+      const res = await busy(btn, api("/api/tokens", { method: "POST", body: { name: input.value, expires_in_days: Number($("#tk-days", dr.el).value) } }));
+      const claudeCode = `claude mcp add --transport http caloud ${mcpUrl()} --header "Authorization: Bearer ${res.token}"`;
+      const mcpJson = JSON.stringify({ mcpServers: { caloud: { type: "http", url: mcpUrl(), headers: { Authorization: `Bearer ${res.token}` } } } }, null, 2);
+      dr.body.innerHTML = `
+        <div class="c-banner c-banner--warning">${icon("alert")}<div class="c-banner__body"><strong>權杖只顯示這一次</strong><span class="u-small">關閉後無法再查看。遺失時請撤銷並重新建立。</span></div></div>
+        <div class="c-field"><span class="c-label">權杖 · ${esc(res.api_token.name)}</span>${copyField(res.token, "權杖")}</div>
+        <div class="c-field"><span class="c-label">Claude Code</span>${copyField(claudeCode, "指令")}</div>
+        <div class="c-field"><div class="l-row"><span class="c-label">.mcp.json（其他支援 HTTP 傳輸的 MCP 用戶端）</span><span class="l-spacer"></span><button class="c-btn c-btn--ghost c-btn--sm" data-copy="${esc(mcpJson)}" data-copy-label="設定">${icon("copy")}<span>複製</span></button></div><pre class="c-log">${esc(mcpJson)}</pre></div>`;
+      dr.footer.innerHTML = `<span class="l-spacer"></span><button class="c-btn c-btn--primary" data-close>我已複製，完成</button>`;
+    } catch (err) { input.setAttribute("aria-invalid", "true"); showMsg($("#tk-err", dr.el), err); }
+  });
+}
+
+// ─────────────── 啟動 ───────────────
+async function boot() {
+  try { state.me ??= await api("/api/me"); } catch {
+    $("#login").classList.remove("u-hidden");
+    loadSdk().then((c) => (state.cafeca = c), (err) => showMsg($("#login-msg"), err)); // 預先載入，點擊時才能同步開窗
+    return;
+  }
+  if (state.me.role === "pending") { // FR-USER-04
+    $("#login").classList.remove("u-hidden");
+    $("#login").innerHTML = `<section class="c-login__panel"><div class="c-login__mark" aria-hidden="true">C</div><h1 class="c-login__title">等待核准</h1><p class="c-login__desc">你的帳戶已建立。管理員核准後，就能部署 App 與托管網域。</p><button class="c-btn" id="pending-logout">${icon("logout")}<span>登出</span></button></section>`;
+    $("#pending-logout").addEventListener("click", async () => { await api("/api/auth/logout", { method: "POST" }); location.replace("/"); });
+    return;
+  }
+  $("#login").classList.add("u-hidden");
+  $("#shell").classList.remove("u-hidden");
+  if (isAdmin()) state.users = await api("/api/users").catch(() => []);
+  renderShell();
+  route();
+}
+boot();
+</script>
+</body>
+</html>

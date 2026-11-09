@@ -1,0 +1,67 @@
+/* Caloud Design System — 基礎 Token（所有風格共用）
+ * 規格：docs/04-design-language.md §2。
+ * 三層架構：基礎 Token（本檔）→ 語意 Token（theme.css）→ 元件（components.css）。
+ * 元件只能引用 Token，不可寫死色碼與尺寸。 */
+
+:root {
+  /* 間距：4px 基準 */
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* 字級與行高 */
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 24px;
+  --text-3xl: 30px;
+  --leading-tight: 1.25;
+  --leading: 1.5;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  /* 動態 */
+  --duration-fast: 100ms;
+  --duration: 160ms;
+  --duration-slow: 240ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* 圖層 */
+  --z-sticky: 10;
+  --z-overlay: 40;
+  --z-drawer: 50;
+  --z-toast: 60;
+
+  /* 版面 */
+  --sidebar-width: 232px;
+  --content-width: 1200px;
+  --drawer-width: 560px;
+  --breakpoint-md: 768px; /* 僅供文件參照，CSS 媒體查詢寫死同值 */
+
+}
+
+/* 組合 Token：引用語意 Token */
+:root {
+  --border: 1px solid var(--color-border);
+  --border-strong: 1px solid var(--color-border-strong);
+  --focus-ring: 2px solid var(--color-focus);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration: 0ms;
+    --duration-slow: 0ms;
+  }
+}

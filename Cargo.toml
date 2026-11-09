@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.82"
+
+[workspace.dependencies]
+caloud-core = { path = "crates/caloud-core" }
+caloud-auth = { path = "crates/caloud-auth" }
+caloud-orchestrator = { path = "crates/caloud-orchestrator" }
+caloud-proxy = { path = "crates/caloud-proxy" }
+caloud-api = { path = "crates/caloud-api" }
+
+anyhow = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+axum = "0.8"
+axum-extra = { version = "0.10", features = ["cookie"] }
+tower-http = { version = "0.6", features = ["trace"] }
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+arc-swap = "1"
+alloy-primitives = "1"
+alloy-sol-types = { version = "1", features = ["eip712-serde"] }
+rand = "0.8"
+hex = "0.4"
+base64 = "0.22"
+time = { version = "0.3", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }

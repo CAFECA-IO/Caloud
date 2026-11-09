@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Caloud Design System</title>
+<link rel="stylesheet" href="/assets/ds/tokens.css">
+<link rel="stylesheet" href="/assets/ds/theme.css">
+<link rel="stylesheet" href="/assets/ds/components.css">
+<script src="/assets/ds/ui.js"></script>
+<script>UI.initTheme();</script>
+<style>
+  /* Styleguide 專用（docs/05-components.md §A.6），不得用於產品頁 */
+  .sg-bar { position: sticky; top: 0; z-index: var(--z-sticky); display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); padding: var(--space-3) max(var(--space-4), env(safe-area-inset-right, 0px)) var(--space-3) max(var(--space-4), env(safe-area-inset-left, 0px)); background: var(--color-surface); border-bottom: var(--border); }
+  .sg-section { display: flex; flex-direction: column; gap: var(--space-4); }
+  .sg-swatches { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  .sg-swatch { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-xs); min-width: 0; }
+  .sg-swatch__chip { height: 48px; border-radius: var(--radius-control); border: var(--border); }
+  .sg-demo { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
+</style>
+</head>
+<body>
+<div class="sg-bar">
+  <strong>Caloud Design System</strong>
+  <span class="l-spacer"></span>
+  <button class="c-btn c-btn--sm" id="demo-theme">切換淺色／深色</button>
+</div>
+
+<main class="c-page">
+  <header class="c-page-header"><div class="c-page-header__text">
+    <h1 class="c-page-header__title">設計系統與元件</h1>
+    <p class="c-page-header__desc">規格見 docs/04-design-language.md 與 docs/05-components.md。正式風格為企業儀表板（ADR 0007）。新增或修改元件時同步更新本頁。</p>
+  </div></header>
+
+
+  <section class="sg-section">
+    <h2 class="c-section-title">色彩 Token</h2>
+    <div class="sg-swatches" id="demo-swatches"></div>
+  </section>
+
+  <section class="sg-section">
+    <h2 class="c-section-title">Button</h2>
+    <div class="sg-demo">
+      <button class="c-btn c-btn--primary" id="demo-plus"></button>
+      <button class="c-btn">次要</button>
+      <button class="c-btn c-btn--ghost">Ghost</button>
+      <button class="c-btn c-btn--danger">刪除</button>
+      <button class="c-btn c-btn--primary c-btn--danger">確認刪除</button>
+      <button class="c-btn c-btn--sm">小尺寸</button>
+      <button class="c-btn c-btn--ghost c-btn--icon" aria-label="重新整理" id="demo-icon"></button>
+      <button class="c-btn" disabled>停用</button>
+      <button class="c-btn c-btn--primary" id="demo-busy">按我看載入狀態</button>
+    </div>
+  </section>
+
+  <section class="sg-section">
+    <h2 class="c-section-title">Badge（狀態）</h2>
+    <div class="sg-demo" id="demo-badges"></div>
+  </section>
+
+  <section class="sg-section">
+    <h2 class="c-section-title">表單</h2>
+    <div class="l-grid">
+      <label class="c-field"><span class="c-field__label">App 名稱</span><input class="c-input" placeholder="例如 blog"><span class="c-field__hint">留空時以第一個 service 命名。</span></label>
+      <label class="c-field"><span class="c-field__label">網域</span><input class="c-input" value="Blog_Example" aria-invalid="true"><span class="c-field__error">網域格式錯誤，請輸入完整主機名稱，例如 app.example.com。</span></label>
+      <label class="c-field"><span class="c-field__label">Service</span><select class="c-select"><option>web</option><option>db</option></select></label>
+    </div>
+    <div class="l-row">
+      <label class="c-search" id="demo-search"><span class="u-sr-only">搜尋</span><input class="c-input" placeholder="搜尋名稱"></label>
+      <div class="c-segmented" role="group" aria-label="篩選"><button class="c-segmented__item is-active">全部</button><button class="c-segmented__item">運作中</button><button class="c-segmented__item">失敗</button></div>
+    </div>
+    <div class="c-tabs"><button class="c-tabs__item is-active">概覽</button><button class="c-tabs__item">compose</button><button class="c-tabs__item">Logs</button></div>
+  </section>
+
+  <section class="sg-section">
+    <h2 class="c-section-title">Stat 與 Card</h2>
+    <div class="l-grid">
+      <a class="c-stat" href="#"><span class="c-stat__label">運作中的 App</span><span class="c-stat__value">12<span class="u-muted u-small"> / 14</span></span><span class="c-stat__meta" id="demo-stat-meta"></span></a>
+      <a class="c-stat" href="#"><span class="c-stat__label">轉發中的網域</span><span class="c-stat__value">9<span class="u-muted u-small"> / 11</span></span><span class="c-stat__meta">2 個待驗證</span></a>
+      <a class="c-stat" href="#"><span class="c-stat__label">待處理</span><span class="c-stat__value">3</span><span class="c-stat__meta">見下方清單</span></a>
+    </div>
+  </section>
+
+  <section class="sg-section">
+    <h2 class="c-section-title">Table</h2>
+    <section class="c-card"><div class="c-card__body c-card__body--flush"><div class="c-table-wrap"><table class="c-table">
+      <thead><tr><th>名稱</th><th>狀態</th><th>網域</th><th>更新</th></tr></thead><tbody id="demo-table"></tbody></table></div></div></section>
+  </section>
+
+  <section class="sg-section">
+    <h2 class="c-section-title">Banner、Empty、Skeleton</h2>
+    <div class="l-stack" id="demo-feedback"></div>
+  </section>
+
+  <section class="sg-section">
+    <h2 class="c-section-title">CopyField、KeyValue、Code、Log</h2>
+    <div class="l-stack" id="demo-data"></div>
+  </section>
+
+  <section class="sg-section">
+    <h2 class="c-section-title">Stepper</h2>
+    <section class="c-card"><div class="c-card__body" id="demo-stepper"></div></section>
+  </section>
+
+  <section class="sg-section">
+    <h2 class="c-section-title">Overlay：Toast、ConfirmDialog、Drawer</h2>
+    <div class="sg-demo">
+      <button class="c-btn" id="demo-toast">顯示 Toast</button>
+      <button class="c-btn" id="demo-toast-err">顯示錯誤 Toast</button>
+      <button class="c-btn c-btn--danger" id="demo-confirm">ConfirmDialog</button>
+      <button class="c-btn" id="demo-drawer">Drawer</button>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+const { $, esc, icon, statusPill, copyField, empty, toast, confirmDialog, drawer, busy } = UI;
+$("#demo-theme").addEventListener("click", () => { UI.toggleTheme(); drawSwatches(); });
+
+const sampleRows = [
+  ["blog", "running", "blog.cafeca.io", 1762650000 - 300],
+  ["api", "deploying", "api.cafeca.io", 1762650000 - 40],
+  ["metabase", "failed", "—", 1762650000 - 7200],
+];
+
+// 色彩 Token：讀取目前淺色／深色的實際值
+const COLOR_TOKENS = ["--color-bg", "--color-surface", "--color-surface-raised", "--color-surface-sunken", "--color-surface-hover", "--color-text", "--color-text-muted", "--color-text-subtle", "--color-border", "--color-border-strong", "--color-accent", "--color-accent-hover", "--color-accent-subtle", "--color-on-accent", "--color-success", "--color-success-subtle", "--color-warning", "--color-warning-subtle", "--color-danger", "--color-danger-subtle", "--color-focus", "--color-sidebar-bg", "--color-sidebar-text", "--color-sidebar-text-active", "--color-sidebar-active-bg", "--color-sidebar-border"];
+function drawSwatches() {
+  const cs = getComputedStyle(document.documentElement);
+  $("#demo-swatches").innerHTML = COLOR_TOKENS.map((t) => {
+    const v = cs.getPropertyValue(t).trim();
+    return `<div class="sg-swatch"><div class="sg-swatch__chip" style="background:${esc(v)}"></div><code class="c-code">${t}</code><span class="u-muted">${esc(v)}</span></div>`;
+  }).join("");
+}
+drawSwatches();
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawSwatches);
+
+// 元件示範
+$("#demo-plus").innerHTML = `${icon("plus")}<span>新增 App</span>`;
+$("#demo-icon").innerHTML = icon("refresh");
+$("#demo-busy").addEventListener("click", (e) => busy(e.currentTarget, new Promise((r) => setTimeout(r, 1500))));
+$("#demo-badges").innerHTML = [["app", "running"], ["app", "deploying"], ["app", "failed"], ["app", "stopped"], ["domain", true], ["domain", false], ["route", "live"], ["route", "idle"], ["tls", "issued"], ["role", "super_admin"], ["role", "pending"]].map(([k, v]) => statusPill(k, v)).join("");
+$("#demo-search").insertAdjacentHTML("afterbegin", icon("search"));
+$("#demo-stat-meta").innerHTML = `${statusPill("app", "failed")} 2 個`;
+$("#demo-table").innerHTML = sampleRows.map(([n, st, d, t]) => `<tr class="is-clickable" tabindex="0"><td><div class="c-table__primary">${n}</div><div class="c-table__secondary u-mono">3f9a1c2e</div></td><td>${statusPill("app", st)}</td><td class="u-small">${d}</td><td class="u-muted u-small">${UI.relTime(t)}</td></tr>`).join("");
+$("#demo-feedback").innerHTML = `
+  <div class="c-banner">${icon("info")}<div class="c-banner__body"><strong>提示</strong><span class="u-small">一般資訊使用預設色調。</span></div></div>
+  <div class="c-banner c-banner--warning">${icon("users")}<div class="c-banner__body"><strong>2 位使用者等待核准</strong><span class="u-small">將角色改為 Member 即可讓對方部署 App。</span></div><button class="c-btn c-btn--sm">審核</button></div>
+  <div class="c-banner c-banner--danger">${icon("alert")}<div class="c-banner__body"><strong>metabase 部署失敗</strong><span class="u-small u-mono">service \`web\`：不允許使用 \`ports\`，請移除此設定。</span></div></div>
+  <section class="c-card">${empty({ iconName: "box", title: "還沒有 App", body: "上傳一份 docker compose 檔，Caloud 會立即啟動容器。", action: `<button class="c-btn c-btn--primary">${icon("plus")}<span>新增 App</span></button>` })}</section>
+  <div class="l-stack"><span class="c-skeleton"></span><span class="c-skeleton"></span></div>`;
+$("#demo-data").innerHTML = `
+  <div class="c-field"><span class="c-label">TXT 紀錄 · 值</span>${copyField("caloud-4f1d9a7c2b8e4e0f9a1d2c3b4a5f6e7d", "驗證值")}</div>
+  <dl class="c-kv"><dt class="c-kv__key">狀態</dt><dd class="c-kv__value">${statusPill("app", "running")}</dd><dt class="c-kv__key">Services</dt><dd class="c-kv__value u-mono">web, db</dd><dt class="c-kv__key">網域</dt><dd class="c-kv__value">blog.cafeca.io → <code class="c-code">web:80</code></dd></dl>
+  <pre class="c-log">2026-11-09T08:00:01Z web-1  | nginx: ready for start up
+2026-11-09T08:00:02Z db-1   | database system is ready to accept connections</pre>`;
+$("#demo-stepper").innerHTML = `<ol class="c-stepper">
+  <li class="c-stepper__step is-done"><span class="c-stepper__index">${icon("check")}</span><div class="c-stepper__content"><span class="c-stepper__label">輸入網域</span><span class="u-mono">api.cafeca.io</span></div></li>
+  <li class="c-stepper__step is-current"><span class="c-stepper__index">2</span><div class="c-stepper__content"><span class="c-stepper__label">設定 DNS</span><div class="c-field"><span class="c-label">TXT 紀錄 · 名稱</span>${copyField("_caloud-challenge.api.cafeca.io", "紀錄名稱")}</div></div></li>
+  <li class="c-stepper__step is-current"><span class="c-stepper__index">3</span><div class="c-stepper__content"><span class="c-stepper__label">驗證擁有權</span><div><button class="c-btn c-btn--primary">${icon("shield")}<span>驗證</span></button></div></div></li>
+  <li class="c-stepper__step"><span class="c-stepper__index">4</span><div class="c-stepper__content"><span class="c-stepper__label">綁定 App</span></div></li></ol>`;
+$("#demo-toast").addEventListener("click", () => toast("已建立 blog，開始部署"));
+$("#demo-toast-err").addEventListener("click", () => toast("網域已存在，請改用其他主機名稱。", "danger"));
+$("#demo-confirm").addEventListener("click", async () => toast((await confirmDialog({ title: "刪除 blog？", body: "容器會被移除，綁定的網域會停止轉發。資料 volume 會保留。", confirmText: "刪除 App" })) ? "已確認" : "已取消"));
+$("#demo-drawer").addEventListener("click", () => {
+  const dr = drawer({ title: "blog", subtitle: statusPill("app", "running") });
+  dr.body.innerHTML = `<dl class="c-kv"><dt class="c-kv__key">Services</dt><dd class="c-kv__value u-mono">web, db</dd></dl><p class="u-muted">Drawer 用於檢視與編輯單一資源，不離開列表。</p>`;
+  dr.footer.classList.remove("u-hidden");
+  dr.footer.innerHTML = `<button class="c-btn" data-close>關閉</button><button class="c-btn c-btn--primary">${icon("refresh")}<span>重新部署</span></button>`;
+});
+</script>
+</body>
+</html>
