@@ -164,6 +164,8 @@ MCP 用戶端 ──POST /mcp (Bearer cld_…)──► mcp.rs ──► service
 | `blocked_hosts` | `hostname` | 封鎖的主機名稱、理由、操作者 | FR-OPS-03 |
 | `nodes` | `id`（UUID） | 名稱、擁有者（空值＝平臺節點）、偵測規格、可配置量、已配置量、狀態（active／draining／offline）、節點權杖雜湊、最後心跳 | FR-OPS-04、FR-OPS-06 |
 | `node_join_tokens` | `token_hash` | 一次性加入權杖、擁有者、到期、使用時間 | FR-OPS-04 |
+| `migrations`（M7） | `id`（UUID） | 專案、自訂網域、狀態（盤點／演練／凍結／已切換／已回退）、遷移權杖雜湊、快照位置、時間線 | FR-MIG-01～10 |
+| `migration_checks`（M7） | 自增 `id` | 遷移、類型（資料表／檔案／帳號／驗收清單）、對象、來源值、目標值、結果、簽核者 | FR-MIG-06、FR-MIG-07 |
 
 ```
 users 1 ──< sessions
@@ -215,6 +217,7 @@ Internet ──:80/:443──► [caloud 容器] ──docker.sock──► Dock
                        ├──► 控制面（API、MCP、調度、解析、SQLite、物件儲存）
                        └──► Runner 節點 × N（平臺主機＋用戶自有設備）
 Runner 的 caloud-agent ──WebSocket（主動連出）──► 控制面 /agent/v1/connect
+舊主機的 caloud-agent --migrate ──（主動連出，一次性）──► 控制面（快照、雜湊、最後同步，ADR 0013）
 ```
 
 | 網域 | 用途 |
@@ -241,3 +244,4 @@ Runner 的 caloud-agent ──WebSocket（主動連出）──► 控制面 /ag
 | [0010](adr/0010-platform.md) | 平臺化、網域分工（caloud.tw／cafeca.io）、SQLite 暫留 |
 | [0011](adr/0011-runner-websocket.md) | Runner 以 WebSocket 主動連入，之後以 yamux 多工反向通道 |
 | [0012](adr/0012-runner-crate.md) | 新增 `caloud-runner` crate 與 `caloud-agent` 執行檔 |
+| [0013](adr/0013-service-migration.md) | 既有服務遷移：寫入凍結、agent 遷移模式、DNS-01 委派、hosts 預覽驗收 |

@@ -22,7 +22,7 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 ### 1.2 範圍
 
 - **範圍內**：單機 Docker 主機、HTTP/HTTPS 轉發、CAFECA 登入、Web 管理介面；M4 起：控制面＋多台 Runner 節點（含用戶自有設備）、GitHub 整合、自動驗證、映像建置、訂閱與配額
-- **範圍外（目前）**：Kubernetes、非 GitHub 的 Git 服務、GPU 工作負載、跨區域高可用、TCP/UDP 非 HTTP 轉發（TLS 直通與 App 自行對外的 UDP 除外）
+- **範圍外（目前）**：Kubernetes、非 GitHub 的 Git 服務、GPU 工作負載、跨區域高可用、TCP/UDP 非 HTTP 轉發（TLS 直通與 App 自行對外的 UDP 除外）；需要 GPU 或 `docker.sock` 的服務只考慮未來在「信任的用戶自有設備」上執行
 
 ## 2. 功能需求（FR）
 
@@ -165,6 +165,11 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-AN-02 | 產生專屬 compose，並通過 [07 §3](07-security.md#3-compose-政策) 的 compose 政策；主機 ports 移除改由平臺路由 | P0 | M5 |
 | FR-AN-03 | 用戶可編輯產生結果，或在儲存庫放 `.caloud/compose.yml` 覆寫 | P0 | M5 |
 | FR-AN-04 | 每個判斷標示信心度（高、中、低）與依據的檔案及行號；低信心項目在第一次驗證前需用戶確認 | P1 | M5 |
+| FR-AN-05 | 平臺 App 適用 [07 §3.6](07-security.md#36-平臺-app-政策)：允許儲存庫內的 `build`（context、dockerfile 不超出儲存庫）；仍禁止 host 網路、主機路徑、`docker.sock`、privileged、`ports`；儲存庫 compose 中的 `env_file` 轉為平臺注入的環境變數 | P0 | M5 |
+| FR-AN-06 | 專案可指定儲存庫子目錄作為根目錄（monorepo，例：`app/`） | P1 | M5 |
+| FR-AN-07 | 偵測持久化目錄（寫入工作目錄下的路徑、`*_DIR`／`*_PATH` 變數），建議具名 volume；寫入但未掛 volume 列為 Medium | P1 | M5 |
+| FR-AN-08 | 偵測系統套件與原生模組（ffmpeg、Chromium／Playwright、sharp、onnxruntime、node-gyp 編譯）：範本能加裝者自動加裝，否則列為 Medium 並建議自備 Dockerfile | P1 | M5 |
+| FR-AN-09 | 偵測建置時變數（`NEXT_PUBLIC_*`、`VITE_*` 等），標示其值是否隨環境不同（網址、origin 類） | P1 | M5 |
 
 ### 2.11 平臺：環境 ENV
 
@@ -176,6 +181,10 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-ENV-04 | 只有沒有 Blocker、High 的發布可上 production；強制發布需二次確認並寫稽核 | P0 | M7 |
 | FR-ENV-05 | 秘密變數依環境分開設定，只寫不讀；日誌與報告自動遮蔽 | P0 | M7 |
 | FR-ENV-06 | Production 資料 volume 每日備份、可還原 | P1 | M8 |
+| FR-ENV-08 | 發布前任務（資料庫 migration、seed 等）：在切換流量前以一次性容器執行，失敗則中止發布並保留舊版 | P0 | M7 |
+| FR-ENV-09 | 常駐 worker（無對外 port 的長駐服務）與排程任務（cron 式，呼叫環境內的 HTTP 端點或執行指令）；排程結果與日誌可查 | P0 | M7 |
+| FR-ENV-10 | 部署策略：預設藍綠；有以檔案為資料庫的 volume 或用戶指定時，改為「先停舊版再啟新版」，避免兩版同時寫入 | P1 | M7 |
+| FR-ENV-11 | 建置時變數隨環境不同時，依環境分別建置；發布記錄每個環境的映像 digest，報告註明 | P1 | M7 |
 | FR-ENV-07 | 子網域 ID 由 a-z、0-9 組成，以字母開頭且同時含字母與數字；長度即環境種類（預設 8／12／16，後台可調）；以 CSPRNG 產生，排除使用中、保留字（含包含保留字者）與封鎖清單 | P0 | M4 |
 
 ### 2.12 平臺：驗證與報告 CI、RPT
@@ -187,6 +196,8 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-CI-03 | 測試完成即銷毀容器、volume 與子網域，只保留報告；任何階段失敗仍執行彙整與銷毀 | P0 | M6 |
 | FR-CI-04 | 同一 branch 有新 commit 時取消舊的執行 | P1 | M6 |
 | FR-CI-05 | 驗證失敗時可選擇保留環境 30 分鐘以便除錯 | P2 | M6 |
+| FR-CI-06 | 建置資源與執行配額分開：建置可用較大的記憶體與 CPU，上限依方案，計入建置分鐘 | P0 | M6 |
+| FR-CI-07 | 驗證環境也執行發布前任務（FR-ENV-08），失敗列為 Blocker | P0 | M6 |
 | FR-RPT-01 | 問題分 Blocker、High、Medium、Low 四級，有 Blocker 或 High 即驗證失敗；依指紋去重；標示來源階段與位置 | P0 | M6 |
 | FR-RPT-02 | 報告列出相對同 branch 上次驗證的新增、仍存在、已修正 | P1 | M6 |
 | FR-RPT-03 | 報告保留期依方案；可匯出 JSON 與 Markdown | P1 | M6 |
@@ -215,6 +226,23 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-OPS-09 | Edge 依 Host 路由到環境所在節點；經 Runner 主動建立的通道轉發 | P0 | M4 |
 | FR-OPS-10 | `*.caloud.tw` 與 `caloud.tw` 以 ACME DNS-01 經 Cloudflare API 申請 wildcard 憑證並自動續簽 | P0 | M4 |
 | FR-OPS-11 | 用戶容器以 gVisor 執行；環境之間網路不通；封鎖雲端 metadata 與平臺內網 | P0 | M4 |
+
+### 2.15 平臺：既有服務遷移 MIG
+
+把運作中的服務（含網域、資料庫、檔案、帳號）搬到 Caloud（[ADR 0013](adr/0013-service-migration.md)）。範例：iSunFA 由舊主機遷入，網域 `isunfa.com`。
+
+| 編號 | 需求 | 優先 | 里程碑 |
+| --- | --- | --- | --- |
+| FR-MIG-01 | 專案可建立「遷移」並綁定已驗證的自訂網域；驗證只需 TXT，不改 A 記錄，舊站照常服務 | P0 | M7 |
+| FR-MIG-02 | 切換前取得網域憑證：用戶新增 `_acme-challenge.<網域>` CNAME 委派到 Caloud，以 DNS-01 申請，切換當下 TLS 已就緒 | P0 | M7 |
+| FR-MIG-03 | 舊主機以一次性權杖執行 `caloud-agent --migrate`（只連出）；支援 PostgreSQL（`pg_dump`）、MySQL（`mysqldump`）、檔案目錄（tar 串流）；資料庫只需唯讀帳號 | P0 | M7 |
+| FR-MIG-04 | 盤點：比對舊環境的環境變數名稱、資料庫 schema、檔案目錄與解析結果並列出缺漏；貼上的 `.env` 轉為秘密變數 | P0 | M7 |
+| FR-MIG-05 | 演練：把快照還原到專用遷移環境（12 字元子網域），執行驗證與資料比對；可重複多次 | P0 | M7 |
+| FR-MIG-06 | 資料比對：每張表的筆數、依主鍵排序的內容雜湊、序列值；檔案清單（路徑、大小、SHA-256）。來源端由 agent 計算、目標端由平臺計算；遺失或不符列為 Blocker | P0 | M7 |
+| FR-MIG-07 | 帳號驗收：帳號相關資料表（使用者、登入憑證如 WebAuthn credential）逐筆比對；hosts 預覽讓用戶以真網域與 Passkey 登入遷移環境，逐項勾選驗收清單；可另以測試帳號執行自動腳本 | P0 | M7 |
+| FR-MIG-08 | 切換：提醒預先降低 TTL；寫入凍結（舊站唯讀或維護頁，可由 agent 執行用戶設定的指令）；最後同步並再次比對，全部通過才能切換；偵測 DNS 生效；切換後監控 30 分鐘（5xx 比例、登入成功數） | P0 | M7 |
+| FR-MIG-09 | 回退：舊站至少保留 7 天；回退即 DNS 指回舊站；可匯出切換後新增的資料（資料庫差異、新檔案）供回寫 | P1 | M7 |
+| FR-MIG-10 | 遷移報告：時間線、比對結果、驗收清單與簽核者；MCP 可讀進度與報告，執行切換需 `production` 範圍與 `confirm: true` | P1 | M7 |
 
 ## 3. 非功能需求（NFR）
 

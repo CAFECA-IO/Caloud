@@ -336,3 +336,17 @@
 - 節點權杖 `caloud_node_…`：只存雜湊；節點被移除即失效。agent 存於 `~/.caloud-agent/node.json`（權限 0600）。
 - 以節點權杖重連時沿用原節點，更新規格；狀態若為 `offline` 改回 `active`（`draining` 維持）。
 - 控制面每 15 秒把超過 60 秒沒有心跳的節點標為 `offline`。
+
+### 6.1 遷移模式（草案，M7-12 實作時定稿）
+
+`caloud-agent --migrate --join <遷移權杖>` 在舊主機執行（[ADR 0013](adr/0013-service-migration.md)）。沿用同一端點與訊框格式，註冊後改用以下訊息：
+
+| 方向 | type | 用途 |
+| --- | --- | --- |
+| agent → 控制面 | `migrate_hello` | 遷移權杖、可用工具（`pg_dump`、`mysqldump`、`tar`）與版本 |
+| 控制面 → agent | `migrate_task` | 要執行的工作：`snapshot`（資料庫連線字串、目錄清單）、`manifest`（只算雜湊）、`freeze`（執行用戶設定的凍結指令） |
+| agent → 控制面 | `dump_chunk` | 快照分塊（另開 yamux stream 傳輸二進位資料） |
+| agent → 控制面 | `manifest` | 每張表的筆數、內容雜湊、序列值；檔案的路徑、大小、SHA-256 |
+| agent → 控制面 | `task_done` | 工作結果與錯誤 |
+
+REST 路徑（建立遷移、演練、比對、驗收清單、切換、回退）於 M7-11 實作時寫入 §3。
