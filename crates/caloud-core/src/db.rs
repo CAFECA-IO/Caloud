@@ -73,6 +73,8 @@ pub async fn load_routes(db: &Db) -> anyhow::Result<Vec<Route>> {
                     .then(|| r.tls_port.map(|p| format!("{host}:{p}")))
                     .flatten(),
                 hostname: r.hostname,
+                // 單機 App 直接在控制面主機上；平臺環境（M7）會帶節點
+                node: None,
             }
         })
         .collect())

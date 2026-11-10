@@ -18,3 +18,5 @@ sysinfo.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
 caloud-core.workspace = true
+tokio-yamux.workspace = true
+bytes.workspace = true

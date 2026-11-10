@@ -69,29 +69,38 @@ pub async fn run_once(opts: &Options) -> anyhow::Result<Outcome> {
             Some(Err(e)) => return Err(e.into()),
         }
     };
-    let (node_id, heartbeat_secs) = match ack {
+    let (node_id, heartbeat_secs, node_token) = match ack {
         ServerMsg::Ack {
             node_id,
             node_token,
             status,
             heartbeat_secs,
         } => {
-            if let Some(token) = node_token {
-                state::save(
-                    &opts.state_dir,
-                    &NodeState {
-                        server: opts.server.clone(),
-                        node_id: node_id.clone(),
-                        node_token: token,
-                    },
-                )?;
-            }
+            let token = match (node_token, &saved) {
+                (Some(token), _) => {
+                    state::save(
+                        &opts.state_dir,
+                        &NodeState {
+                            server: opts.server.clone(),
+                            node_id: node_id.clone(),
+                            node_token: token.clone(),
+                        },
+                    )?;
+                    token
+                }
+                (None, Some(s)) => s.node_token.clone(),
+                (None, None) => anyhow::bail!("控制面未發給節點權杖"),
+            };
             tracing::info!(node = %node_id, %status, "registered");
-            (node_id, heartbeat_secs.max(1))
+            (node_id, heartbeat_secs.max(1), token)
         }
         ServerMsg::Error { message } => return Ok(Outcome::Rejected(message)),
         ServerMsg::Status { .. } => anyhow::bail!("控制面回應順序錯誤"),
     };
+
+    // 通道與控制連線同生共死：任一條斷線就整個重連（docs/06 §6.1）
+    let server = opts.server.clone();
+    let mut tunnel = AbortOnDrop(tokio::spawn(async move { crate::tunnel::run(&server, &node_token).await }));
 
     let mut usage = Usage::new();
     let mut tick = tokio::time::interval(Duration::from_secs(heartbeat_secs));
@@ -111,10 +120,26 @@ pub async fn run_once(opts: &Options) -> anyhow::Result<Outcome> {
                 },
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                 Some(Ok(_)) => {}
+            },
+            r = &mut tunnel.0 => {
+                match r {
+                    Ok(Err(e)) => tracing::warn!(error = %e, "tunnel failed"),
+                    _ => tracing::warn!("tunnel closed"),
+                }
+                break;
             }
         }
     }
     Ok(Outcome::Disconnected { registered: true })
+}
+
+/// 離開 `run_once` 時一併結束通道
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// 下一次重連前等待的時間：1、2、4… 秒，上限 60 秒

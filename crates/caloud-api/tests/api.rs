@@ -107,6 +107,7 @@ struct Env {
     db: caloud_core::db::Db,
     dir: PathBuf,
     http: reqwest::Client,
+    tunnels: caloud_proxy::TunnelRegistry,
 }
 
 impl Env {
@@ -174,6 +175,7 @@ impl Env {
         };
         let db = caloud_core::db::connect(&cfg.data_dir).await.unwrap();
         let routes = RouteTable::default();
+        let tunnels = caloud_proxy::TunnelRegistry::default();
         let state = AppState {
             verifier: Arc::new(CafecaVerifier::new(cfg.cafeca_wallet.clone(), None)),
             runner: ComposeRunner::new(
@@ -187,6 +189,7 @@ impl Env {
             http: reqwest::Client::new(),
             cfg: Arc::new(cfg),
             agents: Default::default(),
+            tunnels: tunnels.clone(),
         };
         tokio::spawn(async move { axum::serve(listener, caloud_api::router(state)).await.unwrap() });
         Env {
@@ -197,6 +200,7 @@ impl Env {
             db,
             dir,
             http: reqwest::Client::new(),
+            tunnels,
         }
     }
 
@@ -1569,4 +1573,177 @@ async fn silent_node_goes_offline_and_returns_on_reconnect() {
     let back = wait_node(&env, &admin, "runner-test-2", "active").await;
     assert_eq!(back["id"], id);
     agent.abort();
+}
+
+// ───────────────────────── M4-07：Runner 通道與 Upgrade 轉發 ─────────────────────────
+
+/// 節點上的 App 替身：回 Host、回聲 body、WebSocket 回聲
+async fn spawn_echo_app() -> std::net::SocketAddr {
+    use axum::extract::ws::{Message as WsMsg, WebSocketUpgrade};
+    use axum::http::HeaderMap;
+    let app = Router::new()
+        .route(
+            "/hello",
+            get(|h: HeaderMap| async move {
+                let host = h.get("host").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+                let fwd = h
+                    .get("x-forwarded-host")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                format!("hi {host} {fwd}")
+            }),
+        )
+        .route("/echo", post(|body: axum::body::Bytes| async move { body }))
+        .route(
+            "/ws",
+            get(|ws: WebSocketUpgrade| async move {
+                ws.on_upgrade(|mut sock| async move {
+                    while let Some(Ok(m)) = sock.recv().await {
+                        match m {
+                            WsMsg::Text(_) | WsMsg::Binary(_) => {
+                                if sock.send(m).await.is_err() {
+                                    break;
+                                }
+                            }
+                            WsMsg::Close(_) => break,
+                            _ => {}
+                        }
+                    }
+                })
+            }),
+        );
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    addr
+}
+
+/// 經 Edge 以指定 Host 開 WebSocket，送三則訊息確認回聲
+async fn ws_echo_through(edge: std::net::SocketAddr, host: &str) {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::Message;
+    let mut req = format!("ws://{edge}/ws").into_client_request().unwrap();
+    req.headers_mut().insert("host", host.parse().unwrap());
+    let (mut ws, res) = tokio_tungstenite::connect_async(req).await.unwrap();
+    assert_eq!(res.status(), 101);
+    for i in 0..3 {
+        let text = format!("ping {i} via {host}");
+        ws.send(Message::Text(text.clone().into())).await.unwrap();
+        let back = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(back.into_text().unwrap().as_str(), text);
+    }
+    let big = vec![7u8; 200 * 1024];
+    ws.send(Message::Binary(big.clone().into())).await.unwrap();
+    let back = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(back.into_data().as_ref(), big.as_slice());
+    ws.close(None).await.unwrap();
+}
+
+// FR-OPS-09、FR-DOM-06：Edge 經 Runner 通道轉發 HTTP 與 WebSocket；節點移除後回 502
+#[tokio::test]
+async fn edge_forwards_through_runner_tunnel_and_upgrades() {
+    use caloud_core::model::Route;
+    use caloud_runner::client::{run_once, Options, Outcome};
+    let env = Env::new().await;
+    let (admin, _) = admin_and_member(&env).await;
+
+    // 權杖無效時不升級
+    let r = env
+        .http
+        .get(env.url("/agent/v1/tunnel"))
+        .header("authorization", "Bearer caloud_node_nope")
+        .header("connection", "upgrade")
+        .header("upgrade", "websocket")
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+
+    let (_, jt) = env.call("POST", "/api/admin/nodes/join-tokens", &admin, Some(json!({}))).await;
+    let opts = Options {
+        server: env.base.clone(),
+        join_token: Some(jt["token"].as_str().unwrap().to_string()),
+        name: "runner-tunnel".into(),
+        state_dir: env.dir.join("agent-tunnel"),
+    };
+    let o = opts.clone();
+    let agent = tokio::spawn(async move { run_once(&o).await.unwrap() });
+    let node = wait_node(&env, &admin, "runner-tunnel", "active").await;
+    let id = node["id"].as_str().unwrap().to_string();
+    for _ in 0..200 {
+        if env.tunnels.contains(&id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(env.tunnels.contains(&id));
+
+    let app = spawn_echo_app().await;
+    let routes = RouteTable::default();
+    let route = |host: &str, upstream: String, node: Option<String>| Route {
+        hostname: host.into(),
+        upstream,
+        passthrough: None,
+        node,
+    };
+    routes.replace(vec![
+        route("tun.test", format!("http://{app}"), Some(id.clone())),
+        route("direct.test", format!("http://{app}"), None),
+        route("meta.test", "http://169.254.169.254:80".into(), Some(id.clone())),
+    ]);
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let edge = l.local_addr().unwrap();
+    let tunnels = env.tunnels.clone();
+    tokio::spawn(async move { caloud_proxy::serve_listener(l, routes, tunnels).await });
+    let get = |host: &'static str, path: &'static str| env.http.get(format!("http://{edge}{path}")).header("host", host).send();
+
+    // HTTP 經通道：Host 與 X-Forwarded-Host 保留
+    let r = get("tun.test", "/hello").await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.text().await.unwrap(), "hi tun.test tun.test");
+    let body = vec![b'x'; 300 * 1024];
+    let r = env
+        .http
+        .post(format!("http://{edge}/echo"))
+        .header("host", "tun.test")
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.bytes().await.unwrap().as_ref(), body.as_slice());
+    // 直接上游仍可用
+    assert_eq!(
+        get("direct.test", "/hello").await.unwrap().text().await.unwrap(),
+        "hi direct.test direct.test"
+    );
+
+    // WebSocket：經通道與直接上游都能雙向轉接（FR-DOM-06）
+    ws_echo_through(edge, "tun.test").await;
+    ws_echo_through(edge, "direct.test").await;
+
+    // agent 拒絕雲端 metadata
+    assert_eq!(get("meta.test", "/").await.unwrap().status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(get("nope.test", "/").await.unwrap().status(), StatusCode::NOT_FOUND);
+
+    // 節點移除：通道立即中斷，Edge 回 502
+    env.call("POST", &format!("/api/admin/nodes/{id}/drain"), &admin, None).await;
+    let (st, _) = env.call("DELETE", &format!("/api/admin/nodes/{id}"), &admin, None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    assert!(!env.tunnels.contains(&id));
+    assert_eq!(get("tun.test", "/hello").await.unwrap().status(), StatusCode::BAD_GATEWAY);
+    let out = tokio::time::timeout(Duration::from_secs(5), agent).await.unwrap().unwrap();
+    assert!(matches!(out, Outcome::Rejected(_)), "{out:?}");
 }

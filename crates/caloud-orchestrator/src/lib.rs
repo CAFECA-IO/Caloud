@@ -7,4 +7,4 @@ pub mod compose;
 pub mod policy;
 
 pub use compose::{ComposeRunner, DeploySpec, GitSource, ServiceStatus};
-pub use policy::{validate, validate_with, Policy, PolicyError, ValidatedCompose};
+pub use policy::{prepare_platform, validate, validate_with, PlatformCompose, Policy, PolicyError, ValidatedCompose};

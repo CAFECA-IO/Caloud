@@ -519,6 +519,7 @@ pub async fn delete_node(s: &AppState, me: &CurrentUser, id: &str) -> ApiResult<
     }
     sqlx::query("DELETE FROM nodes WHERE id = ?").bind(&node.id).execute(&s.db).await?;
     s.agents.disconnect(&node.id);
+    s.tunnels.remove(&node.id, None);
     audit(
         &s.db,
         Some(&me.0.account),
@@ -613,6 +614,18 @@ pub(crate) async fn register_node(
         }
         _ => Err(ApiError::Unauthorized),
     }
+}
+
+/// 通道驗證（docs/06 §6.1）：節點權杖 → 節點 id（節點必須存在）
+pub(crate) async fn node_by_token(s: &AppState, token: &str) -> ApiResult<String> {
+    if !token.starts_with(NODE_PREFIX) {
+        return Err(ApiError::Unauthorized);
+    }
+    let id: Option<String> = sqlx::query_scalar("SELECT id FROM nodes WHERE token_hash = ?")
+        .bind(hash_token(token))
+        .fetch_optional(&s.db)
+        .await?;
+    id.ok_or(ApiError::Unauthorized)
 }
 
 /// FR-OPS-04：心跳。回傳節點是否仍存在（已移除則 agent 應斷線）

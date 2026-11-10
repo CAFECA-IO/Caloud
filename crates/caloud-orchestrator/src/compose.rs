@@ -340,6 +340,7 @@ mod tests {
             Policy {
                 privileged: true,
                 repo_depth: Some(1),
+                ..Default::default()
             },
         )
         .unwrap();

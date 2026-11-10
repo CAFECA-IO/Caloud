@@ -121,6 +121,7 @@ fn policy(privileged: bool, git: Option<&GitSource>) -> Policy {
     Policy {
         privileged,
         repo_depth: git.map(|g| g.path.split('/').filter(|c| !c.is_empty() && *c != ".").count()),
+        ..Default::default()
     }
 }
 

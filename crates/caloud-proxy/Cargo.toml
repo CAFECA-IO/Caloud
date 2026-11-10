@@ -12,3 +12,7 @@ hyper-util.workspace = true
 http-body-util.workspace = true
 arc-swap.workspace = true
 caloud-core.workspace = true
+tokio-yamux.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+bytes.workspace = true

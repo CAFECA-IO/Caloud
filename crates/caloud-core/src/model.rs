@@ -129,6 +129,8 @@ pub struct Route {
     pub upstream: String,
     /// TLS 直通目標（FR-DOM-09），例：caloud-<app>-relay:443
     pub passthrough: Option<String>,
+    /// 環境所在的 Runner 節點；有值時經該節點的通道轉發（FR-OPS-09）
+    pub node: Option<String>,
 }
 
 /// host 網路 service 的轉發目標（FR-DOM-10）

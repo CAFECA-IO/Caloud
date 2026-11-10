@@ -23,9 +23,11 @@ caloud-core.workspace = true
 caloud-auth.workspace = true
 caloud-orchestrator.workspace = true
 caloud-proxy.workspace = true
+tokio-yamux.workspace = true
+futures-util.workspace = true
+bytes.workspace = true
 
 [dev-dependencies]
 alloy-sol-types.workspace = true
 caloud-runner.workspace = true
 tokio-tungstenite.workspace = true
-futures-util.workspace = true

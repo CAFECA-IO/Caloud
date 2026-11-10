@@ -2,7 +2,7 @@
 //!
 //! 讀取 TLS ClientHello 的 SNI，網域設為直通時把整條 TCP 連線原封不動轉給 App；
 //! App 自己終結 TLS 並管理憑證（含 ACME TLS-ALPN-01）。其他網域在 Caloud 自己的 HTTPS（M2-01）完成前一律關閉連線。
-use crate::RouteTable;
+use crate::{RouteTable, TunnelRegistry};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -11,21 +11,22 @@ use tokio::net::{TcpListener, TcpStream};
 /// ClientHello 最多讀取的位元組（單一 TLS record 上限 16 KiB + 標頭）
 const MAX_HELLO: usize = 16 * 1024 + 5;
 
-pub async fn serve_tls_passthrough(addr: SocketAddr, routes: RouteTable) -> anyhow::Result<()> {
+pub async fn serve_tls_passthrough(addr: SocketAddr, routes: RouteTable, tunnels: TunnelRegistry) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, "tls passthrough listening");
     loop {
         let (stream, peer) = listener.accept().await?;
         let routes = routes.clone();
+        let tunnels = tunnels.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(stream, &routes).await {
+            if let Err(e) = handle(stream, &routes, &tunnels).await {
                 tracing::debug!(%peer, error = %e, "tls passthrough closed");
             }
         });
     }
 }
 
-async fn handle(mut client: TcpStream, routes: &RouteTable) -> anyhow::Result<()> {
+async fn handle(mut client: TcpStream, routes: &RouteTable, tunnels: &TunnelRegistry) -> anyhow::Result<()> {
     let mut buf = Vec::with_capacity(2048);
     let sni = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -45,10 +46,11 @@ async fn handle(mut client: TcpStream, routes: &RouteTable) -> anyhow::Result<()
     })
     .await??;
     let Some(sni) = sni else { anyhow::bail!("no SNI") };
-    let Some(target) = routes.lookup_passthrough(&sni) else {
+    let Some(up) = routes.lookup_passthrough_route(&sni) else {
         anyhow::bail!("no passthrough route for {sni}");
     };
-    let mut upstream = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&target)).await??;
+    // FR-OPS-09：環境在 Runner 節點上時經通道
+    let mut upstream = tunnels.dial(up.node.as_deref(), &up.target).await?;
     upstream.write_all(&buf).await?;
     tokio::io::copy_bidirectional(&mut client, &mut upstream).await?;
     Ok(())
@@ -194,12 +196,13 @@ mod tests {
             hostname: "relay.cafeca.io".into(),
             upstream: "http://x".into(),
             passthrough: Some(up_addr.to_string()),
+            node: None,
         }]);
         let front = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let front_addr = front.local_addr().unwrap();
         drop(front);
         let r2 = routes.clone();
-        tokio::spawn(async move { serve_tls_passthrough(front_addr, r2).await });
+        tokio::spawn(async move { serve_tls_passthrough(front_addr, r2, TunnelRegistry::default()).await });
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let h = hello("relay.cafeca.io");

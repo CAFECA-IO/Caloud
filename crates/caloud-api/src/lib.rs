@@ -35,6 +35,8 @@ pub struct AppState {
     pub http: reqwest::Client,
     /// 已連線的 Runner agent（ADR 0011）
     pub agents: AgentHub,
+    /// Runner 通道（docs/06 §6.1）；與 Edge 共用同一個
+    pub tunnels: caloud_proxy::TunnelRegistry,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -81,6 +83,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/nodes/{id}/activate", post(admin::activate_node))
         // Runner agent（ADR 0011）
         .route(caloud_core::agent::CONNECT_PATH, get(agent::connect))
+        .route(caloud_core::tunnel::TUNNEL_PATH, get(agent::tunnel))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state)
 }

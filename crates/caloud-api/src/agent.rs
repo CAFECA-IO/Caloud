@@ -5,8 +5,11 @@ use crate::service::admin;
 use crate::AppState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::response::Response;
+use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use bytes::Bytes;
 use caloud_core::agent::{AgentMsg, ServerMsg, HEARTBEAT_SECS, REGISTER_TIMEOUT_SECS};
+use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -148,6 +151,54 @@ async fn session(s: AppState, mut sock: WebSocket) {
     s.agents.remove(&node.id, &tx);
     let _ = sock.send(Message::Close(None)).await;
     tracing::info!(node = %node.id, "agent disconnected");
+}
+
+/// Runner 通道（docs/06 §6.1）：Bearer 節點權杖；binary frame 承載 yamux，控制面為 client。
+pub async fn tunnel(State(s): State<AppState>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    let token = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    let node = match admin::node_by_token(&s, token).await {
+        Ok(id) => id,
+        Err(crate::ApiError::Unauthorized) => return StatusCode::UNAUTHORIZED.into_response(),
+        Err(e) => return e.into_response(),
+    };
+    ws.max_message_size(TUNNEL_FRAME)
+        .max_frame_size(TUNNEL_FRAME)
+        .on_upgrade(move |sock| tunnel_session(s, node, sock))
+}
+
+/// 通道單一 frame 上限（yamux 預設視窗 256 KiB）
+const TUNNEL_FRAME: usize = 1024 * 1024;
+
+async fn tunnel_session(s: AppState, node: String, sock: WebSocket) {
+    let (sink, stream) = sock.split();
+    let stream = stream
+        .take_while(|m| std::future::ready(!matches!(m, Ok(Message::Close(_)))))
+        .filter_map(|m| {
+            std::future::ready(match m {
+                Ok(Message::Binary(b)) => Some(Ok::<Bytes, std::io::Error>(b)),
+                Ok(_) => None,
+                Err(e) => Some(Err(std::io::Error::other(e))),
+            })
+        });
+    let sink = sink
+        .sink_map_err(std::io::Error::other)
+        .with(|b: Bytes| std::future::ready(Ok::<_, std::io::Error>(Message::Binary(b))));
+    let io = caloud_core::tunnel::ws_io(stream, sink);
+    let mut session = tokio_yamux::Session::new_client(io, tokio_yamux::Config::default());
+    let gen = s.tunnels.register(&node, session.control());
+    tracing::info!(%node, "runner tunnel connected");
+    // 控制面不接受 agent 開的 stream；持續 poll 以驅動 session
+    while let Some(r) = session.next().await {
+        if r.is_err() {
+            break;
+        }
+    }
+    s.tunnels.remove(&node, Some(gen));
+    tracing::info!(%node, "runner tunnel disconnected");
 }
 
 /// FR-OPS-04：背景任務，定期把太久沒心跳的節點標為離線

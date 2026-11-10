@@ -92,7 +92,7 @@
 | M4-04 | `caloud-agent`：規格偵測與可配置量 | FR-OPS-04 | ✅ |
 | M4-05 | 節點加入權杖、WebSocket 註冊與心跳、離線判定、排空 | FR-OPS-04、FR-OPS-06 | ✅ |
 | M4-06 | 依容量選擇節點 | FR-OPS-08 | ✅ |
-| M4-07 | Edge 經 Runner 通道（yamux）轉發；WebSocket／Upgrade 轉發 | FR-OPS-09、FR-DOM-06 | 🚧 |
+| M4-07 | Edge 經 Runner 通道（yamux）轉發；WebSocket／Upgrade 轉發 | FR-OPS-09、FR-DOM-06 | ✅ |
 | M4-08 | `*.caloud.tw` wildcard 憑證（Cloudflare DNS-01）、rustls SNI、`:80` 轉 HTTPS | FR-OPS-10、FR-DOM-05、FR-DOM-08 | ⬜ |
 | M4-09 | 用戶容器以 gVisor 執行、環境網路隔離、封鎖 metadata | FR-OPS-11 | ⬜ |
 
@@ -105,7 +105,7 @@
 | M5-03 | 解析器：compose、Dockerfile、Node、Rust、Go、Python 範本、附加資料庫、環境變數 | FR-AN-01、FR-AN-02 | ⬜ |
 | M5-04 | 信心度與依據；`.caloud/compose.yml` 覆寫；編輯產生結果 | FR-AN-03、FR-AN-04 | ⬜ |
 | M5-05 | 匯入與解析確認畫面 | FR-AN-04 | ⬜ |
-| M5-06 | 平臺 App compose 政策（repo 內 build、`env_file` 轉換） | FR-AN-05 | 🚧 |
+| M5-06 | 平臺 App compose 政策（repo 內 build、`env_file` 轉換） | FR-AN-05 | ✅ |
 | M5-07 | 子目錄（monorepo）根目錄 | FR-AN-06 | ⬜ |
 | M5-08 | 偵測持久化目錄、系統套件與原生模組、建置時變數 | FR-AN-07、FR-AN-08、FR-AN-09 | ⬜ |
 

@@ -6,6 +6,7 @@ pub mod db;
 pub mod model;
 pub mod placement;
 pub mod subdomain;
+pub mod tunnel;
 
 pub fn now() -> i64 {
     time::OffsetDateTime::now_utc().unix_timestamp()

@@ -14,6 +14,8 @@ pub enum PolicyError {
     NoImage(String),
     #[error("service `{service}`：{msg}")]
     Privileged { service: String, msg: String },
+    #[error("service `{0}`：不支援 GPU（deploy.resources.reservations.devices）。")]
+    Gpu(String),
     #[error("頂層 `{0}` 不可引用主機檔案或外部資源，請移除相關設定。")]
     HostFile(String),
     #[error("不可使用 YAML tag `{0}`，請改寫為一般值。")]
@@ -60,6 +62,89 @@ pub struct Policy {
     pub privileged: bool,
     /// Git 來源時，compose 目錄在儲存庫中的深度（`deploy/livekit` = 2）；None 表示上傳的 compose
     pub repo_depth: Option<usize>,
+    /// 平臺 App（M5-06，docs/07-security.md §3.6）：允許儲存庫內 build，其餘同一般 App
+    pub platform: bool,
+}
+
+impl Policy {
+    /// 平臺 App 政策；`ports`、`env_file` 須先經 [`prepare_platform`] 轉換
+    pub fn platform(repo_depth: usize) -> Self {
+        Self {
+            privileged: false,
+            repo_depth: Some(repo_depth),
+            platform: true,
+        }
+    }
+}
+
+/// [`prepare_platform`] 的結果
+#[derive(Debug, Clone)]
+pub struct PlatformCompose {
+    pub compose: ValidatedCompose,
+    /// 轉換後的 compose
+    pub yaml: String,
+    /// 被移除的 `ports`：(service, 原設定)；對外改由 Edge 路由
+    pub removed_ports: Vec<(String, String)>,
+    /// 被移除的 `env_file`：(service, 儲存庫內路徑)；變數名稱列入盤點，值由平臺秘密變數注入
+    pub env_files: Vec<(String, String)>,
+}
+
+/// M5-06：把儲存庫裡的 compose 轉成平臺 App（docs/07-security.md §3.6）。
+///
+/// 移除 `ports` 與 `env_file` 並記錄下來，再以 [`Policy::platform`] 檢查其餘規則。
+pub fn prepare_platform(yaml: &str, repo_depth: usize) -> Result<PlatformCompose, PolicyError> {
+    let mut doc: Value = serde_yaml::from_str(yaml)?;
+    doc.apply_merge()?;
+    if let Some(tag) = find_tag(&doc) {
+        return Err(PolicyError::Tag(tag));
+    }
+    let services = doc
+        .get_mut("services")
+        .and_then(Value::as_mapping_mut)
+        .ok_or(PolicyError::NoServices)?;
+    let mut removed_ports = Vec::new();
+    let mut env_files = Vec::new();
+    for (name, svc) in services.iter_mut() {
+        let name = name.as_str().unwrap_or_default().to_string();
+        let Some(svc) = svc.as_mapping_mut() else { continue };
+        if let Some(ports) = svc.remove("ports") {
+            for p in ports.as_sequence().cloned().unwrap_or_default() {
+                let text = match &p {
+                    Value::String(s) => s.clone(),
+                    Value::Number(n) => n.to_string(),
+                    other => serde_yaml::to_string(other)?.trim().replace('\n', ", "),
+                };
+                removed_ports.push((name.clone(), text));
+            }
+        }
+        if let Some(env_file) = svc.remove("env_file") {
+            let paths: Vec<String> = match &env_file {
+                Value::String(p) => vec![p.clone()],
+                Value::Sequence(list) => list
+                    .iter()
+                    .filter_map(|v| v.as_str().or_else(|| v.get("path").and_then(Value::as_str)))
+                    .map(str::to_string)
+                    .collect(),
+                _ => vec![],
+            };
+            for p in paths {
+                no_var(&name, "env_file", &p)?;
+                within_repo(&p, repo_depth).ok_or_else(|| PolicyError::Privileged {
+                    service: name.clone(),
+                    msg: format!("env_file `{p}` 必須是儲存庫內的相對路徑。"),
+                })?;
+                env_files.push((name.clone(), p));
+            }
+        }
+    }
+    let out = serde_yaml::to_string(&doc)?;
+    let compose = validate_with(&out, Policy::platform(repo_depth))?;
+    Ok(PlatformCompose {
+        compose,
+        yaml: out,
+        removed_ports,
+        env_files,
+    })
 }
 
 /// FR-APP-02：一般 App 的規則，清單見 docs/07-security.md §3
@@ -154,6 +239,36 @@ fn within_repo(path: &str, depth: usize) -> Option<usize> {
     Some(d as usize)
 }
 
+/// build 只能用儲存庫內的路徑（特權 App 與平臺 App 共用）
+fn check_build(name: &str, build: &Value, policy: Policy) -> Result<(), PolicyError> {
+    let err = |msg: String| PolicyError::Privileged { service: name.into(), msg };
+    let depth = policy
+        .repo_depth
+        .ok_or_else(|| err("只有 Git 來源的 App 可以使用 build。".into()))?;
+    let (context, dockerfile) = match build {
+        Value::String(c) => (c.as_str(), None),
+        Value::Mapping(m) => {
+            for k in ["additional_contexts", "secrets", "ssh"] {
+                if m.contains_key(k) {
+                    return Err(err(format!("build 不可使用 `{k}`。")));
+                }
+            }
+            (
+                m.get("context").and_then(Value::as_str).unwrap_or("."),
+                m.get("dockerfile").and_then(Value::as_str),
+            )
+        }
+        _ => return Err(err("build 格式錯誤。".into())),
+    };
+    no_var(name, "build.context", context)?;
+    no_var(name, "build.dockerfile", dockerfile.unwrap_or_default())?;
+    let ctx_depth = within_repo(context, depth).ok_or_else(|| err(format!("build context `{context}` 必須是儲存庫內的相對路徑。")))?;
+    if let Some(df) = dockerfile {
+        within_repo(df, ctx_depth).ok_or_else(|| err(format!("dockerfile `{df}` 必須是儲存庫內的相對路徑。")))?;
+    }
+    Ok(())
+}
+
 fn check_privileged(name: &str, svc: &Mapping, policy: Policy) -> Result<(), PolicyError> {
     let err = |msg: String| PolicyError::Privileged { service: name.into(), msg };
     if let Some(mode) = svc.get("network_mode") {
@@ -162,30 +277,7 @@ fn check_privileged(name: &str, svc: &Mapping, policy: Policy) -> Result<(), Pol
         }
     }
     if let Some(build) = svc.get("build") {
-        let depth = policy
-            .repo_depth
-            .ok_or_else(|| err("只有 Git 來源的 App 可以使用 build。".into()))?;
-        let (context, dockerfile) = match build {
-            Value::String(c) => (c.as_str(), None),
-            Value::Mapping(m) => {
-                for k in ["additional_contexts", "secrets", "ssh"] {
-                    if m.contains_key(k) {
-                        return Err(err(format!("build 不可使用 `{k}`。")));
-                    }
-                }
-                (
-                    m.get("context").and_then(Value::as_str).unwrap_or("."),
-                    m.get("dockerfile").and_then(Value::as_str),
-                )
-            }
-            _ => return Err(err("build 格式錯誤。".into())),
-        };
-        no_var(name, "build.context", context)?;
-        no_var(name, "build.dockerfile", dockerfile.unwrap_or_default())?;
-        let ctx_depth = within_repo(context, depth).ok_or_else(|| err(format!("build context `{context}` 必須是儲存庫內的相對路徑。")))?;
-        if let Some(df) = dockerfile {
-            within_repo(df, ctx_depth).ok_or_else(|| err(format!("dockerfile `{df}` 必須是儲存庫內的相對路徑。")))?;
-        }
+        check_build(name, build, policy)?;
     }
     if let Some(env_file) = svc.get("env_file") {
         let depth = policy
@@ -212,7 +304,7 @@ fn check_service(name: &str, svc: &Mapping, policy: Policy) -> Result<(), Policy
         service: name.into(),
         key: key.into(),
     };
-    let allowed = |k: &str| policy.privileged && PRIVILEGED_ALLOWED.contains(&k);
+    let allowed = |k: &str| (policy.privileged && PRIVILEGED_ALLOWED.contains(&k)) || (policy.platform && k == "build");
     for k in FORBIDDEN_KEYS {
         if svc.contains_key(*k) && !allowed(k) {
             return Err(forbid(k));
@@ -225,6 +317,18 @@ fn check_service(name: &str, svc: &Mapping, policy: Policy) -> Result<(), Policy
     }
     if policy.privileged {
         check_privileged(name, svc, policy)?;
+    } else if let Some(build) = svc.get("build").filter(|_| policy.platform) {
+        check_build(name, build, policy)?;
+    }
+    // GPU 不給任何 App（docs/07 §3.6）
+    if svc
+        .get("deploy")
+        .and_then(|d| d.get("resources"))
+        .and_then(|r| r.get("reservations"))
+        .and_then(|r| r.get("devices"))
+        .is_some()
+    {
+        return Err(PolicyError::Gpu(name.into()));
     }
     if svc.get("image").and_then(Value::as_str).is_none() && !svc.contains_key("build") {
         return Err(PolicyError::NoImage(name.into()));
@@ -283,6 +387,7 @@ mod tests {
         let git = Policy {
             privileged: true,
             repo_depth: Some(2),
+            ..Default::default()
         };
         let livekit = "services:\n  init:\n    build: .\n    env_file: .env\n    restart: 'no'\n  caddy:\n    image: caddy:2\n    network_mode: host\n  lk:\n    build: .\n    network_mode: host\n    tmpfs: [/run/livekit]\n";
         assert!(validate_with(livekit, git).is_ok());
@@ -291,7 +396,8 @@ mod tests {
             relay,
             Policy {
                 privileged: true,
-                repo_depth: Some(1)
+                repo_depth: Some(1),
+                ..Default::default()
             }
         )
         .is_ok());
@@ -302,7 +408,8 @@ mod tests {
             livekit,
             Policy {
                 privileged: true,
-                repo_depth: None
+                repo_depth: None,
+                ..Default::default()
             }
         )
         .is_err());
@@ -370,9 +477,70 @@ mod tests {
         let git = Policy {
             privileged: true,
             repo_depth: Some(1),
+            ..Default::default()
         };
         assert!(validate_with(hills, git).is_ok());
         let ctx = "services:\n  a:\n    build: {context: '${CTX}'}\n";
         assert!(matches!(validate_with(ctx, git), Err(PolicyError::Interpolated { .. })));
+    }
+
+    // M5-06：平臺 App 政策，以實際專案的 compose 片段為例（docs/07 §3.6）
+    #[test]
+    fn platform_policy_converts_and_screens() {
+        // SinoBee.ai：web 的 ports 移除、env_file 轉為秘密變數盤點；migrate 用 profiles
+        let sinobee = "services:\n  web:\n    build: {context: ., dockerfile: Dockerfile}\n    ports: ['3000:3000']\n    env_file: [.env, {path: .env.local, required: false}]\n    depends_on: [db]\n  migrate:\n    build: .\n    command: npx prisma migrate deploy\n    profiles: [tools]\n  db:\n    image: postgres:16\n    volumes: [pg:/var/lib/postgresql/data]\nvolumes:\n  pg: {}\n";
+        let p = prepare_platform(sinobee, 0).unwrap();
+        assert_eq!(p.compose.services, vec!["web", "migrate", "db"]);
+        assert_eq!(p.removed_ports, vec![("web".to_string(), "3000:3000".to_string())]);
+        assert_eq!(
+            p.env_files,
+            vec![
+                ("web".to_string(), ".env".to_string()),
+                ("web".to_string(), ".env.local".to_string())
+            ]
+        );
+        assert!(!p.yaml.contains("ports") && !p.yaml.contains("env_file"));
+        // 轉換後的結果再檢查一次仍通過
+        assert!(validate_with(&p.yaml, Policy::platform(0)).is_ok());
+
+        // SinoBee 的 worker 掛 docker.sock：拒絕
+        let worker = "services:\n  worker:\n    build: .\n    volumes: ['/var/run/docker.sock:/var/run/docker.sock']\n";
+        assert!(matches!(prepare_platform(worker, 0), Err(PolicyError::HostMount { .. })));
+
+        // iSunFA：postgres 對外 port 與 env_file（子目錄專案，深度 1）
+        let isunfa = "services:\n  postgres:\n    image: postgres:15\n    ports: [{target: 5432, published: 5432}]\n    env_file: ../.env\n    volumes: [db:/var/lib/postgresql/data]\nvolumes:\n  db: {}\n";
+        let p = prepare_platform(isunfa, 1).unwrap();
+        assert_eq!(p.removed_ports.len(), 1);
+        assert!(p.removed_ports[0].1.contains("5432"));
+        assert_eq!(p.env_files, vec![("postgres".to_string(), "../.env".to_string())]);
+        assert!(prepare_platform(isunfa, 0).is_err(), "env_file 超出儲存庫");
+
+        // SwarmStorage：ipfs 的數字 port 與具名 volume
+        let swarm = "services:\n  ipfs:\n    image: ipfs/kubo:v0.29.0\n    ports: [4001, '5001:5001']\n    volumes: [ipfs:/data/ipfs]\n  app:\n    build: ./app\nvolumes:\n  ipfs: {}\n";
+        let p = prepare_platform(swarm, 0).unwrap();
+        assert_eq!(
+            p.removed_ports.iter().map(|(_, v)| v.as_str()).collect::<Vec<_>>(),
+            vec!["4001", "5001:5001"]
+        );
+
+        // 仍然禁止的項目
+        for y in [
+            "services: {a: {build: ., network_mode: host}}",
+            "services: {a: {build: ., pid: host}}",
+            "services: {a: {build: ., privileged: true}}",
+            "services: {a: {build: ../x}}",
+            "services: {a: {build: {context: ., ssh: [default]}}}",
+            "services: {a: {image: x, volumes: ['./data:/data']}}",
+            "services: {a: {image: x, env_file: '${E}'}}",
+        ] {
+            assert!(prepare_platform(y, 0).is_err(), "should reject: {y}");
+        }
+        let gpu = "services:\n  a:\n    image: x\n    deploy: {resources: {reservations: {devices: [{capabilities: [gpu]}]}}}\n";
+        assert!(matches!(prepare_platform(gpu, 0), Err(PolicyError::Gpu(_))));
+        assert!(matches!(validate(gpu), Err(PolicyError::Gpu(_))));
+        // 一般 App 與上傳的 compose 仍不能 build
+        assert!(validate("services: {a: {build: .}}").is_err());
+        // 未轉換就直接以平臺政策檢查：ports 仍被拒
+        assert!(validate_with("services: {a: {build: ., ports: ['80:80']}}", Policy::platform(0)).is_err());
     }
 }

@@ -32,6 +32,7 @@ async fn main() -> anyhow::Result<()> {
     let routes = RouteTable::default();
     routes.reload(&db).await?;
 
+    let tunnels = caloud_proxy::TunnelRegistry::default();
     let state = AppState {
         verifier: Arc::new(CafecaVerifier::new(cfg.cafeca_wallet.clone(), cfg.cafeca_rpc.clone())),
         runner,
@@ -40,14 +41,15 @@ async fn main() -> anyhow::Result<()> {
         http: reqwest::Client::new(),
         cfg: cfg.clone(),
         agents: Default::default(),
+        tunnels: tunnels.clone(),
     };
     caloud_api::spawn_offline_sweeper(state.clone());
 
     let api = tokio::net::TcpListener::bind(&cfg.api_listen).await?;
     tracing::info!(addr = %cfg.api_listen, "api listening");
     let api = axum::serve(api, caloud_api::router(state));
-    let proxy = caloud_proxy::serve_http(cfg.http_listen.parse()?, routes.clone());
-    let tls = caloud_proxy::serve_tls_passthrough(cfg.https_listen.parse()?, routes);
+    let proxy = caloud_proxy::serve_http(cfg.http_listen.parse()?, routes.clone(), tunnels.clone());
+    let tls = caloud_proxy::serve_tls_passthrough(cfg.https_listen.parse()?, routes, tunnels);
 
     tokio::select! {
         r = async { api.await } => r?,

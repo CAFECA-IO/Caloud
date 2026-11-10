@@ -3,3 +3,4 @@
 pub mod client;
 pub mod specs;
 pub mod state;
+pub mod tunnel;
