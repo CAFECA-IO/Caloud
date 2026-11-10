@@ -1,5 +1,7 @@
 //! 管理介面 HTTP API（axum）與內嵌的 Web UI。
 #![forbid(unsafe_code)]
+mod admin;
+mod agent;
 mod apps;
 mod assets;
 mod auth;
@@ -10,7 +12,7 @@ pub mod service;
 mod tokens;
 mod users;
 
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use caloud_auth::CafecaVerifier;
 use caloud_core::{config::Config, db::Db};
@@ -18,6 +20,7 @@ use caloud_orchestrator::ComposeRunner;
 use caloud_proxy::RouteTable;
 use std::sync::Arc;
 
+pub use agent::{spawn_offline_sweeper, AgentHub};
 pub use auth::CurrentUser;
 pub use error::ApiError;
 pub use mcp::PROTOCOL_VERSIONS as MCP_PROTOCOL_VERSIONS;
@@ -30,6 +33,8 @@ pub struct AppState {
     pub runner: ComposeRunner,
     pub routes: RouteTable,
     pub http: reqwest::Client,
+    /// 已連線的 Runner agent（ADR 0011）
+    pub agents: AgentHub,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -48,7 +53,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/users/{account}", put(users::set_role))
         // 網域
         .route("/api/domains", get(domains::list).post(domains::create))
-        .route("/api/domains/{hostname}", axum::routing::delete(domains::remove))
+        .route("/api/domains/{hostname}", delete(domains::remove))
         .route("/api/domains/{hostname}/verify", post(domains::verify))
         .route("/api/domains/{hostname}/bind", put(domains::bind))
         // App（docker compose）
@@ -59,8 +64,23 @@ pub fn router(state: AppState) -> Router {
         .route("/api/apps/{id}/logs", get(apps::logs))
         // API 權杖與 MCP（ADR 0008）
         .route("/api/tokens", get(tokens::list).post(tokens::create))
-        .route("/api/tokens/{id}", axum::routing::delete(tokens::remove))
+        .route("/api/tokens/{id}", delete(tokens::remove))
         .route("/mcp", post(mcp::post).get(mcp::method_not_allowed).delete(mcp::method_not_allowed))
+        // 後台（ADR 0010）
+        .route("/api/admin/domain-pools", get(admin::list_pools).post(admin::create_pool))
+        .route("/api/admin/domain-pools/{root}", put(admin::update_pool).delete(admin::delete_pool))
+        .route("/api/admin/reserved-names", get(admin::list_reserved).post(admin::add_reserved))
+        .route("/api/admin/reserved-names/{name}", delete(admin::remove_reserved))
+        .route("/api/admin/blocked-hosts", get(admin::list_blocked).post(admin::block_host))
+        .route("/api/admin/blocked-hosts/{hostname}", delete(admin::unblock_host))
+        .route("/api/admin/subdomain-ids", post(admin::subdomain_id))
+        .route("/api/admin/nodes", get(admin::list_nodes))
+        .route("/api/admin/nodes/join-tokens", post(admin::join_token))
+        .route("/api/admin/nodes/{id}", delete(admin::delete_node))
+        .route("/api/admin/nodes/{id}/drain", post(admin::drain_node))
+        .route("/api/admin/nodes/{id}/activate", post(admin::activate_node))
+        // Runner agent（ADR 0011）
+        .route(caloud_core::agent::CONNECT_PATH, get(agent::connect))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state)
 }

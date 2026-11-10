@@ -10,6 +10,8 @@ use caloud_core::now;
 use caloud_orchestrator::{DeploySpec, GitSource, Policy, ValidatedCompose};
 use serde_json::{json, Value};
 
+pub mod admin;
+
 // ───────────────────────── App ─────────────────────────
 
 /// FR-APP-01：admin+ 看全部，其餘只看自己的

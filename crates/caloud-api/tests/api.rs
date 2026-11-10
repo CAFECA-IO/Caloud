@@ -186,6 +186,7 @@ impl Env {
             db: db.clone(),
             http: reqwest::Client::new(),
             cfg: Arc::new(cfg),
+            agents: Default::default(),
         };
         tokio::spawn(async move { axum::serve(listener, caloud_api::router(state)).await.unwrap() });
         Env {
@@ -1219,4 +1220,353 @@ async fn mcp_git_app_and_passthrough_tools() {
         env.routes.lookup_passthrough("lk.example.com").as_deref(),
         Some("host.docker.internal:7443")
     );
+}
+
+// ───────────────────────── 平臺後台（M4） ─────────────────────────
+
+// FR-OPS-03、FR-ENV-07
+#[tokio::test]
+async fn admin_manages_domain_resources_and_ids() {
+    let env = Env::new().await;
+    let (admin, member) = admin_and_member(&env).await;
+
+    // 非 admin 不可用
+    let (st, _) = env.call("GET", "/api/admin/domain-pools", &member, None).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // 尚無網域池時無法產生 ID
+    let (st, _) = env
+        .call("POST", "/api/admin/subdomain-ids", &admin, Some(json!({ "kind": "production" })))
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    let (st, pool) = env
+        .call(
+            "POST",
+            "/api/admin/domain-pools",
+            &admin,
+            Some(json!({ "root": "Caloud.TW.", "purposes": ["production", "staging", "verify"], "cloudflare_zone": "caloud.tw" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CREATED, "{pool}");
+    assert_eq!(pool["root"], "caloud.tw");
+    assert_eq!(pool["id_lengths"], json!({ "production": 8, "staging": 12, "verify": 16 }));
+
+    // 同一環境用途只能屬於一個網域池；長度須不同；用途須合法
+    let (st, _) = env
+        .call(
+            "POST",
+            "/api/admin/domain-pools",
+            &admin,
+            Some(json!({ "root": "caloud.app", "purposes": ["staging"] })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    let (st, _) = env
+        .call(
+            "POST",
+            "/api/admin/domain-pools",
+            &admin,
+            Some(json!({ "root": "cafeca.io", "purposes": ["system"], "id_lengths": { "production": 8, "staging": 8, "verify": 16 } })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, _) = env
+        .call(
+            "POST",
+            "/api/admin/domain-pools",
+            &admin,
+            Some(json!({ "root": "cafeca.io", "purposes": ["mail"] })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, _) = env
+        .call(
+            "POST",
+            "/api/admin/domain-pools",
+            &admin,
+            Some(json!({ "root": "cafeca.io", "purposes": ["system"] })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CREATED);
+
+    // 產生的 ID 符合規則（FR-ENV-07）
+    let (_, reserved) = env.call("GET", "/api/admin/reserved-names", &admin, None).await;
+    let reserved: Vec<String> = reserved
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(reserved.contains(&"www".to_string()));
+    let rules = caloud_core::subdomain::IdRules {
+        lengths: Default::default(),
+        reserved,
+    };
+    for (kind, len) in [("production", 8), ("staging", 12), ("verify", 16)] {
+        for _ in 0..20 {
+            let (st, v) = env
+                .call("POST", "/api/admin/subdomain-ids", &admin, Some(json!({ "kind": kind })))
+                .await;
+            assert_eq!(st, StatusCode::OK);
+            let id = v["id"].as_str().unwrap();
+            assert_eq!(id.len(), len);
+            assert_eq!(v["hostname"], format!("{id}.caloud.tw"));
+            let k = caloud_core::subdomain::EnvKind::parse(kind).unwrap();
+            assert_eq!(caloud_core::subdomain::validate_id(id, k, &rules), Ok(()));
+        }
+    }
+    let (st, _) = env
+        .call("POST", "/api/admin/subdomain-ids", &admin, Some(json!({ "kind": "prod" })))
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    // 保留字
+    let (st, _) = env
+        .call("POST", "/api/admin/reserved-names", &admin, Some(json!({ "name": "Support" })))
+        .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let (st, _) = env
+        .call("POST", "/api/admin/reserved-names", &admin, Some(json!({ "name": "support" })))
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    let (st, _) = env
+        .call("POST", "/api/admin/reserved-names", &admin, Some(json!({ "name": "no spaces" })))
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, _) = env.call("DELETE", "/api/admin/reserved-names/support", &admin, None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+
+    // 封鎖清單
+    let (st, b) = env
+        .call(
+            "POST",
+            "/api/admin/blocked-hosts",
+            &admin,
+            Some(json!({ "hostname": "Q7V2M4KX.caloud.tw", "reason": "檢舉：仿冒登入頁" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(b["hostname"], "q7v2m4kx.caloud.tw");
+    let (st, _) = env
+        .call(
+            "POST",
+            "/api/admin/blocked-hosts",
+            &admin,
+            Some(json!({ "hostname": "x.caloud.tw", "reason": "" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (_, list) = env.call("GET", "/api/admin/blocked-hosts", &admin, None).await;
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    let (st, _) = env
+        .call("DELETE", "/api/admin/blocked-hosts/q7v2m4kx.caloud.tw", &admin, None)
+        .await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+
+    // 修改與刪除網域池
+    let (st, p) = env
+        .call(
+            "PUT",
+            "/api/admin/domain-pools/caloud.tw",
+            &admin,
+            Some(
+                json!({ "purposes": ["production", "staging", "verify"], "id_lengths": { "production": 10, "staging": 12, "verify": 16 } }),
+            ),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(p["id_lengths"]["production"], 10);
+    let (_, v) = env
+        .call("POST", "/api/admin/subdomain-ids", &admin, Some(json!({ "kind": "production" })))
+        .await;
+    assert_eq!(v["id"].as_str().unwrap().len(), 10);
+    let (st, _) = env.call("DELETE", "/api/admin/domain-pools/caloud.tw", &admin, None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    let (st, _) = env.call("DELETE", "/api/admin/domain-pools/caloud.tw", &admin, None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+
+    // 稽核
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action LIKE 'domain_pool_%' OR action LIKE 'host_%'")
+        .fetch_one(&env.db)
+        .await
+        .unwrap();
+    assert!(n >= 5);
+}
+
+/// 以原始 WebSocket 送出第一則訊息，回傳控制面的第一則回應
+async fn raw_agent(env: &Env, first: Value) -> Value {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let url = format!("{}/agent/v1/connect", env.base.replacen("http://", "ws://", 1));
+    let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    ws.send(Message::Text(first.to_string().into())).await.unwrap();
+    loop {
+        match ws.next().await.unwrap().unwrap() {
+            Message::Text(t) => return serde_json::from_str(&t).unwrap(),
+            _ => continue,
+        }
+    }
+}
+
+fn test_specs() -> Value {
+    json!({ "cpu_cores": 8, "arch": "x86_64", "memory_bytes": 34359738368u64, "disk_free_bytes": 1, "os": "test",
+            "gvisor": true, "buildkit": true, "agent_version": "0.1.0" })
+}
+
+async fn wait_node(env: &Env, admin: &str, name: &str, want: &str) -> Value {
+    for _ in 0..100 {
+        let (_, nodes) = env.call("GET", "/api/admin/nodes", admin, None).await;
+        if let Some(n) = nodes.as_array().unwrap().iter().find(|n| n["name"] == name && n["status"] == want) {
+            return n.clone();
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    panic!("node {name} never reached {want}");
+}
+
+// FR-OPS-04、FR-OPS-06
+#[tokio::test]
+async fn runner_agent_joins_once_heartbeats_and_can_be_drained() {
+    use caloud_runner::client::{run_once, Options, Outcome};
+    let env = Env::new().await;
+    let (admin, member) = admin_and_member(&env).await;
+
+    let (st, _) = env.call("POST", "/api/admin/nodes/join-tokens", &member, Some(json!({}))).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, _) = env
+        .call(
+            "POST",
+            "/api/admin/nodes/join-tokens",
+            &admin,
+            Some(json!({ "expires_in_minutes": 90 })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, jt) = env.call("POST", "/api/admin/nodes/join-tokens", &admin, Some(json!({}))).await;
+    assert_eq!(st, StatusCode::CREATED);
+    let join = jt["token"].as_str().unwrap().to_string();
+    assert!(join.starts_with("caloud_join_"));
+
+    // 真正的 caloud-agent 以加入權杖註冊
+    let opts = Options {
+        server: env.base.clone(),
+        join_token: Some(join.clone()),
+        name: "runner-test-1".into(),
+        state_dir: env.dir.join("agent1"),
+    };
+    let o = opts.clone();
+    let agent = tokio::spawn(async move { run_once(&o).await.unwrap() });
+    let node = wait_node(&env, &admin, "runner-test-1", "active").await;
+    let id = node["id"].as_str().unwrap().to_string();
+    assert!(node["owner"].is_null());
+    assert!(node["specs"]["cpu_cores"].as_u64().unwrap() >= 1);
+    // 可配置量由控制面以偵測規格保留 10% 計算（FR-OPS-08）
+    let cores = node["specs"]["cpu_cores"].as_u64().unwrap();
+    assert_eq!(node["allocatable"]["cpu_millis"].as_u64().unwrap(), cores * 900);
+
+    // 節點權杖存在本機，資料庫只存雜湊
+    let saved = caloud_runner::state::load(&opts.state_dir).unwrap().unwrap();
+    assert_eq!(saved.node_id, id);
+    assert!(saved.node_token.starts_with("caloud_node_"));
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes WHERE token_hash = ?")
+        .bind(&saved.node_token)
+        .fetch_one(&env.db)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+
+    // 心跳更新用量
+    for _ in 0..100 {
+        let (_, nodes) = env.call("GET", "/api/admin/nodes", &admin, None).await;
+        if nodes[0]["used"]["memory_bytes"].as_u64().unwrap_or(0) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    let (_, nodes) = env.call("GET", "/api/admin/nodes", &admin, None).await;
+    assert!(nodes[0]["used"]["memory_bytes"].as_u64().unwrap() > 0);
+
+    // 加入權杖只能用一次；格式錯誤的第一則訊息被拒
+    let r = raw_agent(
+        &env,
+        json!({ "type": "register", "join_token": join, "name": "evil", "specs": test_specs() }),
+    )
+    .await;
+    assert_eq!(r["type"], "error");
+    let r = raw_agent(&env, json!({ "type": "heartbeat", "used": { "cpu_millis": 0, "memory_bytes": 0 } })).await;
+    assert_eq!(r["type"], "error");
+    let r = raw_agent(
+        &env,
+        json!({ "type": "register", "node_token": "caloud_node_nope", "name": "x", "specs": test_specs() }),
+    )
+    .await;
+    assert_eq!(r["type"], "error");
+
+    // 運作中的節點不可直接移除；排空、恢復、再排空後移除
+    let (st, _) = env.call("DELETE", &format!("/api/admin/nodes/{id}"), &admin, None).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    let (st, n) = env.call("POST", &format!("/api/admin/nodes/{id}/drain"), &admin, None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(n["status"], "draining");
+    let (st, n) = env.call("POST", &format!("/api/admin/nodes/{id}/activate"), &admin, None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(n["status"], "active");
+    env.call("POST", &format!("/api/admin/nodes/{id}/drain"), &admin, None).await;
+    let (st, _) = env.call("DELETE", &format!("/api/admin/nodes/{id}"), &admin, None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+
+    // 移除後連線中斷，節點權杖失效，agent 不再重連
+    let out = tokio::time::timeout(Duration::from_secs(5), agent).await.unwrap().unwrap();
+    assert!(matches!(out, Outcome::Rejected(_)), "{out:?}");
+    let again = run_once(&opts).await.unwrap();
+    assert!(matches!(again, Outcome::Rejected(_)), "{again:?}");
+
+    // 稽核
+    let n: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action IN ('node_join', 'node_drain', 'node_activate', 'node_delete')")
+            .fetch_one(&env.db)
+            .await
+            .unwrap();
+    assert_eq!(n, 5);
+}
+
+// FR-OPS-04：60 秒沒有心跳的節點標為離線；以節點權杖重連後恢復
+#[tokio::test]
+async fn silent_node_goes_offline_and_returns_on_reconnect() {
+    use caloud_runner::client::{run_once, Options};
+    let env = Env::new().await;
+    let (admin, _) = admin_and_member(&env).await;
+    let (_, jt) = env.call("POST", "/api/admin/nodes/join-tokens", &admin, Some(json!({}))).await;
+    let opts = Options {
+        server: env.base.clone(),
+        join_token: Some(jt["token"].as_str().unwrap().to_string()),
+        name: "runner-test-2".into(),
+        state_dir: env.dir.join("agent2"),
+    };
+    let o = opts.clone();
+    let agent = tokio::spawn(async move { run_once(&o).await });
+    let node = wait_node(&env, &admin, "runner-test-2", "active").await;
+    let id = node["id"].as_str().unwrap().to_string();
+
+    // 中斷 agent，並把最後心跳時間往前推
+    agent.abort();
+    let _ = agent.await;
+    sqlx::query("UPDATE nodes SET last_seen = last_seen - 120 WHERE id = ?")
+        .bind(&id)
+        .execute(&env.db)
+        .await
+        .unwrap();
+    let n = caloud_core::db::mark_offline_nodes(&env.db, caloud_core::now()).await.unwrap();
+    assert_eq!(n, 1);
+    wait_node(&env, &admin, "runner-test-2", "offline").await;
+    let (st, _) = env.call("POST", &format!("/api/admin/nodes/{id}/activate"), &admin, None).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+
+    // 以保存的節點權杖重連（不需要加入權杖）
+    let o = Options { join_token: None, ..opts };
+    let agent = tokio::spawn(async move { run_once(&o).await });
+    let back = wait_node(&env, &admin, "runner-test-2", "active").await;
+    assert_eq!(back["id"], id);
+    agent.abort();
 }

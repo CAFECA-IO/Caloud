@@ -39,7 +39,9 @@ async fn main() -> anyhow::Result<()> {
         db,
         http: reqwest::Client::new(),
         cfg: cfg.clone(),
+        agents: Default::default(),
     };
+    caloud_api::spawn_offline_sweeper(state.clone());
 
     let api = tokio::net::TcpListener::bind(&cfg.api_listen).await?;
     tracing::info!(addr = %cfg.api_listen, "api listening");

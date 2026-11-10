@@ -1,8 +1,11 @@
 //! Caloud 共用元件：設定、資料庫、資料模型。
 #![forbid(unsafe_code)]
+pub mod agent;
 pub mod config;
 pub mod db;
 pub mod model;
+pub mod placement;
+pub mod subdomain;
 
 pub fn now() -> i64 {
     time::OffsetDateTime::now_utc().unix_timestamp()

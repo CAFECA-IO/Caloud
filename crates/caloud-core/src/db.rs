@@ -93,6 +93,16 @@ pub async fn audit(db: &Db, account: Option<&str>, action: &str, target: Option<
     }
 }
 
+/// FR-OPS-04：把超過 `OFFLINE_AFTER_SECS` 沒有心跳的 active 節點標為離線，回傳筆數。
+/// 排空中的節點維持 `draining`，以免重連後又開始接工作。
+pub async fn mark_offline_nodes(db: &Db, now: i64) -> sqlx::Result<u64> {
+    let r = sqlx::query("UPDATE nodes SET status = 'offline' WHERE status = 'active' AND last_seen < ?")
+        .bind(now - crate::agent::OFFLINE_AFTER_SECS)
+        .execute(db)
+        .await?;
+    Ok(r.rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

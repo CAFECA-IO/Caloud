@@ -253,9 +253,36 @@ pub fn new_token() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
 }
 
+/// FR-ENV-07：隨機子網域 ID 候選值：`a-z0-9`、以字母開頭，長度 `len`（≥ 1）。
+/// 是否同時含字母與數字、是否撞到保留字由 `caloud_core::subdomain::validate_id` 檢查，不符就重抽。
+pub fn new_subdomain_id(len: usize) -> String {
+    use rand::Rng;
+    const LETTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
+    const ALNUM: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut rng = rand::rngs::OsRng;
+    let mut id = String::with_capacity(len);
+    for i in 0..len.max(1) {
+        let set = if i == 0 { LETTERS } else { ALNUM };
+        id.push(set[rng.gen_range(0..set.len())] as char);
+    }
+    id
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // FR-ENV-07
+    #[test]
+    fn subdomain_ids_have_requested_shape() {
+        for len in [8, 12, 16] {
+            let id = new_subdomain_id(len);
+            assert_eq!(id.len(), len);
+            assert!(id.as_bytes()[0].is_ascii_lowercase());
+            assert!(id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
+        }
+        assert_ne!(new_subdomain_id(16), new_subdomain_id(16));
+    }
 
     // FR-AUTH-02
     #[test]
