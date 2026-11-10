@@ -6,6 +6,8 @@
 
 Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介面，上傳 docker compose 檔即時啟動容器，並把自己托管的網域轉向這些容器。
 
+自 M4 起 Caloud 演進為多租戶平臺（[ADR 0010](adr/0010-platform.md)）：用戶以 CAFECA 登入並訂閱後，提供 GitHub 儲存庫即自動解析服務、產生專屬 compose，每次 commit 或新 branch 自動驗證，並可隨選啟動 staging 與 production。用戶環境在 `*.caloud.tw`（production 8 字元、staging 12 字元、驗證 16 字元子網域），`cafeca.io` 只供系統管理者（主控台 `caloud.cafeca.io` 與系統服務）。
+
 ### 1.1 使用者角色
 
 | 角色 | 說明 |
@@ -19,8 +21,8 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 
 ### 1.2 範圍
 
-- **範圍內**：單機 Docker 主機、HTTP/HTTPS 轉發、CAFECA 登入、Web 管理介面
-- **範圍外（目前）**：多節點叢集、TCP/UDP 非 HTTP 轉發、映像建置（build）、計費
+- **範圍內**：單機 Docker 主機、HTTP/HTTPS 轉發、CAFECA 登入、Web 管理介面；M4 起：控制面＋多台 Runner 節點（含用戶自有設備）、GitHub 整合、自動驗證、映像建置、訂閱與配額
+- **範圍外（目前）**：Kubernetes、非 GitHub 的 Git 服務、GPU 工作負載、跨區域高可用、TCP/UDP 非 HTTP 轉發（TLS 直通與 App 自行對外的 UDP 除外）
 
 ## 2. 功能需求（FR）
 
@@ -89,6 +91,9 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-DOM-08 | 同一 App 可綁多個網域；支援萬用字元網域（DNS-01） | P2 | M3 |
 | FR-DOM-09 | 網域可設為 **TLS 直通**：Caloud 在 443 依 TLS ClientHello 的 SNI 判斷網域，把整條 TCP 連線原封不動轉給 App 的指定 port，由 App 自己處理 TLS 與憑證（含 TLS-ALPN-01）；同一網域的 HTTP（80）仍依綁定的 port 轉發，供 App 的 HTTP-01 驗證使用 | P0 | M2 |
 | FR-DOM-10 | 綁定到 `network_mode: host` 的 service 時，Caloud 改以主機（`host.docker.internal`）的對應 port 轉發 | P0 | M2 |
+| FR-DOM-11 | 平臺用戶可在專案加入自己的網域，指到 production 或某個 staging；以 TXT `_caloud-challenge.<網域>` 驗證擁有權，並提示 CNAME 指向該環境的 caloud.tw 子網域（根網域用 A 記錄） | P1 | M7 |
+| FR-DOM-12 | 自訂網域驗證後由 Edge 以 HTTP-01 自動申請與續簽憑證；可改設 TLS 直通，由用戶服務自己處理憑證 | P1 | M7 |
+| FR-DOM-13 | 自訂網域數量依方案；每日重新檢查 TXT，連續 7 天失效即停止路由並通知；同一網域只能綁一個專案 | P1 | M7 |
 
 ### 2.5 MCP 與 API 權杖 MCP
 
@@ -104,6 +109,10 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-MCP-06 | 工具錯誤以 `isError: true` 與人看得懂的訊息回傳（同 REST 錯誤訊息），協定錯誤以 JSON-RPC error 回傳 | P0 | M1 |
 | FR-MCP-07 | 經由 MCP 的操作寫入稽核紀錄，細節標示 `via=mcp` 與權杖名稱；權杖建立與撤銷亦寫入稽核 | P0 | M1 |
 | FR-MCP-08 | 介面提供「API 權杖」頁，建立後顯示權杖與 MCP 用戶端設定範例（可一鍵複製） | P0 | M1 |
+| FR-MCP-09 | 平臺 MCP 權杖限定專案與範圍（`read`、`verify`、`staging`、`production`、`config`），預設只有 `read`、`verify`；有效期預設 30 天、最長 365 天 | P0 | M7 |
+| FR-MCP-10 | AI 可觸發驗證（指定 ref，或送出套用在某 commit 上的 patch，≤ 1 MB）、讀報告、問題與日誌；patch 驗證產生的發布只能部署到 staging | P0 | M7 |
+| FR-MCP-11 | 權杖含 `staging` 範圍可部署與停止 staging；含 `production` 範圍可發布與回滾 production，仍須 `confirm: true`，且未通過驗證的發布一律拒絕 | P0 | M7 |
+| FR-MCP-12 | MCP 設定頁提供 Claude Code、Cursor 等工具可直接貼上的設定 | P1 | M7 |
 
 ### 2.6 稽核 AUD
 
@@ -129,6 +138,83 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-UI-11 | 版面為側欄導覽＋內容；寬度 < 768px 時側欄改為頂部列；側欄顯示待核准人數 | P0 | M1 |
 | FR-UI-12 | 提供 `/styleguide` 元件總覽頁，列出所有元件與 Token | P1 | M1 |
 | FR-UI-13 | 採用單一正式介面風格「企業儀表板」，不保留其他風格與切換機制（[ADR 0007](adr/0007-ui-style-proposals.md)） | P0 | M1 |
+
+### 2.8 平臺：帳號與訂閱 ACC
+
+平臺維運者沿用 FR-AUTH-03（第一位登入者為 Super Admin）；其他登入者為訂閱用戶。
+
+| 編號 | 需求 | 優先 | 里程碑 |
+| --- | --- | --- | --- |
+| FR-ACC-01 | 用戶可選方案並訂閱、續訂、取消；到期後停止新的驗證與部署，production 保留 7 天後休眠 | P0 | M8 |
+| FR-ACC-02 | 用量頁顯示本期建置分鐘、執行中環境、儲存、專案數與 MCP 權杖數對照配額；達 80% 通知 | P1 | M8 |
+
+### 2.9 平臺：GitHub GH
+
+| 編號 | 需求 | 優先 | 里程碑 |
+| --- | --- | --- | --- |
+| FR-GH-01 | 透過 GitHub App 授權儲存庫，只申請 contents:read、metadata:read、checks:write、pull_requests:write；使用 1 小時 installation token，不存長期憑證 | P0 | M5 |
+| FR-GH-02 | 接收 push、create（branch）、pull_request 事件（HMAC 驗簽）並觸發驗證 | P0 | M5 |
+| FR-GH-03 | 驗證狀態與摘要回寫 GitHub Checks；PR 留言附報告連結 | P1 | M6 |
+| FR-GH-04 | 公開儲存庫可直接以網址匯入（無事件，手動觸發） | P2 | M5 |
+
+### 2.10 平臺：服務自動解析 AN
+
+| 編號 | 需求 | 優先 | 里程碑 |
+| --- | --- | --- | --- |
+| FR-AN-01 | 依序以 `.caloud/compose.yml`、compose 檔、Dockerfile、語言標記檔（package.json、Cargo.toml、go.mod、pyproject.toml）、靜態網站解析服務、port、依賴的資料庫與環境變數 | P0 | M5 |
+| FR-AN-02 | 產生專屬 compose，並通過 [07 §3](07-security.md#3-compose-政策) 的 compose 政策；主機 ports 移除改由平臺路由 | P0 | M5 |
+| FR-AN-03 | 用戶可編輯產生結果，或在儲存庫放 `.caloud/compose.yml` 覆寫 | P0 | M5 |
+| FR-AN-04 | 每個判斷標示信心度（高、中、低）與依據的檔案及行號；低信心項目在第一次驗證前需用戶確認 | P1 | M5 |
+
+### 2.11 平臺：環境 ENV
+
+| 編號 | 需求 | 優先 | 里程碑 |
+| --- | --- | --- | --- |
+| FR-ENV-01 | Production：8 字元子網域、永久不變；發布以藍綠方式零停機切換 | P0 | M7 |
+| FR-ENV-02 | Staging：12 字元子網域，可隨選部署任一已驗證的發布；閒置 2 小時休眠，下次請求喚醒 | P0 | M7 |
+| FR-ENV-03 | 一鍵回滾到前一個發布 | P0 | M7 |
+| FR-ENV-04 | 只有沒有 Blocker、High 的發布可上 production；強制發布需二次確認並寫稽核 | P0 | M7 |
+| FR-ENV-05 | 秘密變數依環境分開設定，只寫不讀；日誌與報告自動遮蔽 | P0 | M7 |
+| FR-ENV-06 | Production 資料 volume 每日備份、可還原 | P1 | M8 |
+| FR-ENV-07 | 子網域 ID 由 a-z、0-9 組成，以字母開頭且同時含字母與數字；長度即環境種類（預設 8／12／16，後台可調）；以 CSPRNG 產生，排除使用中、保留字（含包含保留字者）與封鎖清單 | P0 | M4 |
+
+### 2.12 平臺：驗證與報告 CI、RPT
+
+| 編號 | 需求 | 優先 | 里程碑 |
+| --- | --- | --- | --- |
+| FR-CI-01 | 每次 commit、新 branch 自動建立 16 字元驗證環境並測試 | P0 | M6 |
+| FR-CI-02 | 驗證階段：取得原始碼、解析、建置、靜態檢查（秘密外洩、漏洞、lint）、啟動、專案測試、煙霧測試、日誌分析、彙整、銷毀 | P0 | M6 |
+| FR-CI-03 | 測試完成即銷毀容器、volume 與子網域，只保留報告；任何階段失敗仍執行彙整與銷毀 | P0 | M6 |
+| FR-CI-04 | 同一 branch 有新 commit 時取消舊的執行 | P1 | M6 |
+| FR-CI-05 | 驗證失敗時可選擇保留環境 30 分鐘以便除錯 | P2 | M6 |
+| FR-RPT-01 | 問題分 Blocker、High、Medium、Low 四級，有 Blocker 或 High 即驗證失敗；依指紋去重；標示來源階段與位置 | P0 | M6 |
+| FR-RPT-02 | 報告列出相對同 branch 上次驗證的新增、仍存在、已修正 | P1 | M6 |
+| FR-RPT-03 | 報告保留期依方案；可匯出 JSON 與 Markdown | P1 | M6 |
+| FR-RPT-04 | Blocker、High 問題通知用戶 | P1 | M6 |
+
+### 2.13 平臺：用戶自有設備 DEV
+
+| 編號 | 需求 | 優先 | 里程碑 |
+| --- | --- | --- | --- |
+| FR-DEV-01 | 用戶可把自己的 Linux 主機登記為私有 Runner（安裝 agent＋一次性加入權杖），規格自動偵測 | P1 | M7 |
+| FR-DEV-02 | 每個環境可指定跑在平臺節點或自己的設備；自有設備只執行擁有者的專案，不計運算與儲存配額 | P1 | M7 |
+| FR-DEV-03 | 自有設備在 NAT 或防火牆後也能對外服務：agent 主動連出，Edge 經同一連線的通道轉發 | P1 | M7 |
+
+### 2.14 平臺：後台與節點 OPS
+
+| 編號 | 需求 | 優先 | 里程碑 |
+| --- | --- | --- | --- |
+| FR-OPS-01 | 部署、權杖、秘密變更寫入稽核並標示來源（web、api、mcp、github） | P0 | M6 |
+| FR-OPS-02 | 維運者可看全部節點負載、暫停用戶、強制停止環境 | P1 | M8 |
+| FR-OPS-03 | 維運者在後台管理網域資源：網域池（根網域、用途、Cloudflare zone 與權杖、ID 長度）、保留字、封鎖清單 | P0 | M4 |
+| FR-OPS-04 | Runner agent 啟動時自動偵測 CPU 核心數與架構、記憶體、可用磁碟、gVisor 與 BuildKit，以一次性加入權杖註冊（1 小時有效、只存雜湊）；之後每 15 秒心跳；60 秒無心跳標為離線 | P0 | M4 |
+| FR-OPS-05 | 方案、價格與配額在後台設定，不需改程式 | P1 | M8 |
+| FR-OPS-06 | 節點可設為排空：不再接新工作，待驗證結束、環境搬移後才可移除；服務在線時即可加入或排空 | P0 | M4 |
+| FR-OPS-07 | 整體已配置量 > 80% 或驗證排隊 > 5 分鐘時告警；離線節點上的 production 於其他平臺節點重建 | P1 | M7 |
+| FR-OPS-08 | 調度依剩餘可配置量（偵測規格保留 10% 給主機）選擇節點；自有設備只接擁有者的工作 | P0 | M4 |
+| FR-OPS-09 | Edge 依 Host 路由到環境所在節點；經 Runner 主動建立的通道轉發 | P0 | M4 |
+| FR-OPS-10 | `*.caloud.tw` 與 `caloud.tw` 以 ACME DNS-01 經 Cloudflare API 申請 wildcard 憑證並自動續簽 | P0 | M4 |
+| FR-OPS-11 | 用戶容器以 gVisor 執行；環境之間網路不通；封鎖雲端 metadata 與平臺內網 | P0 | M4 |
 
 ## 3. 非功能需求（NFR）
 

@@ -20,6 +20,12 @@
 | MCP 端點 | 瀏覽器跨站呼叫、DNS rebinding | `/mcp` 只接受 Bearer、不接受 cookie；`Origin` 不符即拒絕 | FR-MCP-03 |
 | MCP 工具 | AI 助手誤刪資源 | 刪除類工具標示 `destructiveHint` 並要求 `confirm: true`；所有操作寫入稽核並標示 `via=mcp` | FR-MCP-05、FR-MCP-07 |
 | 內部資訊 | 錯誤訊息洩漏 | 500 固定訊息，細節只寫 log | NFR-SEC-03 |
+| 平臺網域（[ADR 0010](adr/0010-platform.md)） | 用戶頁面讀寫主控台 cookie；用戶之間互設 cookie；釣魚利用官方信譽 | 用戶環境只在 `*.caloud.tw` 與用戶自己的網域；主控台在 `caloud.cafeca.io`；caloud.tw 加入 Public Suffix List；封鎖清單立即停用 | FR-OPS-03 |
+| 子網域 ID | 猜到或撞到別人的網址 | CSPRNG 產生；排除使用中、保留字、封鎖清單；production ID 刪除後保留才釋出；子網域不當作存取控制 | FR-ENV-07 |
+| Runner 加入 | 冒充節點接收用戶工作與秘密 | 加入權杖一次性、最長 1 小時、只存雜湊；節點權杖只存雜湊、移除節點即失效；第一則訊息不是有效 `register` 即關閉 | FR-OPS-04 |
+| Runner 回報 | 節點竄改其他節點狀態 | 連線綁定單一節點，心跳只更新自己的那一列；agent 回報的數值只用於調度，不作權限判斷 | FR-OPS-04 |
+| 用戶自有設備 | 被入侵的設備取得其他用戶的工作或內網 | 只派送擁有者的工作與秘密；通道只轉發擁有者的網域，不提供反向進平臺內網的路徑 | FR-DEV-02、FR-OPS-08 |
+| 執行用戶程式碼 | 容器逃逸、打內網或 metadata | 控制面與 Runner 分機；gVisor；環境間網路不通；封鎖 `169.254.169.254` 與內網段 | FR-OPS-11 |
 
 ## 2. 權限矩陣
 
@@ -34,6 +40,7 @@
 | 授予／撤銷 admin | ✓ | ✗ | ✗ | ✗ | ✗ |
 | 變更 super_admin、變更自己 | ✗ | ✗ | ✗ | ✗ | ✗ |
 | 建立／撤銷自己的 API 權杖 | ✓ | ✓ | ✓ | ✗ | ✗ |
+| 後台：網域資源、Runner 節點、加入權杖 | ✓ | ✓ | ✗ | ✗ | ✗ |
 | 以 API 權杖使用 MCP | 同上方各列 | 同上方各列 | 同上方各列 | ✗（權杖失效） | ✗（權杖失效） |
 
 實作：`Role::can_deploy()`、`Role::is_admin()`、`CurrentUser::can_manage(owner)`。
@@ -137,6 +144,9 @@
 | session token | 256 bit，`new_token()` 產生；DB 存 keccak256 雜湊 |
 | API 權杖 | `cld_` ＋ 256 bit，`new_token()` 產生；DB 存 keccak256 雜湊與前 8 字元（供辨識）；只在建立時回傳一次 |
 | nonce | 128 bit，`new_nonce()` 產生 |
+| Runner 加入權杖 | `caloud_join_` ＋ 256 bit；一次性、最長 1 小時；DB 只存 keccak256 雜湊 |
+| Runner 節點權杖 | `caloud_node_` ＋ 256 bit；DB 只存 keccak256 雜湊；agent 端檔案權限 0600 |
+| 子網域 ID | `new_subdomain_id()` 以 CSPRNG 產生 |
 | log | 不記錄 token、cookie、完整簽章、compose 中的環境變數值 |
 | 設定檔 | `.env` 不進版控（`.gitignore`）；只提交 `.env.example` |
 | App 環境變數 | 存在資料庫（M3 改為加密，FR-APP-11）；API 與 MCP 只回傳變數名稱，不回傳值；稽核不記錄值 |
@@ -147,6 +157,7 @@
 
 - `caloud-auth` 全部
 - `caloud-orchestrator::policy`
-- `caloud-api::auth`、`service.rs`、`tokens.rs`、`mcp.rs` 中的權限與驗證
+- `caloud-api::auth`、`service.rs`、`tokens.rs`、`mcp.rs`、`admin.rs`、`agent.rs` 中的權限與驗證
+- `caloud-runner` 的權杖保存與連線
 - `deploy/`、`Dockerfile`
 - 本文件

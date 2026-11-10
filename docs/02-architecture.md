@@ -40,7 +40,8 @@
 | `caloud-auth` | `CafecaVerifier`、nonce/token 產生 | alloy-sol-types, reqwest |
 | `caloud-orchestrator` | compose 安全政策、override 產生、compose 生命週期 | serde_yaml, tokio::process |
 | `caloud-proxy` | 反向代理、路由表、ACME HTTP-01 回應、TLS（M2） | hyper 1, arc-swap |
-| `caloud-api` | 服務層（權限、驗證、稽核）、REST API、MCP 端點、session 與 API 權杖、內嵌 Web UI 與 Design System 靜態檔 | axum 0.8 |
+| `caloud-api` | 服務層（權限、驗證、稽核）、REST API、MCP 端點、session 與 API 權杖、Admin API、Agent WebSocket 端點、內嵌 Web UI 與 Design System 靜態檔 | axum 0.8（ws） |
+| `caloud-runner` | `caloud-agent` 執行檔：規格偵測、連線控制面、心跳（[ADR 0012](adr/0012-runner-crate.md)） | sysinfo, tokio-tungstenite |
 
 ### 相依規則（不可違反）
 
@@ -49,11 +50,13 @@ caloud ──► caloud-api ──► caloud-auth
                      ├──► caloud-orchestrator ──► caloud-core
                      ├──► caloud-proxy ─────────► caloud-core
                      └──► caloud-core
+caloud-runner（caloud-agent）──────────────► caloud-core
 ```
 
 - `caloud-core` 不依賴任何其他 Caloud crate，也不依賴 web 框架
 - `caloud-auth`、`caloud-orchestrator`、`caloud-proxy` 彼此不互相依賴
 - 只有 `caloud-api` 處理 HTTP 請求／權限；只有 `caloud` 組裝與啟動
+- `caloud-runner` 只依賴 `caloud-core`；與控制面共用的協定型別（`caloud_core::agent`）與調度函式（`caloud_core::placement`）放在 core
 - 新增 crate 或改變相依方向須寫 ADR
 
 ## 3. 登入流程（Sign in with CAFECA）
@@ -156,12 +159,18 @@ MCP 用戶端 ──POST /mcp (Bearer cld_…)──► mcp.rs ──► service
 | `domains` | `hostname` | 驗證 token、是否已驗證、綁定的 app/service/port、轉發目標主機、TLS 模式（一般／直通）與直通 port、TLS 狀態 | FR-DOM-* |
 | `audit_log` | 自增 `id` | 操作者、動作、對象、細節、時間 | FR-AUD-01 |
 | `api_tokens` | `id`（UUID） | 擁有者、名稱、token 雜湊、前綴、建立／到期／最後使用時間 | FR-MCP-02、FR-MCP-03 |
+| `domain_pools` | `root` | 根網域、用途（production／staging／verify／system）、Cloudflare zone、權杖提示、ID 長度 | FR-OPS-03 |
+| `reserved_names` | `name` | 子網域保留字 | FR-OPS-03、FR-ENV-07 |
+| `blocked_hosts` | `hostname` | 封鎖的主機名稱、理由、操作者 | FR-OPS-03 |
+| `nodes` | `id`（UUID） | 名稱、擁有者（空值＝平臺節點）、偵測規格、可配置量、已配置量、狀態（active／draining／offline）、節點權杖雜湊、最後心跳 | FR-OPS-04、FR-OPS-06 |
+| `node_join_tokens` | `token_hash` | 一次性加入權杖、擁有者、到期、使用時間 | FR-OPS-04 |
 
 ```
 users 1 ──< sessions
 users 1 ──< api_tokens
 users 1 ──< apps 1 ──< domains (app_id, ON DELETE SET NULL)
 users 1 ──< domains
+users 1 ──< nodes（owner，自有設備）
 ```
 
 ### 狀態機：App.status
@@ -199,6 +208,21 @@ Internet ──:80/:443──► [caloud 容器] ──docker.sock──► Dock
 - Caloud 本體以 `deploy/docker-compose.yml` 部署；它是唯一允許使用 `ports` 與 docker.sock 的 compose 專案（不經 Caloud 管理）。
 - 資料目錄：`/data/caloud.db`、`/data/apps/<app_id>/{compose.yml,caloud.override.yml}`、`/data/certs/<hostname>/`（M2）。
 
+### 平臺拓樸（M4 起，[ADR 0010](adr/0010-platform.md)）
+
+```
+用戶／AI／GitHub ──► Edge（*.caloud.tw、自訂網域、caloud.cafeca.io）
+                       ├──► 控制面（API、MCP、調度、解析、SQLite、物件儲存）
+                       └──► Runner 節點 × N（平臺主機＋用戶自有設備）
+Runner 的 caloud-agent ──WebSocket（主動連出）──► 控制面 /agent/v1/connect
+```
+
+| 網域 | 用途 |
+| --- | --- |
+| `*.caloud.tw` | 用戶環境（8／12／16 字元子網域） |
+| `caloud.cafeca.io` | 主控台、API、MCP、webhook、Agent 連線 |
+| 其他 `*.cafeca.io` | 系統服務，只供系統管理者 |
+
 ## 10. 架構決策
 
 重大決策記錄於 [adr/](adr/)：
@@ -214,3 +238,6 @@ Internet ──:80/:443──► [caloud 容器] ──docker.sock──► Dock
 | [0007](adr/0007-ui-style-proposals.md) | 介面風格採用「企業儀表板」 |
 | [0008](adr/0008-mcp-interface.md) | MCP 介面採 Streamable HTTP 與個人 API 權杖 |
 | [0009](adr/0009-system-apps.md) | Git 來源的特權 App 與 443 TLS 直通 |
+| [0010](adr/0010-platform.md) | 平臺化、網域分工（caloud.tw／cafeca.io）、SQLite 暫留 |
+| [0011](adr/0011-runner-websocket.md) | Runner 以 WebSocket 主動連入，之後以 yamux 多工反向通道 |
+| [0012](adr/0012-runner-crate.md) | 新增 `caloud-runner` crate 與 `caloud-agent` 執行檔 |

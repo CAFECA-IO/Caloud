@@ -9,7 +9,11 @@
 | **M1 骨架** | 端到端走通：登入 → 上傳 compose → 綁定網域 → HTTP 轉發 | M1 的 P0 需求全部完成並通過驗收；可在測試主機以 HTTP 示範 |
 | **M2 可上線** | HTTPS、穩定性、安全強化 | M2 的 P0 完成；在正式網域以 HTTPS 運行 7 天無重大事件 |
 | **M3 營運** | 日常營運所需功能 | M3 的 P0／P1 完成 |
-| **M4 進階** | 多節點等延伸功能 | 依需求另行規劃 |
+| **M4 平臺基礎** | 控制面＋Runner 節點、`*.caloud.tw` 子網域與 wildcard 憑證、後台網域資源（[ADR 0010](adr/0010-platform.md)） | 維運者可經 API 在 Runner 開出 8／12／16 字元環境，環境之間網路不通 |
+| **M5 GitHub 與解析** | GitHub App、服務自動解析、匯入流程 | 用 10 個真實儲存庫匯入，8 個以上不需修改就能啟動 |
+| **M6 驗證與報告** | 自動驗證、分級報告、GitHub Checks | 連續 100 次驗證無殘留資源；故意放入的錯誤都被正確分級 |
+| **M7 環境、網域與 MCP** | staging／production、回滾、秘密、自訂網域、自有設備、範圍化 MCP | Claude Code 只用 MCP 把一個壞掉的專案修到驗證通過並部署 staging |
+| **M8 訂閱與上線** | 方案、計量、配額、後台畫面、備份 | 第一批外部用戶可自助訂閱並上線 |
 
 ## 2. 工作項目
 
@@ -49,10 +53,10 @@
 
 | # | 工作項目 | 需求 | 狀態 |
 | --- | --- | --- | --- |
-| M2-01 | rustls SNI 憑證選擇、`:443` 監聽 | FR-DOM-05 | ⬜ |
-| M2-02 | instant-acme 申請／續簽、HTTP-01、`:80` 轉 HTTPS | FR-DOM-05 | ⬜ |
+| M2-01 | rustls SNI 憑證選擇、`:443` 監聽 | FR-DOM-05 | → M4-08 |
+| M2-02 | instant-acme 申請／續簽、HTTP-01、`:80` 轉 HTTPS | FR-DOM-05 | → M4-08 |
 | M2-03 | 管理介面改經 `:443` 的 `PUBLIC_ORIGIN` 提供 | FR-DOM-05、NFR-SEC-01 | ⬜ |
-| M2-04 | WebSocket／Upgrade 轉發 | FR-DOM-06 | ⬜ |
+| M2-04 | WebSocket／Upgrade 轉發 | FR-DOM-06 | → M4-07 |
 | M2-05 | 每 App 部署互斥鎖 | FR-APP-08 | ⬜ |
 | M2-06 | 啟動對帳與定期對帳 | FR-APP-09 | ⬜ |
 | M2-07 | 寫入 API 檢查 `Origin` header、速率限制 | NFR-SEC-01 | ⬜ |
@@ -69,10 +73,70 @@
 | --- | --- | --- | --- |
 | M3-01 | `CALOUD_BOOTSTRAP_ACCOUNT` | FR-AUTH-08 | ⬜ |
 | M3-02 | log 即時串流（SSE） | FR-APP-10 | ⬜ |
-| M3-03 | 環境變數與 secrets（加密） | FR-APP-11 | ⬜ |
+| M3-03 | 環境變數與 secrets（加密） | FR-APP-11 | → M7-03 |
 | M3-04 | 使用者配額 | FR-APP-12 | ⬜ |
 | M3-05 | 稽核紀錄查詢介面 | FR-AUD-02 | ⬜ |
-| M3-06 | 多網域、萬用字元網域 | FR-DOM-08 | ⬜ |
+| M3-06 | 多網域、萬用字元網域 | FR-DOM-08 | → M4-08 |
+
+狀態「→ M4-08」等表示併入平臺里程碑的該項目一起完成。
+
+### M4 平臺基礎
+
+設計依據：Caloud Platform 系統設計 §5、§9、§13；決策見 [ADR 0010](adr/0010-platform.md)、[ADR 0011](adr/0011-runner-websocket.md)、[ADR 0012](adr/0012-runner-crate.md)。
+
+| # | 工作項目 | 需求 | 狀態 |
+| --- | --- | --- | --- |
+| M4-01 | 平臺需求、計劃、架構、API、安全文件與 ADR 0010～0012 | NFR-QA-01 | ✅ |
+| M4-02 | 子網域 ID 產生與檢查（長度、字元、保留字、封鎖、未使用） | FR-ENV-07 | ✅ |
+| M4-03 | 後台網域資源：資料表、服務層、Admin API | FR-OPS-03 | ✅ |
+| M4-04 | `caloud-agent`：規格偵測與可配置量 | FR-OPS-04 | ✅ |
+| M4-05 | 節點加入權杖、WebSocket 註冊與心跳、離線判定、排空 | FR-OPS-04、FR-OPS-06 | ✅ |
+| M4-06 | 依容量選擇節點 | FR-OPS-08 | ✅ |
+| M4-07 | Edge 經 Runner 通道（yamux）轉發；WebSocket／Upgrade 轉發 | FR-OPS-09、FR-DOM-06 | ⬜ |
+| M4-08 | `*.caloud.tw` wildcard 憑證（Cloudflare DNS-01）、rustls SNI、`:80` 轉 HTTPS | FR-OPS-10、FR-DOM-05、FR-DOM-08 | ⬜ |
+| M4-09 | 用戶容器以 gVisor 執行、環境網路隔離、封鎖 metadata | FR-OPS-11 | ⬜ |
+
+### M5 GitHub 與解析
+
+| # | 工作項目 | 需求 | 狀態 |
+| --- | --- | --- | --- |
+| M5-01 | GitHub App 安裝、installation token、webhook 驗簽 | FR-GH-01、FR-GH-02 | ⬜ |
+| M5-02 | 公開儲存庫網址匯入 | FR-GH-04 | ⬜ |
+| M5-03 | 解析器：compose、Dockerfile、Node、Rust、Go、Python 範本、附加資料庫、環境變數 | FR-AN-01、FR-AN-02 | ⬜ |
+| M5-04 | 信心度與依據；`.caloud/compose.yml` 覆寫；編輯產生結果 | FR-AN-03、FR-AN-04 | ⬜ |
+| M5-05 | 匯入與解析確認畫面 | FR-AN-04 | ⬜ |
+
+### M6 驗證與報告
+
+| # | 工作項目 | 需求 | 狀態 |
+| --- | --- | --- | --- |
+| M6-01 | 驗證狀態機與 10 個階段、逾時、取消舊執行 | FR-CI-01、FR-CI-02、FR-CI-04 | ⬜ |
+| M6-02 | 銷毀與資源回收、失敗保留 30 分鐘 | FR-CI-03、FR-CI-05 | ⬜ |
+| M6-03 | 問題分級、指紋去重、與前次比較 | FR-RPT-01、FR-RPT-02 | ⬜ |
+| M6-04 | 報告儲存、匯出、通知、驗證執行與報告畫面 | FR-RPT-03、FR-RPT-04 | ⬜ |
+| M6-05 | GitHub Checks 與 PR 留言 | FR-GH-03 | ⬜ |
+| M6-06 | 稽核來源標示 | FR-OPS-01 | ⬜ |
+
+### M7 環境、網域與 MCP
+
+| # | 工作項目 | 需求 | 狀態 |
+| --- | --- | --- | --- |
+| M7-01 | 發布、production 藍綠切換、回滾、發布關卡 | FR-ENV-01、FR-ENV-03、FR-ENV-04 | ⬜ |
+| M7-02 | Staging 隨選部署、休眠與喚醒 | FR-ENV-02 | ⬜ |
+| M7-03 | 秘密變數（加密、依環境、遮蔽） | FR-ENV-05、FR-APP-11 | ⬜ |
+| M7-04 | 自訂網域：驗證、憑證、直通、每日重驗 | FR-DOM-11～13 | ⬜ |
+| M7-05 | 用戶自有設備：加入、執行位置、通道 | FR-DEV-01～03 | ⬜ |
+| M7-06 | 容量告警、離線節點重建 | FR-OPS-07 | ⬜ |
+| M7-07 | 範圍化 MCP 權杖、patch 驗證、部署工具、設定頁 | FR-MCP-09～12 | ⬜ |
+
+### M8 訂閱與上線
+
+| # | 工作項目 | 需求 | 狀態 |
+| --- | --- | --- | --- |
+| M8-01 | 方案、訂閱、到期處理 | FR-ACC-01 | ⬜ |
+| M8-02 | 計量與用量頁 | FR-ACC-02 | ⬜ |
+| M8-03 | 後台：方案與價格、網域資源、Runner 節點、用戶管理畫面 | FR-OPS-02、FR-OPS-03、FR-OPS-05 | ⬜ |
+| M8-04 | Production volume 備份與還原 | FR-ENV-06 | ⬜ |
 
 ## 3. 完成定義（Definition of Done）
 
@@ -105,4 +169,6 @@
 | docker.sock 等同 root | 高 | compose 政策、rootless Docker 建議、僅核准受信任 member | M1／持續 |
 | CAFECA 簽章格式改變（ERC-7739） | 中 | 一律經 `isValidSignature` 驗證，不自行解析簽章 | M1 |
 | 公開 RPC 不穩定 | 中 | `CALOUD_CAFECA_RPC` 可指定自架節點 | M1 |
-| ACME 速率限制 | 中 | 開發用 staging；網域須先驗證才申請 | M2 |
+| ACME 速率限制 | 中 | 開發用 staging；網域須先驗證才申請；平臺子網域只用一張 wildcard 憑證 | M2／M4 |
+| 執行任意用戶程式碼 | 高 | 控制面與 Runner 分機、gVisor、環境網路隔離（FR-OPS-11） | M4 |
+| caloud.tw 未進 Public Suffix List 前用戶可互設 cookie | 中 | 及早送審；主控台在 cafeca.io 不受影響 | M4 |

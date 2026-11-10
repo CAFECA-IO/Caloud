@@ -206,7 +206,10 @@
 | `db::audit(db, actor, action, target, detail)` | `caloud-core::db` | 稽核紀錄 | FR-AUD-01 列出的動作都必須呼叫；`action` 用 snake_case `<資源>_<動詞>` |
 | `Role` | `caloud-core::model` | 角色與權限判斷 | 權限判斷只用 `can_deploy()`／`is_admin()`，不比對字串 |
 | `CafecaVerifier` | `caloud-auth` | 登入驗證 | 唯一驗證入口 |
-| `new_nonce()`、`new_token()` | `caloud-auth` | 安全隨機值 | 不自行用 `rand` 產生秘密值 |
+| `new_nonce()`、`new_token()`、`new_subdomain_id(len)` | `caloud-auth` | 安全隨機值、子網域 ID | 不自行用 `rand` 產生秘密值或 ID |
+| `subdomain::validate_id`、`subdomain::IdRules`、`EnvKind` | `caloud-core::subdomain` | 子網域 ID 規則（FR-ENV-07） | 產生或接受 ID 前一律檢查；可用性（未使用、未封鎖）由 `service::admin::new_env_id` 查詢 |
+| `placement::choose_node` | `caloud-core::placement` | 依容量選節點（FR-OPS-08） | 所有派工都經此函式 |
+| `agent::{AgentMsg, ServerMsg, NodeSpecs}` | `caloud-core::agent` | Agent 協定型別（[06 §6](06-api-spec.md#6-agent-協定)） | 控制面與 `caloud-agent` 共用，不另定義 |
 | `policy::validate(yaml)` | `caloud-orchestrator` | compose 檢查 | 任何使用 compose 內容前都要先呼叫 |
 | `ComposeRunner` | `caloud-orchestrator` | 部署／停止／刪除／狀態／log | 唯一可執行 `docker` 指令的地方；執行檔由 `Config.docker_bin` 指定 |
 | `RouteTable::reload(db)` | `caloud-proxy` | 重新載入路由 | 網域或 App 狀態改變後必呼叫（FR-DOM-04） |

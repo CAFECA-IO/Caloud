@@ -184,6 +184,68 @@
 
 **DELETE /api/tokens/{id}** → `204`；非自己的權杖回 `404`。
 
+### 3.6 後台（Admin API）
+
+平臺後台（[ADR 0010](adr/0010-platform.md)）。全部需要 admin+，寫入動作皆寫稽核。
+
+| Method | Path | 權限 | 需求 |
+| --- | --- | --- | --- |
+| GET | `/api/admin/domain-pools` | admin+ | FR-OPS-03 |
+| POST | `/api/admin/domain-pools` | admin+ | FR-OPS-03 |
+| PUT | `/api/admin/domain-pools/{root}` | admin+ | FR-OPS-03 |
+| DELETE | `/api/admin/domain-pools/{root}` | admin+ | FR-OPS-03 |
+| GET | `/api/admin/reserved-names` | admin+ | FR-OPS-03 |
+| POST | `/api/admin/reserved-names` | admin+ | FR-OPS-03 |
+| DELETE | `/api/admin/reserved-names/{name}` | admin+ | FR-OPS-03 |
+| GET | `/api/admin/blocked-hosts` | admin+ | FR-OPS-03 |
+| POST | `/api/admin/blocked-hosts` | admin+ | FR-OPS-03 |
+| DELETE | `/api/admin/blocked-hosts/{hostname}` | admin+ | FR-OPS-03 |
+| POST | `/api/admin/subdomain-ids` | admin+ | FR-ENV-07 |
+| GET | `/api/admin/nodes` | admin+ | FR-OPS-04 |
+| POST | `/api/admin/nodes/join-tokens` | admin+ | FR-OPS-04 |
+| POST | `/api/admin/nodes/{id}/drain` | admin+ | FR-OPS-06 |
+| POST | `/api/admin/nodes/{id}/activate` | admin+ | FR-OPS-06 |
+| DELETE | `/api/admin/nodes/{id}` | admin+ | FR-OPS-06 |
+
+**DomainPool**
+
+```json
+{ "root": "caloud.tw", "purposes": ["production", "staging", "verify"], "cloudflare_zone": "caloud.tw",
+  "id_lengths": { "production": 8, "staging": 12, "verify": 16 }, "created_at": 0, "updated_at": 0 }
+```
+
+- `root`：主機名稱格式，正規化為小寫。`purposes` 為 `production`、`staging`、`verify`、`system` 的子集，至少一個；`production`、`staging`、`verify` 各自只能屬於一個網域池（重複回 `409`）。
+- `id_lengths` 每項 6–32，省略時為 8／12／16。`cloudflare_zone` 可為 null。
+- Cloudflare API 權杖於 M4-08 隨加密儲存加入，本版不接受。
+- **PUT** 本體同 POST 但不含 `root`；**DELETE** → `204`。
+
+**ReservedName** `{ "name": "www", "created_at": 0 }`。**POST** `{ "name": "support" }`：1–32 字元，`a-z`、`0-9`、`-`，轉為小寫；重複回 `409`。3 字元以上的保留字連「包含」它的 ID 也排除，較短的只排除完全相同者。預設保留：`www`、`app`、`api`、`mcp`、`docs`、`status`、`admin`、`login`、`cafeca`、`caloud`。
+
+**BlockedHost** `{ "hostname": "q7v2m4kx.caloud.tw", "reason": "檢舉：仿冒登入頁", "created_by": "0x…", "created_at": 0 }`。**POST** `{ "hostname", "reason" }`：`reason` 1–200 字。
+
+**POST /api/admin/subdomain-ids** `{ "kind": "production" }` → `200 { "id": "jo4f8rk4", "hostname": "jo4f8rk4.caloud.tw" }`：依該用途的網域池產生一個目前可用的 ID（FR-ENV-07），**不保留**；沒有對應網域池回 `400`。
+
+**Node**
+
+```json
+{ "id": "uuid", "name": "runner-tky-01", "owner": null, "status": "active",
+  "specs": { "cpu_cores": 16, "arch": "x86_64", "memory_bytes": 68719476736, "disk_free_bytes": 1932735283200,
+             "os": "Ubuntu 24.04", "gvisor": true, "buildkit": true, "agent_version": "0.1.0" },
+  "allocatable": { "cpu_millis": 14400, "memory_bytes": 61847529062 },
+  "allocated": { "cpu_millis": 0, "memory_bytes": 0 },
+  "used": { "cpu_millis": 820, "memory_bytes": 2147483648 },
+  "last_seen": 0, "created_at": 0 }
+```
+
+- `status`：`active` | `draining` | `offline`。`owner` 為 null 表示平臺節點（自有設備見 M7）。
+- `allocatable` 為偵測規格保留 10% 給主機後的可配置量，由控制面計算（FR-OPS-08）；`allocated` 為調度已配置量；`used` 為最近一次心跳回報的主機用量。
+
+**POST /api/admin/nodes/join-tokens** `{ "expires_in_minutes": 60 }` → `201 { "token": "caloud_join_…", "expires_at": 0 }`：一次性加入權杖，只在此回應出現；`expires_in_minutes` 1–60，預設 60。
+
+**POST /api/admin/nodes/{id}/drain** → `200 Node`（`draining`，不再接新工作，FR-OPS-06）；**/activate** → `200 Node`（`active`，節點須在線，離線回 `409`）。
+
+**DELETE /api/admin/nodes/{id}** → `204`；只有 `draining` 或 `offline` 的節點可移除，否則 `409`。移除後該節點權杖失效。
+
 ## 4. 非 API 路徑
 
 | Path | 說明 |
@@ -191,6 +253,7 @@
 | `GET /` | 管理介面（內嵌 `web/index.html`） |
 | `GET /styleguide` | Design System 元件總覽（內嵌 `web/styleguide.html`，FR-UI-12） |
 | `POST /mcp` | MCP 端點（§5） |
+| `GET /agent/v1/connect` | Runner agent 的 WebSocket 連線（§6，[ADR 0011](adr/0011-runner-websocket.md)） |
 | `GET /assets/{*path}` | Design System 靜態檔，只提供 `caloud-api::assets::FILES` 白名單：`ds/tokens.css`、`ds/components.css`、`ds/theme.css`、`ds/ui.js`；其餘回 404 |
 | 代理 `:80` `/.well-known/acme-challenge/{token}` | ACME HTTP-01 回應（M2） |
 | 代理 `:80` 其他路徑 | 依 Host 轉發至容器（FR-DOM-04、FR-DOM-07） |
@@ -249,3 +312,27 @@
 - 刪除類工具未傳 `confirm: true` → `isError: true`，訊息提示需確認（FR-MCP-05）。
 - `tools/list` 對 member 不列出 admin 專用工具。
 - 每個工具都有 `title`、`description`（繁體中文，說明用途與注意事項）與 `inputSchema`（JSON Schema，`additionalProperties: false`）。
+
+## 6. Agent 協定
+
+`GET /agent/v1/connect` 升級為 WebSocket；訊息為 JSON 文字訊框，以 `type` 區分。連線不帶 cookie，身分只看第一則 `register`（FR-OPS-04）。
+
+**Agent → 控制面**
+
+| type | 欄位 | 說明 |
+| --- | --- | --- |
+| `register` | `join_token` 或 `node_token`（擇一）、`name`、`specs`（同 Node.specs） | 必須是第一則，10 秒內未收到即關閉。首次以加入權杖註冊；之後以節點權杖重連 |
+| `heartbeat` | `used`（`cpu_millis`、`memory_bytes`，主機目前用量） | 每 `heartbeat_secs` 秒一次；第一則在 `ack` 後立即送出 |
+
+**控制面 → Agent**
+
+| type | 欄位 | 說明 |
+| --- | --- | --- |
+| `ack` | `node_id`、`node_token`（只在以加入權杖註冊時出現）、`status`、`heartbeat_secs` | 註冊成功 |
+| `status` | `status` | 維運者排空或恢復節點時通知 |
+| `error` | `message` | 隨即關閉連線（權杖無效、已使用、已過期、格式錯誤、節點被移除）；agent 收到後不再重連 |
+
+- 加入權杖 `caloud_join_…`：一次性、最長 1 小時、只存 keccak 雜湊；使用後立即作廢，不論成功與否。
+- 節點權杖 `caloud_node_…`：只存雜湊；節點被移除即失效。agent 存於 `~/.caloud-agent/node.json`（權限 0600）。
+- 以節點權杖重連時沿用原節點，更新規格；狀態若為 `offline` 改回 `active`（`draining` 維持）。
+- 控制面每 15 秒把超過 60 秒沒有心跳的節點標為 `offline`。
