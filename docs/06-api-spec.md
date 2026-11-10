@@ -254,9 +254,10 @@
 | `GET /styleguide` | Design System 元件總覽（內嵌 `web/styleguide.html`，FR-UI-12） |
 | `POST /mcp` | MCP 端點（§5） |
 | `GET /agent/v1/connect` | Runner agent 的 WebSocket 連線（§6，[ADR 0011](adr/0011-runner-websocket.md)） |
+| `GET /agent/v1/tunnel` | Runner 通道：Edge 經此轉發到節點上的環境（§6.1） |
 | `GET /assets/{*path}` | Design System 靜態檔，只提供 `caloud-api::assets::FILES` 白名單：`ds/tokens.css`、`ds/components.css`、`ds/theme.css`、`ds/ui.js`；其餘回 404 |
 | 代理 `:80` `/.well-known/acme-challenge/{token}` | ACME HTTP-01 回應（M2） |
-| 代理 `:80` 其他路徑 | 依 Host 轉發至容器（FR-DOM-04、FR-DOM-07） |
+| 代理 `:80` 其他路徑 | 依 Host 轉發至容器（FR-DOM-04、FR-DOM-07）；路由帶節點時經該節點通道（FR-OPS-09）；WebSocket／Upgrade 雙向轉接（FR-DOM-06） |
 | 代理 `:443` | 依 TLS SNI：直通網域轉發整條 TCP 連線到 `tls_port`（FR-DOM-09）；其他網域在 Caloud HTTPS 完成（M2-01）前關閉連線 |
 
 ## 5. MCP 介面
@@ -337,7 +338,20 @@
 - 以節點權杖重連時沿用原節點，更新規格；狀態若為 `offline` 改回 `active`（`draining` 維持）。
 - 控制面每 15 秒把超過 60 秒沒有心跳的節點標為 `offline`。
 
-### 6.1 遷移模式（草案，M7-12 實作時定稿）
+### 6.1 通道（M4-07）
+
+`GET /agent/v1/tunnel`，標頭 `Authorization: Bearer <節點權杖>`，升級為 WebSocket 後只用 binary frame，內容為 yamux（控制面為 client、agent 為 server）。權杖無效回 `401`，不升級。
+
+| 步驟 | 方向 | 內容 |
+| --- | --- | --- |
+| 1 | 控制面 → agent | 開新 stream，送 `CONNECT <host>:<port>\n`（host 為環境的服務別名或 IP） |
+| 2 | agent → 控制面 | `OK\n`，或 `ERR <原因>\n` 後關閉 stream |
+| 3 | 雙向 | 原始位元組（HTTP、WebSocket、TLS 直通皆同） |
+
+- agent 拒絕：雲端 metadata（`169.254.0.0/16`）、迴圈位址以外的控制面主機、格式錯誤的目標。
+- 同一節點重連時以新通道取代舊通道；節點被移除時通道立即中斷，Edge 對其路由回 `502`。
+
+### 6.2 遷移模式（草案，M7-12 實作時定稿）
 
 `caloud-agent --migrate --join <遷移權杖>` 在舊主機執行（[ADR 0013](adr/0013-service-migration.md)）。沿用同一端點與訊框格式，註冊後改用以下訊息：
 

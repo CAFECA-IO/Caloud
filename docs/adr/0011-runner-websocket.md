@@ -13,7 +13,8 @@ Runner 節點包含平臺主機與用戶自有設備。自有設備常在 NAT �
 - Runner 上的 `caloud-agent` 主動以 HTTPS WebSocket 連到 `GET /agent/v1/connect`（`caloud.cafeca.io`），斷線以指數退避重連。
 - 第一則訊息為 `register`：帶一次性加入權杖（首次）或長期節點權杖，以及偵測到的規格；控制面回 `ack` 並在首次發給節點權杖（只存 keccak 雜湊）。
 - 之後每 15 秒 `heartbeat`；60 秒無心跳標為離線。
-- M4-07 起同一條連線以 yamux 多工：控制訊息一條 stream，Edge 轉發的每個請求各開一條 stream（反向通道）。
+- **通道（M4-07，2026-11-11 修訂）**：註冊成功後，agent 另開第二條 WebSocket `GET /agent/v1/tunnel`（`Authorization: Bearer <節點權杖>`），binary frame 承載 yamux（`tokio-yamux`）。控制面為 yamux client，Edge 每條上游連線開一條 stream，第一行 `CONNECT <host>:<port>`，agent 連到該位址後雙向轉送。
+  - 不與控制訊息共用同一條連線：大量傳輸不會擋住心跳，控制協定也不必改。
 - 訊息為 JSON 文字訊框，格式定義於 [06 §6](../06-api-spec.md#6-agent-協定)。
 
 ## 考慮過的方案
@@ -27,3 +28,4 @@ Runner 節點包含平臺主機與用戶自有設備。自有設備常在 NAT �
 ## 影響
 
 - `caloud-api` 啟用 axum `ws` 功能；agent 使用 `tokio-tungstenite`（[ADR 0012](0012-runner-crate.md)）。
+- `caloud-proxy` 新增 `tokio-yamux`、`tokio-util`，提供 `TunnelRegistry` 與 WebSocket 轉 byte stream 的 `ws_io`。

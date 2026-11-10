@@ -39,9 +39,9 @@
 | `caloud-core` | Config、DB 連線與 migration、模型、`project_name` 命名規則 | sqlx (sqlite) |
 | `caloud-auth` | `CafecaVerifier`、nonce/token 產生 | alloy-sol-types, reqwest |
 | `caloud-orchestrator` | compose 安全政策、override 產生、compose 生命週期 | serde_yaml, tokio::process |
-| `caloud-proxy` | 反向代理、路由表、ACME HTTP-01 回應、TLS（M2） | hyper 1, arc-swap |
-| `caloud-api` | 服務層（權限、驗證、稽核）、REST API、MCP 端點、session 與 API 權杖、Admin API、Agent WebSocket 端點、內嵌 Web UI 與 Design System 靜態檔 | axum 0.8（ws） |
-| `caloud-runner` | `caloud-agent` 執行檔：規格偵測、連線控制面、心跳（[ADR 0012](adr/0012-runner-crate.md)） | sysinfo, tokio-tungstenite |
+| `caloud-proxy` | 反向代理、路由表、ACME HTTP-01 回應、TLS（M2）、WebSocket／Upgrade 轉接、Runner 通道（`TunnelRegistry`，FR-OPS-09） | hyper 1, arc-swap, tokio-yamux, tokio-util |
+| `caloud-api` | 服務層（權限、驗證、稽核）、REST API、MCP 端點、session 與 API 權杖、Admin API、Agent WebSocket 端點、內嵌 Web UI 與 Design System 靜態檔 | axum 0.8（ws）, tokio-yamux |
+| `caloud-runner` | `caloud-agent` 執行檔：規格偵測、連線控制面、心跳、通道（[ADR 0012](adr/0012-runner-crate.md)） | sysinfo, tokio-tungstenite, tokio-yamux |
 
 ### 相依規則（不可違反）
 

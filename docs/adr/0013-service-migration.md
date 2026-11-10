@@ -52,6 +52,6 @@
 
 ## 影響
 
-- `caloud-agent` 增加遷移模式（[06 §6.1](../06-api-spec.md#61-遷移模式草案m7-12-實作時定稿)）。
+- `caloud-agent` 增加遷移模式（[06 §6.2](../06-api-spec.md#62-遷移模式草案m7-12-實作時定稿)）。
 - 新增資料表 `migrations`、`migration_checks`（M7）。
 - 新增工作項目 M7-11～15。
