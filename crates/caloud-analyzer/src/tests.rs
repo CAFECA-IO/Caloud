@@ -71,6 +71,13 @@ fn print_real_repos() {
         runs.extend(roots.iter().filter(|(r, _)| *r == n).map(|(_, root)| root.clone()));
         for root in runs {
             let a = analyze(&PathBuf::from(&dir).join(&n), &Options { root: root.clone() });
+            if let Ok(out) = std::env::var("CALOUD_ANALYZER_JSON") {
+                let f = PathBuf::from(out).join(format!(
+                    "{n}{}.json",
+                    if root.is_empty() { String::new() } else { format!("-{root}") }
+                ));
+                std::fs::write(f, serde_json::to_string_pretty(&a).unwrap()).unwrap();
+            }
             println!("===== {n} (root={root:?})");
             println!(
                 "source: {:?}  compose_dir: {:?}  confirm: {}",
@@ -263,6 +270,7 @@ fn node_template_with_database() {
     assert_eq!(env(&a, "PORT"), Provider::Platform);
     assert_eq!(env(&a, "STRIPE_KEY"), Provider::User);
     assert_eq!(env(&a, "OTHER"), Provider::User);
+    assert!(!a.env.iter().any(|e| e.name.ends_with("_ONLY")), "測試檔的變數不列入");
     assert_eq!(env(&a, "CALOUD_DB_PASSWORD"), Provider::Generated);
     let stripe = a.env.iter().find(|e| e.name == "STRIPE_KEY").unwrap();
     assert!(stripe.evidence.contains(&Evidence {

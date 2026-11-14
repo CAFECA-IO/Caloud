@@ -48,7 +48,8 @@ const state = { me: null, apps: [], domains: [], users: [], cafeca: null, appFil
 const isAdmin = () => ["super_admin", "admin"].includes(state.me?.role);
 const appName = (id) => state.apps.find((a) => a.id === id)?.name ?? "（已刪除）";
 const roleLabel = (r) => ({ super_admin: "Super Admin", admin: "Admin", member: "Member", pending: "待核准", disabled: "已停用" }[r] || r);
-const currentPage = () => location.hash.slice(1) || "overview";
+const currentPage = () => (location.hash.slice(1) || "overview").split("/")[0];
+const pageArg = () => decodeURIComponent(location.hash.slice(1).split("/")[1] || "");
 
 // ─────────────── 登入 FR-AUTH-01 ───────────────
 async function loadSdk() {
@@ -81,6 +82,7 @@ $("#login-btn").addEventListener("click", async (e) => {
 // ─────────────── AppShell FR-UI-11 ───────────────
 const PAGES = [
   { id: "overview", label: "總覽", icon: "home", render: renderOverview },
+  { id: "projects", label: "專案", icon: "branch", render: renderProjects },
   { id: "apps", label: "Apps", icon: "box", render: renderApps },
   { id: "domains", label: "網域", icon: "globe", render: renderDomains },
   { id: "users", label: "使用者", icon: "users", render: renderUsers, admin: true },
@@ -353,6 +355,206 @@ async function openApp(id) {
   };
   $(".c-tabs", dr.el).addEventListener("click", (e) => { const t = e.target.closest("[data-tab]"); if (t) show(t.dataset.tab); });
   show("info");
+}
+
+// ─────────────── 專案 FR-GH-04、FR-AN-03、FR-AN-04、FR-AN-06、FR-AN-10 ───────────────
+const ROLE_LABEL = { app: "App", database: "資料庫", cache: "快取", support: "附加服務" };
+const PROVIDER_LABEL = { platform: "平臺自動填入", generated: "平臺產生（秘密）", user: "需要你提供" };
+/** 分析訊息中的 `x` 顯示為行內程式碼 */
+const fmtMsg = (m) => esc(m).replace(/`([^`]+)`/g, '<code class="c-code">$1</code>');
+const repoShort = (url) => url.replace(/^https:\/\/(www\.)?github\.com\//, "").replace(/\.git$/, "");
+
+async function renderProjects() {
+  clearTimeout(pollTimer);
+  if (pageArg()) return renderProject(pageArg());
+  $("#page").innerHTML = pageHeader("專案", "貼上公開儲存庫網址，Caloud 會自動解析服務、port 與需要的環境變數；確認後才開始驗證。",
+    `<button class="c-btn c-btn--primary" id="new-project">${icon("plus")}<span>匯入專案</span></button>`) +
+    `<section class="c-card"><div class="c-card__body c-card__body--flush"><div class="c-table-wrap"><table class="c-table">
+      <thead><tr><th>名稱</th><th>儲存庫</th><th>狀態</th><th>更新</th></tr></thead>
+      <tbody id="projects">${skeletonRows(4)}</tbody></table></div></div></section>
+    <p class="c-msg c-msg--danger" id="projects-msg" role="alert"></p>`;
+  $("#new-project").addEventListener("click", openImport);
+  await loadProjects();
+}
+async function loadProjects() {
+  let list;
+  try { list = await api("/api/projects"); } catch (err) { return showMsg($("#projects-msg"), err); }
+  const tbody = $("#projects"); if (!tbody) return;
+  tbody.innerHTML = list.length ? list.map((p) => `<tr class="is-clickable" data-id="${esc(p.id)}" tabindex="0">
+      <td><div class="c-table__primary">${esc(p.name)}</div>${p.root ? `<div class="c-table__secondary u-mono">${esc(p.root)}/</div>` : ""}</td>
+      <td><span class="u-mono u-small">${esc(repoShort(p.repo_url))}</span><div class="c-table__secondary u-mono">${esc(p.git_ref || p.branch || "預設分支")}</div></td>
+      <td>${statusPill("project", p.status)}${p.error ? `<div class="c-table__secondary u-truncate" title="${esc(p.error)}">${esc(p.error)}</div>` : ""}</td>
+      <td class="u-muted u-small u-nowrap">${relTime(p.updated_at)}</td></tr>`).join("")
+    : `<tr><td colspan="4">${empty({ iconName: "branch", title: "還沒有專案", body: "匯入一個公開的 GitHub 儲存庫，Caloud 會解析它需要的服務。", action: `<button class="c-btn c-btn--primary" data-act="import">${icon("plus")}<span>匯入專案</span></button>` })}</td></tr>`;
+  if (list.some((p) => p.status === "analyzing") && currentPage() === "projects" && !pageArg()) pollTimer = setTimeout(loadProjects, 2000);
+}
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("#projects")) return;
+  if (e.target.closest("[data-act='import']")) return openImport();
+  const tr = e.target.closest("tr[data-id]");
+  if (tr) location.hash = `projects/${tr.dataset.id}`;
+});
+
+/** FR-GH-04、FR-AN-06：以公開儲存庫網址匯入 */
+function openImport() {
+  const dr = drawer({ title: "匯入專案", subtitle: "目前支援公開的 https:// 儲存庫；GitHub App 授權之後開放。" });
+  dr.body.innerHTML = `
+    <label class="c-field"><span class="c-field__label">儲存庫網址</span><input class="c-input u-mono" id="ip-url" placeholder="https://github.com/CAFECA-IO/SwarmStorage" autocomplete="off" spellcheck="false"></label>
+    <div class="l-grid">
+      <label class="c-field"><span class="c-field__label">分支／標籤（選填）</span><input class="c-input u-mono" id="ip-ref" placeholder="預設分支"></label>
+      <label class="c-field"><span class="c-field__label">根目錄（選填）</span><input class="c-input u-mono" id="ip-root" placeholder="例如 app"><span class="c-field__hint">monorepo 時指定專案所在的子目錄。</span></label>
+    </div>
+    <label class="c-field"><span class="c-field__label">名稱（選填）</span><input class="c-input" id="ip-name" placeholder="預設為儲存庫名稱" autocomplete="off"></label>
+    <span class="c-field__error" id="ip-err" role="alert"></span>
+    <div class="c-banner">${icon("shield")}<div class="c-banner__body"><strong>只讀取，不執行</strong><span class="u-small">解析只讀儲存庫中的檔案，不會執行任何程式；確認之前不會建置或部署。</span></div></div>`;
+  dr.footer.classList.remove("u-hidden");
+  dr.footer.innerHTML = `<button class="c-btn" data-close>取消</button><button class="c-btn c-btn--primary" id="ip-submit">${icon("search")}<span>匯入並解析</span></button>`;
+  $("#ip-submit", dr.el).addEventListener("click", async (e) => {
+    const v = (id) => $(id, dr.el).value.trim() || null;
+    showMsg($("#ip-err", dr.el), null);
+    if (!v("#ip-url")) return showMsg($("#ip-err", dr.el), new Error("請輸入儲存庫網址。"));
+    try {
+      const p = await busy(e.currentTarget, api("/api/projects", { method: "POST", body: { repo_url: v("#ip-url"), git_ref: v("#ip-ref"), root: v("#ip-root"), name: v("#ip-name") } }));
+      dr.close();
+      location.hash = p ? `projects/${p.id}` : "projects";
+    } catch (err) { showMsg($("#ip-err", dr.el), err); }
+  });
+}
+
+/** 依據：GitHub 儲存庫連到該 commit 的檔案與行號 */
+function evidenceLink(project, commit, ev) {
+  const label = `${ev.file}${ev.line ? `:${ev.line}` : ""}`;
+  const gh = /^https:\/\/github\.com\/[^/]+\/[^/]+/.exec(project.repo_url.replace(/\.git$/, ""));
+  if (!gh || !commit || ev.file.startsWith("（")) return `<span class="u-mono u-small">${esc(label)}</span>`;
+  return `<a class="u-mono u-small" href="${esc(`${gh[0]}/blob/${commit}/${ev.file}${ev.line ? `#L${ev.line}` : ""}`)}" target="_blank" rel="noopener">${esc(label)}</a>`;
+}
+
+/** FR-AN-03、FR-AN-04：解析結果確認頁 */
+async function renderProject(id) {
+  $("#page").innerHTML = `<span class="c-skeleton"></span><span class="c-skeleton"></span>`;
+  let data;
+  try { data = await api(`/api/projects/${encodeURIComponent(id)}`); }
+  catch (err) { return ($("#page").innerHTML = pageHeader("專案", "") + `<p class="c-msg c-msg--danger" role="alert">${esc(err.message)}</p><p><a href="#projects">回到專案列表</a></p>`); }
+  if (currentPage() !== "projects" || pageArg() !== id) return;
+  const { project: p, analysis: a, confirmed: c } = data;
+  const r = a?.result;
+  document.title = `${p.name} · 專案 · Caloud`;
+  const commitShort = a?.commit ? a.commit.slice(0, 7) : "";
+  const analyzing = p.status === "analyzing";
+  const isConfirmedLatest = c && a && c.id === a.id;
+  const step = (n, label, state) => `<span role="listitem" class="c-badge ${state === "done" ? "c-badge--success" : state === "current" ? "c-badge--accent" : ""}"><span class="c-badge__dot" aria-hidden="true"></span>${n} ${esc(label)}${state === "current" ? '<span class="u-sr-only">（目前步驟）</span>' : ""}</span>`;
+  const reviewState = isConfirmedLatest ? "done" : analyzing || !r ? "" : "current";
+  const lows = r ? r.findings.map((f, i) => [f, i]).filter(([f]) => f.confidence === "low") : [];
+  const acked = new Set(isConfirmedLatest ? c.acknowledged : []);
+  const editedCompose = isConfirmedLatest ? c.compose : null;
+  const publicDefault = (isConfirmedLatest && c.public_service) || r?.services.find((s) => s.public)?.name || "";
+  const suggest = r?.findings.find((f) => f.key === "suggest_root");
+
+  $("#page").innerHTML = pageHeader(p.name,
+    `${repoShort(p.repo_url)} · ${p.git_ref || p.branch || "預設分支"}${commitShort ? ` · ${commitShort}` : ""}${p.root ? ` · 根目錄 ${p.root}/` : ""}`,
+    `<a class="c-btn" href="#projects">專案列表</a><button class="c-btn" id="pj-reanalyze" ${analyzing ? "disabled" : ""}>${icon("refresh")}<span>重新解析</span></button><button class="c-btn c-btn--danger" id="pj-delete">${icon("trash")}<span>刪除</span></button>`) +
+    `<div class="l-row" role="list" aria-label="匯入步驟">${step(1, "選擇儲存庫", "done")}${step(2, "解析", analyzing ? "current" : r ? "done" : "")}${step(3, "確認設定", reviewState)}${step(4, "第一次驗證（尚未開放）", "")}</div>
+    <div id="pj-banners" class="l-stack"></div>
+    <div id="pj-body" class="l-stack"></div>`;
+
+  const banners = [];
+  if (analyzing) banners.push(`<div class="c-banner">${icon("loader")}<div class="c-banner__body"><strong>正在取得並解析儲存庫</strong><span class="u-small">通常在一分鐘內完成，這頁會自動更新。</span></div></div>`);
+  if (p.status === "error") banners.push(`<div class="c-banner c-banner--danger">${icon("alert")}<div class="c-banner__body"><strong>解析失敗</strong><span class="u-small">${esc(p.error)}</span></div></div>`);
+  if (c && a && !isConfirmedLatest && !analyzing) banners.push(`<div class="c-banner c-banner--warning">${icon("info")}<div class="c-banner__body"><strong>最新解析與已確認的版本不同</strong><span class="u-small">已確認的是 ${esc(c.commit.slice(0, 7))}（${relTime(c.confirmed_at)}）。確認下方的新結果後才會改用它。</span></div></div>`);
+  if (r?.errors.length) banners.push(`<div class="c-banner c-banner--danger">${icon("alert")}<div class="c-banner__body"><strong>${r.errors.length} 個阻擋項</strong><span class="u-small">${r.errors.map(fmtMsg).join("<br>")}${r.compose === null && !suggest ? "<br>可以在下方編輯 compose 解決後再確認。" : ""}</span></div></div>`);
+  if (suggest) {
+    const dirs = [...suggest.message.matchAll(/`([^`]+)\/`/g)].map((m) => m[1]);
+    banners.push(`<div class="c-banner c-banner--warning">${icon("info")}<div class="c-banner__body"><strong>根目錄沒有可解析的檔案</strong><span class="u-small">${fmtMsg(suggest.message)}</span><div class="l-row">${dirs.map((d) => `<button class="c-btn c-btn--sm" data-root="${esc(d)}">改用 ${esc(d)}/ 重新解析</button>`).join("")}</div></div></div>`);
+  } else if (r && !isConfirmedLatest && lows.length) banners.push(`<div class="c-banner c-banner--warning">${icon("alert")}<div class="c-banner__body"><strong>${lows.length} 個項目需要你確認</strong><span class="u-small">低信心的判斷在第一次驗證前需要確認；請檢查後在「判斷與依據」勾選。</span></div></div>`);
+  if (isConfirmedLatest) banners.push(`<div class="c-banner">${icon("check")}<div class="c-banner__body"><strong>已確認</strong><span class="u-small">${relTime(c.confirmed_at)} 確認${c.compose ? "（使用編輯過的 compose）" : ""}；對外服務 <code class="c-code">${esc(c.public_service)}</code>。驗證功能開放後會以這份設定執行。</span></div></div>`);
+  $("#pj-banners").innerHTML = banners.join("");
+
+  if (r) {
+    const svcRows = r.services.map((s) => `<tr>
+        <td class="c-table__primary u-mono">${esc(s.name)}</td><td>${esc(ROLE_LABEL[s.role] || s.role)}</td><td class="u-mono">${s.port ?? '<span class="u-muted">—</span>'}</td>
+        <td>${s.role === "database" || s.role === "cache" ? '<span class="u-muted u-small">僅內部</span>' : `<label class="c-check"><input type="radio" name="pj-public" value="${esc(s.name)}" ${s.name === publicDefault ? "checked" : ""}><span class="u-sr-only">以 ${esc(s.name)} 為對外服務</span><span>路徑 /</span></label>`}</td></tr>`).join("");
+    const pubFinding = r.findings.find((f) => f.key === "public_service");
+    const findingRows = r.findings.map((f, i) => `<tr>
+        <td>${statusPill("confidence", f.confidence)}</td>
+        <td>${fmtMsg(f.message)}</td>
+        <td>${f.evidence.map((ev) => evidenceLink(p, a.commit, ev)).join("<br>") || '<span class="u-muted">—</span>'}</td>
+        <td>${f.confidence === "low" ? `<label class="c-check"><input type="checkbox" data-ack="${i}" ${acked.has(i) ? "checked" : ""}><span>我已確認</span></label>` : ""}</td></tr>`).join("");
+    const envRows = r.env.map((e) => `<tr><td class="c-table__primary u-mono">${esc(e.name)}</td><td class="u-small ${e.provider === "user" ? "" : "u-muted"}">${esc(PROVIDER_LABEL[e.provider])}</td>
+        <td>${e.evidence.map((ev) => evidenceLink(p, a.commit, ev)).join("<br>") || '<span class="u-muted">—</span>'}</td></tr>`).join("");
+    const userVars = r.env.filter((e) => e.provider === "user").length;
+    const composeText = editedCompose ?? r.compose;
+    const sourceLabel = { override: `儲存庫的 ${r.source.file}`, compose: `沿用 ${r.source.file}`, dockerfile: `儲存庫的 Dockerfile`, template: `${r.source.template} 範本`, static: "靜態網站（nginx）", none: "找不到可解析的來源" }[r.source.kind];
+    $("#pj-body").innerHTML = `
+      <section class="c-card"><div class="c-card__header"><h2 class="c-card__title">偵測到的服務</h2><span class="u-small u-muted">來源：${esc(sourceLabel)}${pubFinding ? ` · 對外服務信心 ${statusPill("confidence", pubFinding.confidence)}` : ""}</span></div>
+        <div class="c-card__body c-card__body--flush"><div class="c-table-wrap"><table class="c-table">
+        <thead><tr><th>服務</th><th>類型</th><th>Port</th><th>對外</th></tr></thead>
+        <tbody>${svcRows || `<tr><td colspan="4">${empty({ iconName: "inbox", title: "沒有服務", body: "請指定根目錄或在儲存庫加入 compose 檔。" })}</td></tr>`}</tbody></table></div></div></section>
+      <section class="c-card"><div class="c-card__header"><h2 class="c-card__title">判斷與依據</h2><span class="u-small u-muted">${r.findings.length} 項${lows.length ? `，${lows.length} 項低信心需確認` : ""}</span></div>
+        <div class="c-card__body c-card__body--flush"><div class="c-table-wrap"><table class="c-table">
+        <thead><tr><th>信心</th><th>判斷</th><th>依據</th><th><span class="u-sr-only">確認</span></th></tr></thead><tbody>${findingRows}</tbody></table></div></div></section>
+      <section class="c-card"><div class="c-card__header"><h2 class="c-card__title">環境變數</h2><span class="u-small u-muted">${userVars} 個需要你提供；值的設定在秘密變數功能開放後提供</span></div>
+        <div class="c-card__body c-card__body--flush"><div class="c-table-wrap"><table class="c-table">
+        <thead><tr><th>名稱</th><th>由誰提供</th><th>依據</th></tr></thead>
+        <tbody>${envRows || `<tr><td colspan="3">${empty({ iconName: "inbox", title: "沒有偵測到環境變數" })}</td></tr>`}</tbody></table></div></div></section>
+      <section class="c-card"><div class="c-card__header"><h2 class="c-card__title">${editedCompose ? "compose（已編輯）" : "產生的 compose"}</h2><span class="l-spacer"></span><button class="c-btn c-btn--sm" id="pj-edit">編輯</button></div>
+        <div class="c-card__body l-stack">${composeText ? `<pre class="c-log" aria-label="compose 檔">${esc(composeText)}</pre>` : `<p class="u-muted">解析有阻擋項，沒有產生 compose；請按「編輯」貼上修正後的版本。</p>`}
+        <p class="u-small u-muted">已通過平臺 compose 政策。要固定這份設定，可放到儲存庫的 <code class="c-code">.caloud/compose.yml</code>。</p></div></section>
+      <span class="c-field__error" id="pj-err" role="alert"></span>
+      <div class="l-row"><span class="l-spacer"></span><span class="u-small u-muted" id="pj-hint"></span><button class="c-btn c-btn--primary" id="pj-confirm">${icon("check")}<span>${isConfirmedLatest ? "更新確認" : "確認設定"}</span></button></div>`;
+  }
+
+  let compose = editedCompose; // 用戶編輯版（null 表示使用產生的）
+  const ackSet = () => $$("[data-ack]").filter((x) => x.checked).map((x) => Number(x.dataset.ack));
+  const refreshConfirm = () => {
+    const btn = $("#pj-confirm"); if (!btn) return;
+    const missing = lows.length - ackSet().length;
+    const noCompose = !compose && !r.compose;
+    const noPublic = !$("[name='pj-public']:checked");
+    btn.disabled = missing > 0 || noCompose || noPublic || analyzing;
+    $("#pj-hint").textContent = missing > 0 ? `還有 ${missing} 個低信心項目未確認` : noCompose ? "請先編輯 compose 解決阻擋項" : noPublic ? "請選擇對外服務" : "";
+  };
+  $$("[data-ack], [name='pj-public']").forEach((x) => x.addEventListener("change", refreshConfirm));
+  refreshConfirm();
+
+  $("#pj-confirm")?.addEventListener("click", async (e) => {
+    showMsg($("#pj-err"), null);
+    try {
+      await busy(e.currentTarget, api(`/api/projects/${id}/analysis`, { method: "PUT", body: { compose, public_service: $("[name='pj-public']:checked")?.value, acknowledged: ackSet() } }));
+      toast("已確認解析結果");
+      renderProject(id);
+    } catch (err) { showMsg($("#pj-err"), err); }
+  });
+  $("#pj-edit")?.addEventListener("click", () => {
+    const dr = drawer({ title: "編輯 compose", subtitle: "確認時以平臺 compose 政策檢查；不可使用 ports、主機路徑與 host 網路。" });
+    dr.body.innerHTML = `<label class="c-field"><span class="c-field__label">compose.yml</span><textarea class="c-textarea" id="pe-yaml" spellcheck="false">${esc(compose ?? r.compose ?? "")}</textarea></label>`;
+    dr.footer.classList.remove("u-hidden");
+    dr.footer.innerHTML = `<button class="c-btn" id="pe-reset">還原為產生的版本</button><span class="l-spacer"></span><button class="c-btn" data-close>取消</button><button class="c-btn c-btn--primary" id="pe-save">${icon("check")}<span>套用</span></button>`;
+    $("#pe-reset", dr.el).disabled = !r.compose;
+    $("#pe-reset", dr.el).addEventListener("click", () => { compose = null; dr.close(); redrawCompose(); });
+    $("#pe-save", dr.el).addEventListener("click", () => { const v = $("#pe-yaml", dr.el).value; compose = v.trim() && v !== r.compose ? v : null; dr.close(); redrawCompose(); });
+  });
+  const redrawCompose = () => {
+    const card = $("#pj-edit").closest(".c-card");
+    $(".c-card__title", card).textContent = compose ? "compose（已編輯，確認時檢查）" : "產生的 compose";
+    const body = $(".c-card__body", card);
+    const text = compose ?? r.compose;
+    body.firstElementChild.outerHTML = text ? `<pre class="c-log" aria-label="compose 檔">${esc(text)}</pre>` : `<p class="u-muted">解析有阻擋項，沒有產生 compose；請按「編輯」貼上修正後的版本。</p>`;
+    refreshConfirm();
+  };
+  $("#pj-reanalyze").addEventListener("click", async (e) => {
+    try { await busy(e.currentTarget, api(`/api/projects/${id}/analysis`, { method: "POST" })); renderProject(id); }
+    catch (err) { toast(err.message, "danger"); }
+  });
+  $$("[data-root]").forEach((b) => b.addEventListener("click", async () => {
+    try { await busy(b, api(`/api/projects/${id}`, { method: "PATCH", body: { root: b.dataset.root } })); renderProject(id); }
+    catch (err) { toast(err.message, "danger"); }
+  }));
+  $("#pj-delete").addEventListener("click", async () => {
+    if (!(await confirmDialog({ title: `刪除 ${p.name}？`, body: "解析紀錄與取得的原始碼會一併刪除，無法復原。", confirmText: "刪除專案" }))) return;
+    try { await api(`/api/projects/${id}`, { method: "DELETE" }); toast(`已刪除 ${p.name}`); location.hash = "projects"; }
+    catch (err) { toast(err.message, "danger"); }
+  });
+  if (analyzing) pollTimer = setTimeout(() => currentPage() === "projects" && pageArg() === id && renderProject(id), 2000);
 }
 
 // ─────────────── 網域 FR-DOM-* / FR-UI-06 / FR-UI-07 ───────────────

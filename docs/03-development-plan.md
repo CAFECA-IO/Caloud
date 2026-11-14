@@ -101,10 +101,10 @@
 | # | 工作項目 | 需求 | 狀態 |
 | --- | --- | --- | --- |
 | M5-01 | GitHub App 安裝、installation token、webhook 驗簽 | FR-GH-01、FR-GH-02 | ⬜ |
-| M5-02 | 公開儲存庫網址匯入 | FR-GH-04 | 🚧 |
+| M5-02 | 公開儲存庫網址匯入 | FR-GH-04 | ✅ |
 | M5-03 | 解析器：compose、Dockerfile、Node、Rust、Go、Python 範本、附加資料庫、環境變數 | FR-AN-01、FR-AN-02 | ✅ |
-| M5-04 | 信心度與依據；`.caloud/compose.yml` 覆寫；編輯產生結果 | FR-AN-03、FR-AN-04 | 🚧 |
-| M5-05 | 匯入與解析確認畫面；解析紀錄與確認 | FR-AN-04、FR-AN-10 | 🚧 |
+| M5-04 | 信心度與依據；`.caloud/compose.yml` 覆寫；編輯產生結果 | FR-AN-03、FR-AN-04 | ✅ |
+| M5-05 | 匯入與解析確認畫面；解析紀錄與確認 | FR-AN-04、FR-AN-10 | ✅ |
 | M5-06 | 平臺 App compose 政策（repo 內 build、`env_file` 轉換） | FR-AN-05 | ✅ |
 | M5-07 | 子目錄（monorepo）根目錄 | FR-AN-06 | ✅ |
 | M5-08 | 偵測持久化目錄、系統套件與原生模組、建置時變數 | FR-AN-07、FR-AN-08、FR-AN-09 | ⬜ |

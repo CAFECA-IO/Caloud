@@ -11,6 +11,7 @@ use caloud_orchestrator::{DeploySpec, GitSource, Policy, ValidatedCompose};
 use serde_json::{json, Value};
 
 pub mod admin;
+pub mod projects;
 
 // ───────────────────────── App ─────────────────────────
 
@@ -67,21 +68,42 @@ fn bad(msg: impl Into<String>) -> ApiError {
     ApiError::BadRequest(msg.into())
 }
 
-/// Git 來源的設定檢查（docs/07-security.md §3.5）
-fn check_git(url: &str, git_ref: &str, path: &str, file: &str) -> ApiResult<()> {
+/// Git 網址：`https://`、不含帳密與空白（docs/07-security.md §1、§3.5）
+pub(crate) fn check_repo_url(url: &str) -> ApiResult<()> {
     let rest = url.strip_prefix("https://").ok_or_else(|| bad("Git 網址必須以 https:// 開頭。"))?;
     let authority = rest.split('/').next().unwrap_or_default();
-    if authority.is_empty() || authority.contains('@') || url.chars().any(char::is_whitespace) {
+    if authority.is_empty() || authority.contains('@') || url.chars().any(char::is_whitespace) || url.len() > 512 {
         return Err(bad("Git 網址格式錯誤，且不可包含帳號密碼；目前只支援公開儲存庫。"));
     }
-    let ok = |v: &str| !v.is_empty() && !v.starts_with('-') && v.chars().all(|c| c.is_ascii_alphanumeric() || "._/-".contains(c));
-    if !ok(git_ref) || git_ref.contains("..") {
+    Ok(())
+}
+
+fn git_word(v: &str) -> bool {
+    !v.is_empty() && v.len() <= 200 && !v.starts_with('-') && v.chars().all(|c| c.is_ascii_alphanumeric() || "._/-".contains(c))
+}
+
+/// 分支、標籤或 commit
+pub(crate) fn check_git_ref(git_ref: &str) -> ApiResult<()> {
+    if !git_word(git_ref) || git_ref.contains("..") {
         return Err(bad("ref 只能包含英數字與 . _ / -，例如 main 或 v1.2.0。"));
     }
-    if !path.is_empty() && (!ok(path) || path.starts_with('/') || path.split('/').any(|c| c == "..")) {
+    Ok(())
+}
+
+/// 儲存庫內的相對目錄（"" 為根目錄）
+pub(crate) fn check_repo_path(path: &str) -> ApiResult<()> {
+    if !path.is_empty() && (!git_word(path) || path.starts_with('/') || path.split('/').any(|c| c == "..")) {
         return Err(bad("目錄必須是儲存庫內的相對路徑，例如 deploy/livekit。"));
     }
-    if !ok(file) || file.contains('/') {
+    Ok(())
+}
+
+/// Git 來源的設定檢查（docs/07-security.md §3.5）
+fn check_git(url: &str, git_ref: &str, path: &str, file: &str) -> ApiResult<()> {
+    check_repo_url(url)?;
+    check_git_ref(git_ref)?;
+    check_repo_path(path)?;
+    if !git_word(file) || file.contains('/') {
         return Err(bad("compose 檔名格式錯誤，例如 docker-compose.yml。"));
     }
     Ok(())

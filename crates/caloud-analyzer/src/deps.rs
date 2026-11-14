@@ -263,7 +263,13 @@ pub(crate) fn scan_env(cx: &mut Ctx, platform: &[String]) -> Vec<EnvVar> {
     let files = cx
         .fs
         .walk("", 6, &[".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".rs", ".py", ".go"]);
-    for f in files.iter().take(2000) {
+    // 測試與 e2e 用的變數不屬於執行環境
+    let is_test = |f: &str| {
+        f.split('/')
+            .any(|c| ["test", "tests", "__tests__", "e2e", "spec", "fixtures"].contains(&c))
+            || [".test.", ".spec.", "_test."].iter().any(|t| f.contains(t))
+    };
+    for f in files.iter().filter(|f| !is_test(f)).take(2000) {
         let Some(t) = cx.fs.read(f) else { continue };
         for (i, l) in t.lines().enumerate() {
             if !PATTERNS.iter().any(|p| l.contains(p)) {

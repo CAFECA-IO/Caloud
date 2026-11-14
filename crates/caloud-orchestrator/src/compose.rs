@@ -106,21 +106,7 @@ impl ComposeRunner {
     /// FR-APP-13：重新取得儲存庫的指定 ref（淺層），回傳 compose 檔內容
     pub async fn fetch_git(&self, app_id: &str, git: &GitSource) -> anyhow::Result<String> {
         let src = self.app_dir(app_id).join("src");
-        if tokio::fs::try_exists(&src).await? {
-            tokio::fs::remove_dir_all(&src).await?;
-        }
-        tokio::fs::create_dir_all(&src).await?;
-        let g = |args: &[&str]| {
-            let mut c = Command::new(&self.git_bin);
-            // 不提示輸入帳密，避免卡住（ADR 0009：只支援公開儲存庫）
-            c.env("GIT_TERMINAL_PROMPT", "0").arg("-C").arg(&src).args(args);
-            c
-        };
-        run(&mut g(&["init", "-q"])).await?;
-        run(&mut g(&["fetch", "-q", "--depth", "1", &git.url, &git.git_ref]))
-            .await
-            .map_err(|e| anyhow::anyhow!("無法取得 {} 的 {}：{e}", git.url, git.git_ref))?;
-        run(&mut g(&["checkout", "-q", "FETCH_HEAD"])).await?;
+        crate::git::fetch_repo(&self.git_bin, &src, &git.url, Some(&git.git_ref)).await?;
         let path = self.compose_path(app_id, Some(git));
         tokio::fs::read_to_string(&path).await.map_err(|_| {
             anyhow::anyhow!(

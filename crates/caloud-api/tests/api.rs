@@ -140,7 +140,8 @@ impl Env {
         std::fs::write(
             &git,
             format!(
-                "#!/bin/sh\necho \"$*\" >> '{log}'\nsrc=$2\ncase \"$*\" in *missing*) echo 'repository not found' >&2; exit 128;; *' checkout '*) cp -R '{repo}/.' \"$src\";; esac\nexit 0\n",
+                "#!/bin/sh\necho \"$*\" >> '{log}'\nsrc=$2\ncase \"$*\" in *missing*) echo 'repository not found' >&2; exit 128;; *' checkout '*) cp -R '{repo}/.' \"$src\";; \
+                 *' rev-parse '*) echo 98b705d0123456789abcdef0123456789abcdef0;; *' ls-remote '*) printf 'ref: refs/heads/main\\tHEAD\\n';; esac\nexit 0\n",
                 log = dir.join("git.log").display(),
                 repo = dir.join("gitrepo").display()
             ),
@@ -1746,4 +1747,294 @@ async fn edge_forwards_through_runner_tunnel_and_upgrades() {
     assert_eq!(get("tun.test", "/hello").await.unwrap().status(), StatusCode::BAD_GATEWAY);
     let out = tokio::time::timeout(Duration::from_secs(5), agent).await.unwrap().unwrap();
     assert!(matches!(out, Outcome::Rejected(_)), "{out:?}");
+}
+
+// ───────────────────────── M5：平臺專案（docs/06 §3.7） ─────────────────────────
+
+/// 把測試儲存庫內容換成 `files`
+fn set_repo(env: &Env, files: &[(&str, &str)]) {
+    let repo = env.dir.join("gitrepo");
+    let _ = std::fs::remove_dir_all(&repo);
+    for (f, body) in files {
+        let p = repo.join(f);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    std::fs::create_dir_all(&repo).unwrap();
+}
+
+async fn wait_project(env: &Env, cookie: &str, id: &str) -> Value {
+    for _ in 0..100 {
+        let (st, v) = env.call("GET", &format!("/api/projects/{id}"), cookie, None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        if v["project"]["status"] != "analyzing" {
+            return v;
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    panic!("project {id} still analyzing");
+}
+
+// FR-GH-04、FR-AN-03、FR-AN-04、FR-AN-06、FR-AN-10：匯入、解析、確認、重新解析
+#[tokio::test]
+async fn project_import_analysis_and_confirmation() {
+    let env = Env::new().await;
+    let (admin, member) = admin_and_member(&env).await;
+    set_repo(
+        &env,
+        &[
+            ("package.json", "{\n  \"scripts\": {\n    \"build\": \"next build\",\n    \"start\": \"next start -p 4000\"\n  },\n  \"dependencies\": { \"next\": \"15\" }\n}\n"),
+            ("package-lock.json", "{}"),
+            ("src/a.ts", "export const k = process.env.STRIPE_KEY;\n"),
+        ],
+    );
+
+    // 網址檢查
+    for bad in ["http://github.com/a/b", "https://user:pw@github.com/a/b", "git@github.com:a/b.git"] {
+        let (st, _) = env.call("POST", "/api/projects", &member, Some(json!({ "repo_url": bad }))).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (st, _) = env
+        .call(
+            "POST",
+            "/api/projects",
+            &member,
+            Some(json!({ "repo_url": "https://github.com/a/b", "root": "../x" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    let (st, p) = env
+        .call(
+            "POST",
+            "/api/projects",
+            &member,
+            Some(json!({ "repo_url": "https://github.com/CAFECA-IO/SwarmStorage" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{p}");
+    assert_eq!(p["name"], "SwarmStorage");
+    assert_eq!(p["status"], "analyzing");
+    let id = p["id"].as_str().unwrap().to_string();
+
+    let v = wait_project(&env, &member, &id).await;
+    assert_eq!(v["project"]["status"], "needs_review", "{v}");
+    assert_eq!(v["project"]["branch"], "main");
+    let a = &v["analysis"];
+    assert_eq!(a["commit"], "98b705d0123456789abcdef0123456789abcdef0");
+    assert_eq!(a["git_ref"], "HEAD");
+    assert_eq!(a["result"]["source"]["template"], "node/next");
+    let web = &a["result"]["services"][0];
+    assert_eq!(
+        (web["name"].as_str(), web["port"].as_u64(), web["public"].as_bool()),
+        (Some("web"), Some(4000), Some(true))
+    );
+    let port = a["result"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["key"] == "port")
+        .unwrap();
+    assert_eq!(port["evidence"][0], json!({ "file": "package.json", "line": 4 }));
+    assert!(a["result"]["env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["name"] == "STRIPE_KEY" && e["provider"] == "user"));
+    assert!(v["confirmed"].is_null());
+    // git 以安全設定執行
+    let git_log = std::fs::read_to_string(env.dir.join("git.log")).unwrap();
+    assert!(git_log.contains("protocol.allow=never") && git_log.contains("core.symlinks=false"));
+
+    // 其他 member 看不到也改不了；admin 可以
+    let (other, o) = env.login(acct(0xc3)).await;
+    env.call(
+        "PUT",
+        &format!("/api/users/{}", o["account"].as_str().unwrap()),
+        &admin,
+        Some(json!({ "role": "member" })),
+    )
+    .await;
+    let (st, _) = env.call("GET", &format!("/api/projects/{id}"), &other, None).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (_, list) = env.call("GET", "/api/projects", &other, None).await;
+    assert_eq!(list.as_array().unwrap().len(), 0);
+    let (_, list) = env.call("GET", "/api/projects", &admin, None).await;
+    assert_eq!(list.as_array().unwrap().len(), 1);
+
+    // 確認：對外服務必須存在
+    let (st, _) = env
+        .call(
+            "PUT",
+            &format!("/api/projects/{id}/analysis"),
+            &member,
+            Some(json!({ "public_service": "nope" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, p) = env
+        .call(
+            "PUT",
+            &format!("/api/projects/{id}/analysis"),
+            &member,
+            Some(json!({ "public_service": "web" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{p}");
+    assert_eq!(p["status"], "confirmed");
+    let first_confirmed = p["confirmed_analysis"].as_str().unwrap().to_string();
+
+    // 儲存庫變成只有 Dockerfile（沒有 EXPOSE）→ 重新解析：新增一筆，確認版不變
+    set_repo(&env, &[("Dockerfile", "FROM alpine\n")]);
+    let (st, _) = env.call("POST", &format!("/api/projects/{id}/analysis"), &member, None).await;
+    assert_eq!(st, StatusCode::ACCEPTED);
+    let v = wait_project(&env, &member, &id).await;
+    assert_eq!(v["project"]["status"], "confirmed", "已有確認版本");
+    assert_eq!(v["confirmed"]["id"], first_confirmed.as_str());
+    assert_ne!(v["analysis"]["id"], first_confirmed.as_str());
+    assert_eq!(v["analysis"]["result"]["needs_confirmation"], true);
+    let lows: Vec<usize> = v["analysis"]["result"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f["confidence"] == "low")
+        .map(|(i, _)| i)
+        .collect();
+    assert!(!lows.is_empty());
+
+    // 低信心未確認 → 400
+    let (st, e) = env
+        .call(
+            "PUT",
+            &format!("/api/projects/{id}/analysis"),
+            &member,
+            Some(json!({ "public_service": "web" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert!(e["error"].as_str().unwrap().contains("低信心"), "{e}");
+    // 編輯版違反平臺政策 → 400
+    let (st, _) = env
+        .call(
+            "PUT",
+            &format!("/api/projects/{id}/analysis"),
+            &member,
+            Some(json!({ "public_service": "web", "acknowledged": lows, "compose": "services:\n  web:\n    build: .\n    network_mode: host\n" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, _) = env
+        .call(
+            "PUT",
+            &format!("/api/projects/{id}/analysis"),
+            &member,
+            Some(json!({ "public_service": "web", "acknowledged": lows, "compose": "services:\n  web:\n    build: .\n    ports: ['80:8080']\n" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "編輯版不接受 ports");
+    // 合法的編輯版
+    let edited = "services:\n  web:\n    build: .\n    expose: ['8080']\n";
+    let (st, p) = env
+        .call(
+            "PUT",
+            &format!("/api/projects/{id}/analysis"),
+            &member,
+            Some(json!({ "public_service": "web", "acknowledged": lows, "compose": edited })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{p}");
+    let v = wait_project(&env, &member, &id).await;
+    assert_eq!(v["confirmed"]["id"], v["analysis"]["id"]);
+    assert_eq!(v["confirmed"]["compose"], edited);
+    assert_eq!(v["confirmed"]["acknowledged"], json!(lows));
+
+    // PATCH 根目錄 → 重新解析
+    let (st, p) = env
+        .call("PATCH", &format!("/api/projects/{id}"), &member, Some(json!({ "root": "app/" })))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{p}");
+    assert_eq!(p["root"], "app");
+    let v = wait_project(&env, &member, &id).await;
+    assert!(v["analysis"]["result"]["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e.as_str().unwrap().contains("根目錄")));
+
+    // 刪除：原始碼一併刪除
+    let src = env.dir.join("data/projects").join(&id);
+    assert!(src.exists());
+    let (st, _) = env.call("DELETE", &format!("/api/projects/{id}"), &member, None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    assert!(!src.exists());
+    let (st, _) = env.call("GET", &format!("/api/projects/{id}"), &member, None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+
+    // 稽核
+    let actions: Vec<String> = sqlx::query_scalar("SELECT action FROM audit_log WHERE action LIKE 'project_%' ORDER BY id")
+        .fetch_all(&env.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        actions,
+        [
+            "project_create",
+            "project_confirm",
+            "project_analyze",
+            "project_confirm",
+            "project_update",
+            "project_delete"
+        ]
+    );
+}
+
+// FR-GH-04、FR-AN-10：取得失敗為 error；數量上限
+#[tokio::test]
+async fn project_fetch_errors_and_quota() {
+    let env = Env::new().await;
+    let (_, member) = admin_and_member(&env).await;
+    let (st, p) = env
+        .call(
+            "POST",
+            "/api/projects",
+            &member,
+            Some(json!({ "repo_url": "https://github.com/a/missing", "git_ref": "dev" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::ACCEPTED);
+    let v = wait_project(&env, &member, p["id"].as_str().unwrap()).await;
+    assert_eq!(v["project"]["status"], "error");
+    let err = v["project"]["error"].as_str().unwrap();
+    assert!(err.contains("無法取得儲存庫") && err.contains("repository not found"), "{err}");
+    assert!(!err.contains(&env.dir.display().to_string()), "不洩漏主機路徑");
+    assert!(v["analysis"].is_null());
+    let (st, _) = env
+        .call(
+            "PUT",
+            &format!("/api/projects/{}/analysis", p["id"].as_str().unwrap()),
+            &member,
+            Some(json!({ "public_service": "web" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+
+    let account = format!("{:#x}", acct(0xb2));
+    for i in 0..19 {
+        sqlx::query("INSERT INTO projects (id, owner, name, repo_url, status, created_at, updated_at) VALUES (?, ?, 'x', 'https://x/y', 'error', 0, 0)")
+            .bind(format!("filler-{i}"))
+            .bind(&account)
+            .execute(&env.db)
+            .await
+            .unwrap();
+    }
+    let (st, e) = env
+        .call(
+            "POST",
+            "/api/projects",
+            &member,
+            Some(json!({ "repo_url": "https://github.com/a/b" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{e}");
 }

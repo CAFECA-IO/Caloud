@@ -8,6 +8,7 @@ mod auth;
 mod domains;
 mod error;
 mod mcp;
+mod projects;
 pub mod service;
 mod tokens;
 mod users;
@@ -65,6 +66,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/apps/{id}/stop", post(apps::stop))
         .route("/api/apps/{id}/logs", get(apps::logs))
         // API 權杖與 MCP（ADR 0008）
+        // 平臺專案（docs/06 §3.7）
+        .route("/api/projects", get(projects::list).post(projects::create))
+        .route(
+            "/api/projects/{id}",
+            get(projects::get).patch(projects::update).delete(projects::remove),
+        )
+        .route("/api/projects/{id}/analysis", post(projects::reanalyze).put(projects::confirm))
         .route("/api/tokens", get(tokens::list).post(tokens::create))
         .route("/api/tokens/{id}", delete(tokens::remove))
         .route("/mcp", post(mcp::post).get(mcp::method_not_allowed).delete(mcp::method_not_allowed))

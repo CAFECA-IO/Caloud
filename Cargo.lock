@@ -723,6 +723,7 @@ dependencies = [
  "axum",
  "axum-extra",
  "bytes",
+ "caloud-analyzer",
  "caloud-auth",
  "caloud-core",
  "caloud-orchestrator",

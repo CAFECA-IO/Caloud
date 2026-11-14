@@ -47,8 +47,10 @@ const UI = (() => {
     route: { live: ["轉發中", "success"], idle: ["App 未運作", "warning"], none: ["未綁定", ""] },
     tls: { issued: ["已簽發", "success"], pending: ["申請中", "warning"], failed: ["失敗", "danger"], none: ["未啟用", ""], passthrough: ["TLS 直通", "accent"] },
     role: { super_admin: ["Super Admin", "accent"], admin: ["Admin", "accent"], member: ["Member", ""], pending: ["待核准", "warning"], disabled: ["已停用", "danger"] },
+    project: { analyzing: ["解析中", "warning", true], needs_review: ["待確認", "warning"], confirmed: ["已確認", "success"], error: ["失敗", "danger"] },
+    confidence: { high: ["高", "success"], medium: ["中", "warning"], low: ["低", "danger"] },
   };
-  /** 產生 Badge（StatusPill）HTML；kind 為 app／domain／route／tls／role */
+  /** 產生 Badge（StatusPill）HTML；kind 為 app／domain／route／tls／role／project／confidence */
   function statusPill(kind, value) {
     const [label, tone, pulse] = STATUS[kind][String(value)] || [String(value), ""];
     const cls = ["c-badge", tone && `c-badge--${tone}`, pulse && "c-badge--pulse"].filter(Boolean).join(" ");
@@ -142,6 +144,7 @@ const UI = (() => {
   // 圖示：24×24 線條圖示，stroke 跟隨文字色。新增圖示需同步更新 docs/05 §A.5
   const ICONS = {
     home: '<path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/>',
+    branch: '<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="7" r="2"/><path d="M6 7v10"/><path d="M18 9c0 4-6 4-12 8"/>',
     box: '<path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/>',
     globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/>',
     users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.5 3.4-5.5 6.5-5.5s5.7 2 6.5 5.5"/><path d="M16 4.5a3.5 3.5 0 010 7M18 14.8c1.8.7 3 2.5 3.5 5.2"/>',

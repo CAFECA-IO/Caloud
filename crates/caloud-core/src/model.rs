@@ -146,3 +146,37 @@ pub struct ApiToken {
     pub expires_at: i64,
     pub last_used_at: Option<i64>,
 }
+
+/// 平臺專案（FR-GH-04、FR-AN-10，docs/06 §3.7）
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct Project {
+    pub id: String,
+    pub owner: String,
+    pub name: String,
+    pub repo_url: String,
+    pub git_ref: Option<String>,
+    pub branch: Option<String>,
+    pub root: String,
+    /// `analyzing` | `needs_review` | `confirmed` | `error`
+    pub status: String,
+    pub error: Option<String>,
+    pub confirmed_analysis: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// 一次解析的紀錄；`result` 為 `caloud_analyzer::Analysis` JSON
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct AnalysisRow {
+    pub id: String,
+    pub project: String,
+    pub git_ref: String,
+    pub commit_sha: String,
+    pub result: String,
+    pub compose: Option<String>,
+    pub public_service: Option<String>,
+    pub acknowledged: String,
+    pub confirmed_by: Option<String>,
+    pub confirmed_at: Option<i64>,
+    pub created_at: i64,
+}
