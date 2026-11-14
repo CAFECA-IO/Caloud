@@ -189,6 +189,8 @@ Caloud 是給維運者用的工具。設計目標是**專業、清楚、好上�
 | `route` | live → 轉發中（success）· idle → App 未運作（warning）· none → 未綁定（neutral） |
 | `tls` | issued → 已簽發 · pending → 申請中 · failed → 失敗 · none → 未啟用 · passthrough → TLS 直通（accent） |
 | `role` | super_admin → Super Admin · admin → Admin（accent）· member → Member · pending → 待核准（warning）· disabled → 已停用（danger） |
+| `project` | analyzing → 解析中（warning，脈動）· needs_review → 待確認（warning）· confirmed → 已確認（success）· error → 失敗（danger） |
+| `confidence` | high → 高（success）· medium → 中（warning）· low → 低（danger） |
 
 ### 6.4 按鈕文字
 

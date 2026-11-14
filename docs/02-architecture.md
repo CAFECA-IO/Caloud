@@ -167,6 +167,8 @@ MCP 用戶端 ──POST /mcp (Bearer cld_…)──► mcp.rs ──► service
 | `blocked_hosts` | `hostname` | 封鎖的主機名稱、理由、操作者 | FR-OPS-03 |
 | `nodes` | `id`（UUID） | 名稱、擁有者（空值＝平臺節點）、偵測規格、可配置量、已配置量、狀態（active／draining／offline）、節點權杖雜湊、最後心跳 | FR-OPS-04、FR-OPS-06 |
 | `node_join_tokens` | `token_hash` | 一次性加入權杖、擁有者、到期、使用時間 | FR-OPS-04 |
+| `projects` | `id`（UUID） | 平臺專案：擁有者、名稱、儲存庫網址、ref、預設分支、根目錄、狀態（analyzing／needs_review／confirmed／error）、錯誤、已確認的解析 | FR-GH-04、FR-AN-06、FR-AN-10 |
+| `analyses` | `id`（UUID） | 專案、ref、commit、解析結果（`caloud_analyzer::Analysis` JSON）、用戶編輯的 compose、對外服務、已確認的低信心項目、確認者與時間 | FR-AN-03、FR-AN-04、FR-AN-10 |
 | `migrations`（M7） | `id`（UUID） | 專案、自訂網域、狀態（盤點／演練／凍結／已切換／已回退）、遷移權杖雜湊、快照位置、時間線 | FR-MIG-01～10 |
 | `migration_checks`（M7） | 自增 `id` | 遷移、類型（資料表／檔案／帳號／驗收清單）、對象、來源值、目標值、結果、簽核者 | FR-MIG-06、FR-MIG-07 |
 
@@ -176,6 +178,7 @@ users 1 ──< api_tokens
 users 1 ──< apps 1 ──< domains (app_id, ON DELETE SET NULL)
 users 1 ──< domains
 users 1 ──< nodes（owner，自有設備）
+users 1 ──< projects 1 ──< analyses（ON DELETE CASCADE）
 ```
 
 ### 狀態機：App.status

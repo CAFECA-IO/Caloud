@@ -246,6 +246,60 @@
 
 **DELETE /api/admin/nodes/{id}** → `204`；只有 `draining` 或 `offline` 的節點可移除，否則 `409`。移除後該節點權杖失效。
 
+### 3.7 專案（平臺）
+
+平臺專案（[ADR 0010](adr/0010-platform.md)）：以公開儲存庫網址建立，背景取得並解析（[ADR 0014](adr/0014-analyzer-crate.md)），用戶在確認頁確認後才進入驗證（M6）。member+ 可建立，擁有者或 admin+ 可管理；寫入動作皆寫稽核。
+
+| Method | Path | 權限 | 需求 |
+| --- | --- | --- | --- |
+| GET | `/api/projects` | member+ | FR-GH-04（admin+ 看全部） |
+| POST | `/api/projects` | member+ | FR-GH-04、FR-AN-06 |
+| GET | `/api/projects/{id}` | 擁有者 | FR-AN-04 |
+| PATCH | `/api/projects/{id}` | 擁有者 | FR-AN-06 |
+| DELETE | `/api/projects/{id}` | 擁有者 | FR-AN-10 |
+| POST | `/api/projects/{id}/analysis` | 擁有者 | FR-AN-10 |
+| PUT | `/api/projects/{id}/analysis` | 擁有者 | FR-AN-03、FR-AN-04 |
+
+**Project**
+
+```json
+{ "id": "uuid", "owner": "0x…", "name": "SwarmStorage", "repo_url": "https://github.com/CAFECA-IO/SwarmStorage",
+  "git_ref": null, "branch": "main", "root": "", "status": "needs_review", "error": null,
+  "confirmed_analysis": null, "created_at": 0, "updated_at": 0 }
+```
+
+- `status`：`analyzing` → `needs_review` | `error`；確認後 `confirmed`。重新解析時回到 `analyzing`，完成後若已有確認版本則回 `confirmed`，否則 `needs_review`。
+- `git_ref` 為 null 表示儲存庫的預設分支，`branch` 為解析時取得的分支名稱。
+
+**POST /api/projects** `{ "repo_url", "git_ref"?, "root"?, "name"? }` → `202 Project`（背景解析）。`repo_url` 須為 `https://` 且不含帳密；`git_ref`、`root` 規則同 §3.4 的 `git_ref`、`git_path`；`name` 省略時取儲存庫名稱（1–64 字）。超過 20 個專案回 `409`。
+
+**GET /api/projects/{id}** → `200 { "project": Project, "analysis": Analysis | null, "confirmed": Analysis | null }`，`analysis` 為最新一筆：
+
+```json
+{ "id": "uuid", "git_ref": "HEAD", "commit": "98b705d…", "created_at": 0,
+  "result": { "source": { "kind": "template", "template": "node/next" }, "root": "", "compose_dir": "",
+              "compose": "services: …", "services": [ { "name": "web", "role": "app", "port": 3000, "public": true } ],
+              "env": [ { "name": "PORT", "provider": "platform", "evidence": [] } ],
+              "findings": [ { "key": "port", "message": "…", "confidence": "high", "evidence": [ { "file": "package.json", "line": 23 } ] } ],
+              "errors": [], "needs_confirmation": false },
+  "compose": null, "public_service": null, "acknowledged": [], "confirmed_by": null, "confirmed_at": null }
+```
+
+- `result` 為 `caloud_analyzer::Analysis`；`compose` 為用戶編輯版（null 表示使用 `result.compose`）。
+
+**PATCH /api/projects/{id}** `{ "name"?, "git_ref"?, "root"? }` → `200 Project`；`git_ref` 或 `root` 改變時重新解析（`git_ref` 給空字串表示預設分支）。
+
+**DELETE /api/projects/{id}** → `204`；同時刪除解析紀錄與取得的原始碼。
+
+**POST /api/projects/{id}/analysis** → `202 Project`：以目前設定重新取得並解析；解析中回 `409`。新結果另存一筆，已確認的版本不變（FR-AN-10）。
+
+**PUT /api/projects/{id}/analysis** `{ "compose"?, "public_service", "acknowledged": [0, 3] }` → `200 Project`（`confirmed`），確認最新一筆解析：
+
+- `acknowledged`：`result.findings` 中 `confidence: "low"` 的索引必須全部列出，否則 `400` 並列出缺少的項目（FR-AN-04）。
+- `compose`：用戶編輯版，以平臺政策（[07 §3.6](07-security.md#36-平臺-app-政策)）檢查，`ports`、`env_file` 也不接受；不送時使用 `result.compose`，若為 null（解析有阻擋項）則必須送。
+- `public_service`：必須是 compose 中的服務。
+- 解析中或沒有解析結果回 `409`。
+
 ## 4. 非 API 路徑
 
 | Path | 說明 |

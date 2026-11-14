@@ -178,7 +178,7 @@
 
 | 名稱 | 用途 |
 | --- | --- |
-| `home` `box` `globe` `users` | 導覽：總覽、Apps、網域、使用者 |
+| `home` `branch` `box` `globe` `users` | 導覽：總覽、專案、Apps、網域、使用者 |
 | `plus` `upload` `play` `stop` `refresh` `trash` `link` `check` `x` `copy` `search` | 操作 |
 | `alert` `info` `shield` `inbox` `loader` | 狀態與提示 |
 | `logout` `sun` `moon` `key` | 帳戶與設定、API 權杖 |
@@ -219,6 +219,8 @@
 | `RouteTable::reload(db)` | `caloud-proxy` | 重新載入路由 | 網域或 App 狀態改變後必呼叫（FR-DOM-04） |
 | `AppInput`、`BindInput` | `caloud-api::service` | App 建立／更新、網域綁定的輸入（REST 與 MCP 共用） | 新欄位只加在這裡，兩個入口同時生效 |
 | `GitSource`、`DeploySpec` | `caloud-orchestrator::compose` | Git 來源與一次部署的設定 | 部署前先 `fetch_git` 並依政策檢查 |
+| `git::fetch_repo(git_bin, dir, url, ref)` | `caloud-orchestrator` | 淺層取得公開儲存庫並回傳 commit 與分支；套用 [07 §1](07-security.md#1-威脅模型) 的 git 安全設定與大小上限 | 取得任何儲存庫都經此（Git 來源 App、平臺專案），不另組 git 指令 |
+| `service::projects::*` | `caloud-api::service` | 平臺專案的匯入、解析、確認（FR-GH-04、FR-AN-10） | 解析在背景任務以 `spawn_blocking` 呼叫 `caloud_analyzer::analyze` |
 | `service::*` | `caloud-api::service` | App、網域、使用者的業務操作（權限、驗證、稽核） | REST handler 與 MCP 工具**只能**經由服務層操作資源，不得直接寫 SQL 或呼叫 `ComposeRunner` |
 | `tokens::authenticate(state, bearer)` | `caloud-api::tokens` | API 權杖驗證，回傳 `CurrentUser` | `/mcp` 唯一的身分來源 |
 | `ApiError`、`ApiResult<T>` | `caloud-api::error` | 錯誤型別與 HTTP 對應 | handler 一律回傳 `ApiResult`；訊息依 [04 §5.5](04-design-language.md#55-錯誤訊息) |

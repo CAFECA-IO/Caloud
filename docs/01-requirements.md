@@ -170,6 +170,7 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-AN-07 | 偵測持久化目錄（寫入工作目錄下的路徑、`*_DIR`／`*_PATH` 變數），建議具名 volume；寫入但未掛 volume 列為 Medium | P1 | M5 |
 | FR-AN-08 | 偵測系統套件與原生模組（ffmpeg、Chromium／Playwright、sharp、onnxruntime、node-gyp 編譯）：範本能加裝者自動加裝，否則列為 Medium 並建議自備 Dockerfile | P1 | M5 |
 | FR-AN-09 | 偵測建置時變數（`NEXT_PUBLIC_*`、`VITE_*` 等），標示其值是否隨環境不同（網址、origin 類） | P1 | M5 |
+| FR-AN-10 | 解析在背景執行，每次解析保存為一筆紀錄（ref、commit、結果、時間）；用戶確認的版本（含編輯過的 compose、對外服務、已確認的低信心項目）保留，不被之後的重新解析覆蓋；每位用戶最多 20 個專案 | P0 | M5 |
 
 ### 2.11 平臺：環境 ENV
 
