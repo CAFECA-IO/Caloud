@@ -41,6 +41,7 @@
 | `caloud-orchestrator` | compose 安全政策、override 產生、compose 生命週期 | serde_yaml, tokio::process |
 | `caloud-proxy` | 反向代理、路由表、ACME HTTP-01 回應、TLS（M2）、WebSocket／Upgrade 轉接、Runner 通道（`TunnelRegistry`，FR-OPS-09） | hyper 1, arc-swap, tokio-yamux, tokio-util |
 | `caloud-api` | 服務層（權限、驗證、稽核）、REST API、MCP 端點、session 與 API 權杖、Admin API、Agent WebSocket 端點、內嵌 Web UI 與 Design System 靜態檔 | axum 0.8（ws）, tokio-yamux |
+| `caloud-analyzer` | 服務自動解析：讀儲存庫產生平臺 compose 與解析報告（信心度與依據），不執行任何程式（[ADR 0014](adr/0014-analyzer-crate.md)） | toml, serde_yaml |
 | `caloud-runner` | `caloud-agent` 執行檔：規格偵測、連線控制面、心跳、通道（[ADR 0012](adr/0012-runner-crate.md)） | sysinfo, tokio-tungstenite, tokio-yamux |
 
 ### 相依規則（不可違反）
@@ -51,11 +52,13 @@ caloud ──► caloud-api ──► caloud-auth
                      ├──► caloud-proxy ─────────► caloud-core
                      └──► caloud-core
 caloud-runner（caloud-agent）──────────────► caloud-core
+caloud-analyzer ──► caloud-orchestrator ──► caloud-core
 ```
 
 - `caloud-core` 不依賴任何其他 Caloud crate，也不依賴 web 框架
 - `caloud-auth`、`caloud-orchestrator`、`caloud-proxy` 彼此不互相依賴
 - 只有 `caloud-api` 處理 HTTP 請求／權限；只有 `caloud` 組裝與啟動
+- `caloud-analyzer` 只依賴 `caloud-orchestrator`（重用平臺 compose 政策）與 `caloud-core`；由 `caloud-api` 呼叫（M5-05）
 - `caloud-runner` 只依賴 `caloud-core`；與控制面共用的協定型別（`caloud_core::agent`）與調度函式（`caloud_core::placement`）放在 core
 - 新增 crate 或改變相依方向須寫 ADR
 
@@ -245,3 +248,4 @@ Runner 的 caloud-agent ──WebSocket（主動連出）──► 控制面 /ag
 | [0011](adr/0011-runner-websocket.md) | Runner 以 WebSocket 主動連入，之後以 yamux 多工反向通道 |
 | [0012](adr/0012-runner-crate.md) | 新增 `caloud-runner` crate 與 `caloud-agent` 執行檔 |
 | [0013](adr/0013-service-migration.md) | 既有服務遷移：寫入凍結、agent 遷移模式、DNS-01 委派、hosts 預覽驗收 |
+| [0014](adr/0014-analyzer-crate.md) | 新增 `caloud-analyzer` crate；範本以 `dockerfile_inline` 帶入；附加服務 compose 與範本合併 |

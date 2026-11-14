@@ -161,7 +161,7 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 
 | 編號 | 需求 | 優先 | 里程碑 |
 | --- | --- | --- | --- |
-| FR-AN-01 | 依序以 `.caloud/compose.yml`、compose 檔、Dockerfile、語言標記檔（package.json、Cargo.toml、go.mod、pyproject.toml）、靜態網站解析服務、port、依賴的資料庫與環境變數 | P0 | M5 |
+| FR-AN-01 | 依序以 `.caloud/compose.yml`、compose 檔、Dockerfile、語言標記檔（package.json、Cargo.toml、go.mod、pyproject.toml）、靜態網站解析服務、port、依賴的資料庫與環境變數；compose 只含附加服務（沒有任何 `build`）而根目錄有語言標記檔時，以範本產生 App 服務並與 compose 合併（[ADR 0014](adr/0014-analyzer-crate.md)） | P0 | M5 |
 | FR-AN-02 | 產生專屬 compose，並通過 [07 §3](07-security.md#3-compose-政策) 的 compose 政策；主機 ports 移除改由平臺路由 | P0 | M5 |
 | FR-AN-03 | 用戶可編輯產生結果，或在儲存庫放 `.caloud/compose.yml` 覆寫 | P0 | M5 |
 | FR-AN-04 | 每個判斷標示信心度（高、中、低）與依據的檔案及行號；低信心項目在第一次驗證前需用戶確認 | P1 | M5 |
