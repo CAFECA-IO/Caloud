@@ -5,6 +5,8 @@ mod agent;
 mod apps;
 mod assets;
 mod auth;
+pub mod certs;
+mod cloudflare;
 mod domains;
 mod error;
 mod mcp;
@@ -38,6 +40,10 @@ pub struct AppState {
     pub agents: AgentHub,
     /// Runner 通道（docs/06 §6.1）；與 Edge 共用同一個
     pub tunnels: caloud_proxy::TunnelRegistry,
+    /// Edge 憑證（ADR 0016）；與 `:443` 共用同一個
+    pub certs: caloud_proxy::CertStore,
+    /// 祕密加密主金鑰（FR-OPS-14）；未設定時拒絕設定祕密
+    pub master_key: Option<Arc<caloud_core::secret::MasterKey>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -91,6 +97,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/nodes/{id}/activate", post(admin::activate_node))
         .route("/api/admin/environments", get(admin::list_envs).post(admin::create_env))
         .route("/api/admin/environments/{subdomain}", delete(admin::delete_env))
+        .route("/api/admin/certificates", get(admin::list_certs))
         // Runner agent（ADR 0011）
         .route(caloud_core::agent::CONNECT_PATH, get(agent::connect))
         .route(caloud_core::tunnel::TUNNEL_PATH, get(agent::tunnel))

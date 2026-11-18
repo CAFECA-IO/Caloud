@@ -86,6 +86,7 @@ const PAGES = [
   { id: "apps", label: "Apps", icon: "box", render: renderApps },
   { id: "domains", label: "網域", icon: "globe", render: renderDomains },
   { id: "users", label: "使用者", icon: "users", render: renderUsers, admin: true },
+  { id: "tls", label: "HTTPS 憑證", icon: "shield", render: renderTls, admin: true },
   { id: "tokens", label: "API 權杖", icon: "key", render: renderTokens },
 ];
 function renderShell() {
@@ -702,6 +703,64 @@ document.addEventListener("change", async (e) => {
   catch (err) { toast(err.message, "danger"); }
   renderUsers();
 });
+
+// ─────────────── HTTPS 憑證 FR-OPS-03、FR-OPS-10、FR-DOM-05（ADR 0016） ───────────────
+const PURPOSE_LABEL = { production: "Production", staging: "Staging", verify: "驗證", system: "系統" };
+async function renderTls() {
+  $("#page").innerHTML = pageHeader("HTTPS 憑證", "網域池設定 Cloudflare 權杖後，Caloud 以 DNS-01 申請 wildcard 憑證；已驗證並綁定 App 的網域以 HTTP-01 申請。到期前 30 天自動續簽。",
+    `<button class="c-btn c-btn--primary" id="new-pool">${icon("plus")}<span>新增網域池</span></button>`) +
+    `<section class="c-card"><div class="c-card__header"><h2 class="c-card__title">網域池</h2></div><div class="c-card__body c-card__body--flush"><div class="c-table-wrap"><table class="c-table">
+      <thead><tr><th>根網域</th><th>用途</th><th>Cloudflare 權杖</th><th><span class="u-sr-only">操作</span></th></tr></thead><tbody id="pools">${skeletonRows(4)}</tbody></table></div></div></section>
+    <section class="c-card"><div class="c-card__header"><h2 class="c-card__title">憑證</h2></div><div class="c-card__body c-card__body--flush"><div class="c-table-wrap"><table class="c-table">
+      <thead><tr><th>名稱</th><th>方式</th><th>狀態</th><th>到期</th></tr></thead><tbody id="certs">${skeletonRows(4)}</tbody></table></div></div></section>
+    <p class="c-msg c-msg--danger" id="tls-msg" role="alert"></p>`;
+  $("#new-pool").addEventListener("click", () => openPool(null));
+  let pools, certs;
+  try { [pools, certs] = await Promise.all([api("/api/admin/domain-pools"), api("/api/admin/certificates")]); showMsg($("#tls-msg"), null); }
+  catch (err) { return showMsg($("#tls-msg"), err); }
+  state.pools = pools;
+  $("#pools").innerHTML = pools.map((p) => `<tr data-root="${esc(p.root)}">
+      <td><div class="c-table__primary u-mono">${esc(p.root)}</div><div class="c-table__secondary">${p.cloudflare_zone ? `zone ${esc(p.cloudflare_zone)}` : "未設定 Cloudflare zone"}</div></td>
+      <td class="u-small">${p.purposes.map((x) => esc(PURPOSE_LABEL[x] || x)).join("、")}</td>
+      <td class="u-small">${p.cloudflare_token_hint ? `<span class="u-mono">${esc(p.cloudflare_token_hint)}</span>` : '<span class="u-muted">未設定</span>'}</td>
+      <td><div class="c-table__actions"><button class="c-btn c-btn--sm" data-edit-pool>${icon("key")}<span>設定</span></button></div></td></tr>`).join("")
+    || `<tr><td colspan="4">${empty({ iconName: "globe", title: "還沒有網域池", body: "新增根網域（例如 caloud.tw）並設定 Cloudflare 權杖，即可為環境網址自動申請 HTTPS 憑證。" })}</td></tr>`;
+  $("#certs").innerHTML = certs.map((c) => `<tr>
+      <td><div class="c-table__primary u-mono">${esc(c.name)}</div><div class="c-table__secondary u-mono">${c.names.map(esc).join(", ")}</div>${c.error ? `<p class="c-msg c-msg--danger">${esc(c.error)}</p>` : ""}</td>
+      <td class="u-small">${c.kind === "dns01" ? "DNS-01（Cloudflare）" : "HTTP-01"}${c.staging ? ' <span class="c-badge c-badge--warning">staging</span>' : ""}</td>
+      <td>${statusPill("tls", c.status)}${c.next_attempt ? `<div class="c-table__secondary">下次重試 ${relTime(c.next_attempt)}</div>` : ""}</td>
+      <td class="u-small u-nowrap">${c.not_after ? relTime(c.not_after) : "—"}</td></tr>`).join("")
+    || `<tr><td colspan="4">${empty({ iconName: "shield", title: "還沒有憑證", body: "設定網域池權杖，或驗證並綁定網域後，憑證會在數分鐘內出現在這裡。" })}</td></tr>`;
+}
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("#pools [data-edit-pool]"); if (!btn) return;
+  openPool(state.pools.find((p) => p.root === btn.closest("tr").dataset.root));
+});
+function openPool(p) {
+  const dr = drawer({ title: p ? `網域池 ${p.root}` : "新增網域池", subtitle: "權杖只會加密保存，之後只顯示末 4 碼。", onClose: () => currentPage() === "tls" && renderTls() });
+  const purposes = p ? p.purposes : ["production", "staging", "verify"];
+  dr.body.innerHTML = `
+    ${p ? "" : `<label class="c-field"><span class="c-field__label">根網域</span><input class="c-input u-mono" id="pl-root" placeholder="caloud.tw" autocomplete="off" spellcheck="false"></label>`}
+    <div class="c-field"><span class="c-field__label">用途</span>${Object.keys(PURPOSE_LABEL).map((k) => `<label class="c-check"><input type="checkbox" data-purpose="${k}" ${purposes.includes(k) ? "checked" : ""}><span>${PURPOSE_LABEL[k]}</span></label>`).join("")}</div>
+    <label class="c-field"><span class="c-field__label">Cloudflare zone</span><input class="c-input u-mono" id="pl-zone" value="${esc(p?.cloudflare_zone || "")}" placeholder="caloud.tw" autocomplete="off" spellcheck="false"></label>
+    <label class="c-field"><span class="c-field__label">Cloudflare API 權杖${p?.cloudflare_token_hint ? `（目前 ${esc(p.cloudflare_token_hint)}）` : ""}</span><input class="c-input u-mono" type="password" id="pl-token" autocomplete="off" spellcheck="false" placeholder="${p?.cloudflare_token_hint ? "留空表示不變" : "選填"}"><span class="c-field__hint">需要該 zone 的「DNS 編輯」權限。儲存前 Caloud 會先向 Cloudflare 驗證。</span></label>
+    ${p?.cloudflare_token_hint ? `<label class="c-check"><input type="checkbox" id="pl-clear"><span>清除權杖（停止申請 wildcard 憑證）</span></label>` : ""}
+    <span class="c-field__error" id="pl-err" role="alert"></span>`;
+  dr.footer.classList.remove("u-hidden");
+  dr.footer.innerHTML = `<button class="c-btn" data-close>取消</button><button class="c-btn c-btn--primary" id="pl-submit">${icon("check")}<span>儲存</span></button>`;
+  $("#pl-submit", dr.el).addEventListener("click", async (e) => {
+    showMsg($("#pl-err", dr.el), null);
+    const body = { purposes: $$("[data-purpose]", dr.el).filter((c) => c.checked).map((c) => c.dataset.purpose), cloudflare_zone: $("#pl-zone", dr.el).value.trim() || null };
+    const token = $("#pl-token", dr.el).value.trim();
+    if ($("#pl-clear", dr.el)?.checked) body.cloudflare_token = "";
+    else if (token) body.cloudflare_token = token;
+    try {
+      if (p) await busy(e.currentTarget, api(`/api/admin/domain-pools/${encodeURIComponent(p.root)}`, { method: "PUT", body }));
+      else await busy(e.currentTarget, api("/api/admin/domain-pools", { method: "POST", body: { root: $("#pl-root", dr.el).value.trim(), ...body } }));
+      toast("已儲存網域池"); dr.close();
+    } catch (err) { showMsg($("#pl-err", dr.el), err); }
+  });
+}
 
 // ─────────────── API 權杖與 MCP FR-MCP-02／08 ───────────────
 const mcpUrl = () => `${location.origin}/mcp`;

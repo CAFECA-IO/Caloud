@@ -119,6 +119,11 @@ pub async fn delete_node(State(s): State<AppState>, me: CurrentUser, Path(id): P
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// FR-OPS-10、FR-DOM-05
+pub async fn list_certs(State(s): State<AppState>, me: CurrentUser) -> ApiResult<Json<Vec<crate::certs::Certificate>>> {
+    Ok(Json(svc::list_certs(&s, &me).await?))
+}
+
 // ───────────────────────── 平臺環境（FR-OPS-13） ─────────────────────────
 
 pub async fn list_envs(State(s): State<AppState>, me: CurrentUser) -> ApiResult<Json<Vec<envs::Environment>>> {

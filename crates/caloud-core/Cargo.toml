@@ -16,3 +16,5 @@ time.workspace = true
 tokio-util.workspace = true
 futures-util.workspace = true
 bytes.workspace = true
+ring.workspace = true
+base64.workspace = true

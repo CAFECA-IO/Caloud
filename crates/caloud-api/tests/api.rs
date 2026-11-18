@@ -75,6 +75,50 @@ async fn spawn_mock() -> (String, MockState) {
                 Json(json!({ "handle": format!("user_{}", &a[a.len() - 4..]) }))
             }),
         )
+        // 替身 Cloudflare API（ADR 0016）：權杖 cf-good 看得到 caloud.tw
+        .route(
+            "/cf/zones",
+            get(|h: axum::http::HeaderMap, Query(q): Query<HashMap<String, String>>| async move {
+                let auth = h.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or_default();
+                if auth != "Bearer cf-good" {
+                    return Json(json!({ "success": false, "errors": [{ "code": 1000, "message": "Invalid API Token" }] }));
+                }
+                let result = if q.get("name").map(String::as_str) == Some("caloud.tw") {
+                    json!([{ "id": "zone-caloud", "name": "caloud.tw" }])
+                } else {
+                    json!([])
+                };
+                Json(json!({ "success": true, "errors": [], "result": result }))
+            }),
+        )
+        // TXT 寫入替身 DoH（同名多筆以換行分隔）
+        .route(
+            "/cf/zones/{zone}/dns_records",
+            post(|State(s): State<MockState>, Json(b): Json<Value>| async move {
+                let name = b["name"].as_str().unwrap_or_default().to_string();
+                let value = b["content"].as_str().unwrap_or_default().to_string();
+                let mut txt = s.txt.lock().unwrap();
+                let e = txt.entry(name.clone()).or_default();
+                if !e.is_empty() {
+                    e.push('\n');
+                }
+                e.push_str(&value);
+                Json(json!({ "success": true, "result": { "id": format!("{name}|{value}") } }))
+            }),
+        )
+        .route(
+            "/cf/zones/{zone}/dns_records/{id}",
+            axum::routing::delete(
+                |State(s): State<MockState>, axum::extract::Path((_, id)): axum::extract::Path<(String, String)>| async move {
+                    let (name, value) = id.split_once('|').unwrap_or_default();
+                    let mut txt = s.txt.lock().unwrap();
+                    if let Some(e) = txt.get_mut(name) {
+                        *e = e.lines().filter(|l| *l != value).collect::<Vec<_>>().join("\n");
+                    }
+                    Json(json!({ "success": true, "result": { "id": id } }))
+                },
+            ),
+        )
         .route(
             "/dns-query",
             get(|State(s): State<MockState>, Query(q): Query<HashMap<String, String>>| async move {
@@ -84,7 +128,11 @@ async fn spawn_mock() -> (String, MockState) {
                     .lock()
                     .unwrap()
                     .get(&name)
-                    .map(|v| vec![json!({ "name": name, "type": 16, "data": format!("\"{v}\"") })])
+                    .map(|v| {
+                        v.lines()
+                            .map(|v| json!({ "name": name, "type": 16, "data": format!("\"{v}\"") }))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 Json(json!({ "Status": 0, "Answer": answer }))
             }),
@@ -108,10 +156,15 @@ struct Env {
     dir: PathBuf,
     http: reqwest::Client,
     tunnels: caloud_proxy::TunnelRegistry,
+    state: AppState,
 }
 
 impl Env {
     async fn new() -> Self {
+        Self::with_master_key(true).await
+    }
+
+    async fn with_master_key(master_key: bool) -> Self {
         let (mock_base, mock) = spawn_mock().await;
         let dir = std::env::temp_dir().join(format!("caloud-it-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -166,13 +219,17 @@ impl Env {
             cafeca_wallet: mock_base.clone(),
             cafeca_rpc: None,
             data_dir: dir.join("data"),
-            acme_email: None,
+            // Pebble 測試（acme_issues_certificates_with_pebble）時才設定
+            acme_email: std::env::var("PEBBLE_DIRECTORY").ok().map(|_| "ops@caloud.test".into()),
             acme_staging: true,
+            acme_directory: std::env::var("PEBBLE_DIRECTORY").ok(),
+            acme_ca_file: std::env::var("PEBBLE_CA").ok().map(PathBuf::from),
             edge_network: "caloud-edge-test".into(),
             default_role: "pending".into(),
             docker_bin: docker.display().to_string(),
             doh_url: format!("{mock_base}/dns-query"),
             git_bin: git.display().to_string(),
+            cloudflare_api: format!("{mock_base}/cf"),
         };
         let db = caloud_core::db::connect(&cfg.data_dir).await.unwrap();
         let routes = RouteTable::default();
@@ -191,8 +248,11 @@ impl Env {
             cfg: Arc::new(cfg),
             agents: Default::default(),
             tunnels: tunnels.clone(),
+            certs: Default::default(),
+            master_key: master_key.then(|| Arc::new(caloud_core::secret::MasterKey::from_bytes(&[9u8; 32]).unwrap())),
         };
-        tokio::spawn(async move { axum::serve(listener, caloud_api::router(state)).await.unwrap() });
+        let app = caloud_api::router(state.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         Env {
             base: origin.clone(),
             origin,
@@ -202,6 +262,7 @@ impl Env {
             dir,
             http: reqwest::Client::new(),
             tunnels,
+            state,
         }
     }
 
@@ -1710,7 +1771,7 @@ async fn edge_forwards_through_runner_tunnel_and_upgrades() {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let edge = l.local_addr().unwrap();
     let tunnels = env.tunnels.clone();
-    tokio::spawn(async move { caloud_proxy::serve_listener(l, routes, tunnels).await });
+    tokio::spawn(async move { caloud_proxy::serve_listener(l, routes, tunnels, Default::default()).await });
     let get = |host: &'static str, path: &'static str| env.http.get(format!("http://{edge}{path}")).header("host", host).send();
 
     // HTTP 經通道：Host 與 X-Forwarded-Host 保留
@@ -2188,4 +2249,252 @@ async fn admin_opens_environment_on_isolated_runner() {
     assert_eq!(actions, ["env_create", "env_create", "env_delete"]);
     agent.abort();
     plain.abort();
+}
+
+// ───────────────────────── Edge TLS 與憑證（ADR 0016） ─────────────────────────
+
+// FR-OPS-03、FR-OPS-14：Cloudflare 權杖經驗證後加密保存，只回傳提示；FR-OPS-10、FR-DOM-05、FR-DOM-08：需要的憑證
+#[tokio::test]
+async fn admin_sets_cloudflare_token_and_certificates_follow_domains() {
+    use caloud_api::certs::{wanted, Kind};
+    let env = Env::new().await;
+    let (admin, member) = admin_and_member(&env).await;
+    let pool =
+        |token: &str| json!({ "root": "caloud.tw", "purposes": ["verify"], "cloudflare_zone": "caloud.tw", "cloudflare_token": token });
+
+    // 權杖無效、沒有 zone → 400；member → 403
+    let (st, v) = env.call("POST", "/api/admin/domain-pools", &admin, Some(pool("cf-bad"))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert!(v["error"].as_str().unwrap_or_default().contains("Invalid API Token"), "{v}");
+    let (st, _) = env
+        .call(
+            "POST",
+            "/api/admin/domain-pools",
+            &admin,
+            Some(json!({ "root": "caloud.tw", "purposes": ["verify"], "cloudflare_token": "cf-good" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, _) = env.call("POST", "/api/admin/domain-pools", &member, Some(pool("cf-good"))).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert!(env
+        .call("GET", "/api/admin/domain-pools", &admin, None)
+        .await
+        .1
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // 設定成功：回應只有提示；資料庫存密文
+    let (st, p) = env.call("POST", "/api/admin/domain-pools", &admin, Some(pool("cf-good"))).await;
+    assert_eq!(st, StatusCode::CREATED, "{p}");
+    assert_eq!(p["cloudflare_token_hint"], "…good");
+    assert!(!p.to_string().contains("cf-good"));
+    let (enc, zone_id): (String, String) =
+        sqlx::query_as("SELECT cloudflare_token_enc, cloudflare_zone_id FROM domain_pools WHERE root = 'caloud.tw'")
+            .fetch_one(&env.db)
+            .await
+            .unwrap();
+    assert!(enc.starts_with("v1:") && !enc.contains("cf-good"));
+    assert_eq!(zone_id, "zone-caloud");
+    let key = env.state.master_key.as_ref().unwrap();
+    assert_eq!(key.open("cloudflare_token", "caloud.tw", &enc).unwrap(), b"cf-good");
+
+    // 網域池 wildcard（DNS-01）
+    let w = wanted(&env.state).await.unwrap();
+    assert_eq!(w.len(), 1);
+    assert_eq!((w[0].name.as_str(), w[0].kind), ("caloud.tw", Kind::Dns01));
+    assert_eq!(w[0].names, vec!["caloud.tw", "*.caloud.tw"]);
+
+    // 憑證列表：admin 可看、member 不行
+    let (st, certs) = env.call("GET", "/api/admin/certificates", &admin, None).await;
+    assert_eq!((st, certs), (StatusCode::OK, json!([])));
+    assert_eq!(
+        env.call("GET", "/api/admin/certificates", &member, None).await.0,
+        StatusCode::FORBIDDEN
+    );
+
+    // 同一 App 綁多個網域（FR-DOM-08）：已驗證、綁定運作中 App 的網域需要 HTTP-01 憑證；wildcard 涵蓋的不另外申請
+    let (_, app) = env
+        .call(
+            "POST",
+            "/api/apps",
+            &admin,
+            Some(json!({ "compose_yaml": "services: {web: {image: nginx}}" })),
+        )
+        .await;
+    let id = app["id"].as_str().unwrap().to_string();
+    env.wait_app_status(&admin, &id, "running").await;
+    for host in ["shop.example.com", "www.example.com", "docs.caloud.tw"] {
+        let (_, d) = env.call("POST", "/api/domains", &admin, Some(json!({ "hostname": host }))).await;
+        env.mock
+            .txt
+            .lock()
+            .unwrap()
+            .insert(format!("_caloud-challenge.{host}"), d["verify_token"].as_str().unwrap().to_string());
+        assert_eq!(
+            env.call("POST", &format!("/api/domains/{host}/verify"), &admin, None).await.0,
+            StatusCode::OK
+        );
+        let (st, _) = env
+            .call(
+                "PUT",
+                &format!("/api/domains/{host}/bind"),
+                &admin,
+                Some(json!({ "app_id": id, "service": "web", "port": 80 })),
+            )
+            .await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(env.routes.lookup(host).is_some(), "{host}");
+    }
+    let names: Vec<(String, Kind)> = wanted(&env.state).await.unwrap().into_iter().map(|w| (w.name, w.kind)).collect();
+    assert_eq!(
+        names,
+        vec![
+            ("caloud.tw".into(), Kind::Dns01),
+            ("shop.example.com".into(), Kind::Http01),
+            ("www.example.com".into(), Kind::Http01),
+        ]
+    );
+
+    // App 停止 → 不再需要 HTTP-01 憑證
+    env.call("POST", &format!("/api/apps/{id}/stop"), &admin, None).await;
+    assert_eq!(wanted(&env.state).await.unwrap().len(), 1);
+
+    // 換 zone 必須重新輸入權杖；清除權杖後不再申請 wildcard
+    let (st, _) = env
+        .call(
+            "PUT",
+            "/api/admin/domain-pools/caloud.tw",
+            &admin,
+            Some(json!({ "purposes": ["verify"], "cloudflare_zone": "other.tw" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, p) = env
+        .call(
+            "PUT",
+            "/api/admin/domain-pools/caloud.tw",
+            &admin,
+            Some(json!({ "purposes": ["verify"], "cloudflare_zone": "caloud.tw" })),
+        )
+        .await;
+    assert_eq!((st, &p["cloudflare_token_hint"]), (StatusCode::OK, &json!("…good")));
+    let (st, p) = env
+        .call(
+            "PUT",
+            "/api/admin/domain-pools/caloud.tw",
+            &admin,
+            Some(json!({ "purposes": ["verify"], "cloudflare_zone": "caloud.tw", "cloudflare_token": "" })),
+        )
+        .await;
+    assert_eq!((st, &p["cloudflare_token_hint"]), (StatusCode::OK, &Value::Null));
+    assert!(wanted(&env.state).await.unwrap().is_empty());
+}
+
+// FR-OPS-14：沒有主金鑰時拒絕保存權杖
+#[tokio::test]
+async fn cloudflare_token_requires_master_key() {
+    let env = Env::with_master_key(false).await;
+    let (admin, _) = env.login(acct(0xa1)).await;
+    let (st, v) = env
+        .call(
+            "POST",
+            "/api/admin/domain-pools",
+            &admin,
+            Some(json!({ "root": "caloud.tw", "purposes": ["verify"], "cloudflare_zone": "caloud.tw", "cloudflare_token": "cf-good" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert!(v["error"].as_str().unwrap_or_default().contains("CALOUD_MASTER_KEY"), "{v}");
+    // 不帶權杖仍可建立
+    let (st, p) = env
+        .call(
+            "POST",
+            "/api/admin/domain-pools",
+            &admin,
+            Some(json!({ "root": "caloud.tw", "purposes": ["verify"], "cloudflare_zone": "caloud.tw" })),
+        )
+        .await;
+    assert_eq!((st, &p["cloudflare_token_hint"]), (StatusCode::CREATED, &Value::Null));
+}
+
+// FR-OPS-10、FR-DOM-05：以 Pebble 實際走一次 ACME（DNS-01 經 Cloudflare 替身、HTTP-01）。
+// 需先啟動 Pebble（PEBBLE_VA_ALWAYS_VALID=1），並設定 PEBBLE_DIRECTORY、PEBBLE_CA：
+//   PEBBLE_VA_ALWAYS_VALID=1 pebble -config pebble-config.json &
+//   PEBBLE_DIRECTORY=https://localhost:14000/dir PEBBLE_CA=<pebble.minica.pem> cargo test -p caloud-api -- --ignored pebble
+#[tokio::test]
+#[ignore]
+async fn acme_issues_certificates_with_pebble() {
+    let env = Env::new().await;
+    let (admin, _) = env.login(acct(0xa1)).await;
+    let (st, _) = env
+        .call(
+            "POST",
+            "/api/admin/domain-pools",
+            &admin,
+            Some(json!({ "root": "caloud.test", "purposes": ["verify"], "cloudflare_zone": "caloud.tw", "cloudflare_token": "cf-good" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let (_, app) = env
+        .call(
+            "POST",
+            "/api/apps",
+            &admin,
+            Some(json!({ "compose_yaml": "services: {web: {image: nginx}}" })),
+        )
+        .await;
+    let id = app["id"].as_str().unwrap().to_string();
+    env.wait_app_status(&admin, &id, "running").await;
+    let (_, d) = env
+        .call("POST", "/api/domains", &admin, Some(json!({ "hostname": "shop.example.test" })))
+        .await;
+    env.mock.txt.lock().unwrap().insert(
+        "_caloud-challenge.shop.example.test".into(),
+        d["verify_token"].as_str().unwrap().into(),
+    );
+    env.call("POST", "/api/domains/shop.example.test/verify", &admin, None).await;
+    env.call(
+        "PUT",
+        "/api/domains/shop.example.test/bind",
+        &admin,
+        Some(json!({ "app_id": id, "service": "web", "port": 80 })),
+    )
+    .await;
+
+    caloud_api::certs::scan(&env.state).await.unwrap();
+    let (_, certs) = env.call("GET", "/api/admin/certificates", &admin, None).await;
+    let certs = certs.as_array().unwrap();
+    assert_eq!(certs.len(), 2, "{certs:?}");
+    for c in certs {
+        assert_eq!(c["status"], "issued", "{c}");
+        assert!(c["not_after"].as_i64().unwrap() > caloud_core::now());
+    }
+    assert!(env.state.certs.resolve("abc.caloud.test").is_some());
+    assert!(env.state.certs.resolve("caloud.test").is_some());
+    assert!(env.state.certs.resolve("shop.example.test").is_some());
+    let (_, doms) = env.call("GET", "/api/domains", &admin, None).await;
+    assert_eq!(doms[0]["tls_status"], "issued");
+    // ACME TXT 用完即刪；帳號金鑰與私鑰權限 0600
+    assert!(env
+        .mock
+        .txt
+        .lock()
+        .unwrap()
+        .get("_acme-challenge.caloud.test")
+        .is_none_or(|v| v.is_empty()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let key = env.dir.join("data/certs/staging/caloud.test/key.pem");
+        assert_eq!(std::fs::metadata(key).unwrap().permissions().mode() & 0o777, 0o600);
+        let acct = env.dir.join("data/acme/staging/account.json");
+        assert_eq!(std::fs::metadata(acct).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    // 已簽發且未近到期 → 不重簽
+    let before = env.state.certs.resolve("abc.caloud.test").unwrap().not_after;
+    caloud_api::certs::scan(&env.state).await.unwrap();
+    assert_eq!(env.state.certs.resolve("abc.caloud.test").unwrap().not_after, before);
 }

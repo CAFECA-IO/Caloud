@@ -5,6 +5,7 @@ pub mod config;
 pub mod db;
 pub mod model;
 pub mod placement;
+pub mod secret;
 pub mod subdomain;
 pub mod tunnel;
 

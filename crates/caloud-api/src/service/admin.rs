@@ -28,6 +28,8 @@ pub struct DomainPool {
     pub root: String,
     pub purposes: Vec<String>,
     pub cloudflare_zone: Option<String>,
+    /// 權杖末 4 碼；權杖本身只寫不讀（FR-OPS-03、FR-OPS-14）
+    pub cloudflare_token_hint: Option<String>,
     pub id_lengths: IdLengths,
     pub created_at: i64,
     pub updated_at: i64,
@@ -38,6 +40,7 @@ struct PoolRow {
     root: String,
     purposes: String,
     cloudflare_zone: Option<String>,
+    cloudflare_token_hint: Option<String>,
     id_lengths: String,
     created_at: i64,
     updated_at: i64,
@@ -49,6 +52,7 @@ impl From<PoolRow> for DomainPool {
             root: r.root,
             purposes: serde_json::from_str(&r.purposes).unwrap_or_default(),
             cloudflare_zone: r.cloudflare_zone,
+            cloudflare_token_hint: r.cloudflare_token_hint,
             id_lengths: serde_json::from_str(&r.id_lengths).unwrap_or_default(),
             created_at: r.created_at,
             updated_at: r.updated_at,
@@ -63,7 +67,59 @@ pub struct PoolInput {
     pub root: Option<String>,
     pub purposes: Vec<String>,
     pub cloudflare_zone: Option<String>,
+    /// 只寫：省略不變、空字串清除（FR-OPS-03）
+    pub cloudflare_token: Option<String>,
     pub id_lengths: Option<IdLengths>,
+}
+
+/// 網域池權杖的變更
+enum TokenChange {
+    Keep,
+    Clear,
+    /// （密文, 提示, zone id）
+    Set(String, String, String),
+}
+
+/// FR-OPS-03、FR-OPS-14：先經 Cloudflare 驗證權杖並取得 zone id，再以主金鑰加密
+async fn token_change(s: &AppState, root: &str, zone: Option<&str>, input: &PoolInput) -> ApiResult<TokenChange> {
+    let Some(token) = input.cloudflare_token.as_deref().map(str::trim) else {
+        return Ok(TokenChange::Keep);
+    };
+    if token.is_empty() {
+        return Ok(TokenChange::Clear);
+    }
+    let zone = zone.ok_or_else(|| bad("設定 Cloudflare 權杖前請先填寫 Cloudflare zone。"))?;
+    let key = s
+        .master_key
+        .as_ref()
+        .ok_or_else(|| bad("伺服器未設定主金鑰 CALOUD_MASTER_KEY，無法保存權杖。"))?;
+    let cf = crate::cloudflare::Cloudflare {
+        http: &s.http,
+        base: &s.cfg.cloudflare_api,
+        token,
+    };
+    let zone_id = cf.zone_id(zone).await.map_err(|e| bad(format!("{e}")))?;
+    let enc = key
+        .seal(crate::certs::TOKEN_PURPOSE, root, token.as_bytes())
+        .map_err(ApiError::Internal)?;
+    Ok(TokenChange::Set(enc, caloud_core::secret::hint(token), zone_id))
+}
+
+async fn apply_token(s: &AppState, root: &str, change: TokenChange) -> ApiResult<Option<&'static str>> {
+    let (enc, hint, zone_id, detail) = match change {
+        TokenChange::Keep => return Ok(None),
+        TokenChange::Clear => (None, None, None, "cloudflare_token cleared"),
+        TokenChange::Set(e, h, z) => (Some(e), Some(h), Some(z), "cloudflare_token set"),
+    };
+    sqlx::query("UPDATE domain_pools SET cloudflare_token_enc = ?, cloudflare_token_hint = ?, cloudflare_zone_id = ? WHERE root = ?")
+        .bind(enc)
+        .bind(hint)
+        .bind(zone_id)
+        .bind(root)
+        .execute(&s.db)
+        .await?;
+    crate::certs::kick(s);
+    Ok(Some(detail))
 }
 
 async fn pools(s: &AppState) -> ApiResult<Vec<DomainPool>> {
@@ -121,6 +177,10 @@ pub async fn create_pool(s: &AppState, me: &CurrentUser, input: PoolInput) -> Ap
     me.require_admin()?;
     let root = normalize_hostname(input.root.as_deref().unwrap_or_default())?;
     let (purposes, lengths, zone) = check_pool(s, &root, &input).await?;
+    if pools(s).await?.iter().any(|p| p.root == root) {
+        return Err(ApiError::Conflict(format!("網域池 {root} 已存在。")));
+    }
+    let change = token_change(s, &root, zone.as_deref(), &input).await?;
     let t = now();
     let r = sqlx::query(
         "INSERT INTO domain_pools (root, purposes, cloudflare_zone, id_lengths, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(root) DO NOTHING",
@@ -136,12 +196,13 @@ pub async fn create_pool(s: &AppState, me: &CurrentUser, input: PoolInput) -> Ap
     if r.rows_affected() == 0 {
         return Err(ApiError::Conflict(format!("網域池 {root} 已存在。")));
     }
+    let detail = apply_token(s, &root, change).await?;
     audit(
         &s.db,
         Some(&me.0.account),
         "domain_pool_create",
         Some(&root),
-        me.audit_detail(None).as_deref(),
+        me.audit_detail(detail).as_deref(),
     )
     .await;
     get_pool(s, &root).await
@@ -153,8 +214,17 @@ pub async fn update_pool(s: &AppState, me: &CurrentUser, root: &str, input: Pool
     if input.root.is_some() {
         return Err(bad("根網域不可修改，請新增另一個網域池。"));
     }
-    let root = get_pool(s, &root.to_ascii_lowercase()).await?.root;
+    let old = get_pool(s, &root.to_ascii_lowercase()).await?;
+    let root = old.root.clone();
     let (purposes, lengths, zone) = check_pool(s, &root, &input).await?;
+    let mut change = token_change(s, &root, zone.as_deref(), &input).await?;
+    if matches!(change, TokenChange::Keep) && old.cloudflare_token_hint.is_some() && zone != old.cloudflare_zone {
+        if zone.is_none() {
+            change = TokenChange::Clear;
+        } else {
+            return Err(bad("變更 Cloudflare zone 時請重新輸入權杖。"));
+        }
+    }
     sqlx::query("UPDATE domain_pools SET purposes = ?, cloudflare_zone = ?, id_lengths = ?, updated_at = ? WHERE root = ?")
         .bind(serde_json::to_string(&purposes).unwrap_or_default())
         .bind(&zone)
@@ -163,12 +233,13 @@ pub async fn update_pool(s: &AppState, me: &CurrentUser, root: &str, input: Pool
         .bind(&root)
         .execute(&s.db)
         .await?;
+    let detail = apply_token(s, &root, change).await?;
     audit(
         &s.db,
         Some(&me.0.account),
         "domain_pool_update",
         Some(&root),
-        me.audit_detail(None).as_deref(),
+        me.audit_detail(detail).as_deref(),
     )
     .await;
     get_pool(s, &root).await
@@ -193,7 +264,14 @@ pub async fn delete_pool(s: &AppState, me: &CurrentUser, root: &str) -> ApiResul
         me.audit_detail(None).as_deref(),
     )
     .await;
+    crate::certs::kick(s);
     Ok(())
+}
+
+/// FR-OPS-10、FR-DOM-05（ADR 0016）
+pub async fn list_certs(s: &AppState, me: &CurrentUser) -> ApiResult<Vec<crate::certs::Certificate>> {
+    me.require_admin()?;
+    Ok(crate::certs::list(s).await?)
 }
 
 // ───────────────────────── 保留字 ─────────────────────────

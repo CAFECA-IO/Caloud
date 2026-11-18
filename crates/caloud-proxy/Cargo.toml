@@ -16,3 +16,10 @@ tokio-yamux.workspace = true
 tokio-util.workspace = true
 futures-util.workspace = true
 bytes.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pki-types.workspace = true
+x509-parser.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true

@@ -6,7 +6,7 @@ services:
     restart: unless-stopped
     ports:
       - "80:80"
-      - "443:443"                # TLS 直通（ADR 0009）；Caloud 自己的 HTTPS 為 M2
+      - "443:443"                # SNI 直通（ADR 0009）或 Caloud 終結 TLS（ADR 0016）
       - "127.0.0.1:8080:8080"   # 管理介面；M2 之後改由 :443 以 CALOUD_PUBLIC_ORIGIN 的網域提供
     env_file: .env
     volumes:

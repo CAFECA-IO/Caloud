@@ -8,7 +8,7 @@ pub struct Config {
     pub public_origin: String,
     /// 管理介面 / API 監聽位址
     pub api_listen: String,
-    /// 反向代理 HTTP 監聽位址（ACME HTTP-01 與 301 轉 HTTPS）
+    /// 反向代理 HTTP 監聽位址（ACME HTTP-01 與 308 轉 HTTPS）
     pub http_listen: String,
     /// 反向代理 HTTPS 監聽位址
     pub https_listen: String,
@@ -22,6 +22,10 @@ pub struct Config {
     pub acme_email: Option<String>,
     /// 是否使用 Let's Encrypt staging
     pub acme_staging: bool,
+    /// 覆寫 ACME directory（測試用 Pebble 等，ADR 0016）
+    pub acme_directory: Option<String>,
+    /// 覆寫 ACME 伺服器的 CA（PEM 檔；測試用）
+    pub acme_ca_file: Option<PathBuf>,
     /// 所有被代理容器要加入的 docker 網路
     pub edge_network: String,
     /// 第一位以外的新使用者預設角色（pending 需 super admin 核准）
@@ -32,6 +36,8 @@ pub struct Config {
     pub doh_url: String,
     /// git CLI 路徑（Git 來源 App，ADR 0009）
     pub git_bin: String,
+    /// Cloudflare API 端點（ADR 0016；測試時指向 mock）
+    pub cloudflare_api: String,
 }
 
 impl Config {
@@ -56,11 +62,14 @@ impl Config {
             data_dir: get("DATA_DIR", "./data").into(),
             acme_email: opt("ACME_EMAIL"),
             acme_staging: get("ACME_STAGING", "false") == "true",
+            acme_directory: opt("ACME_DIRECTORY"),
+            acme_ca_file: opt("ACME_CA_FILE").map(PathBuf::from),
             edge_network: get("EDGE_NETWORK", "caloud-edge"),
             default_role: get("DEFAULT_ROLE", "pending"),
             docker_bin: get("DOCKER_BIN", "docker"),
             doh_url: get("DOH_URL", "https://cloudflare-dns.com/dns-query"),
             git_bin: get("GIT_BIN", "git"),
+            cloudflare_api: get("CLOUDFLARE_API", "https://api.cloudflare.com/client/v4"),
         })
     }
 }

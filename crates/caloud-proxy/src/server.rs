@@ -1,8 +1,8 @@
-use crate::{RouteTable, TunnelRegistry, Upstream};
+use crate::{CertStore, RouteTable, TunnelRegistry, Upstream};
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::body::{Bytes, Incoming};
-use hyper::header::{HeaderValue, CONNECTION, HOST, UPGRADE};
-use hyper::{Request, Response, StatusCode, Uri};
+use hyper::header::{HeaderValue, CONNECTION, HOST, LOCATION, UPGRADE};
+use hyper::{Request, Response, StatusCode, Uri, Version};
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
@@ -11,44 +11,62 @@ use tokio::net::TcpListener;
 
 type Body = BoxBody<Bytes, hyper::Error>;
 
-/// HTTP 反向代理。TLS 直通見 `passthrough` 模組。
-///
-/// 上游在 Runner 節點上時經 `tunnels` 轉發（M4-07）；WebSocket／HTTP Upgrade 兩種上游都支援（FR-DOM-06）。
-pub async fn serve_http(addr: SocketAddr, routes: RouteTable, tunnels: TunnelRegistry) -> anyhow::Result<()> {
-    serve_listener(TcpListener::bind(addr).await?, routes, tunnels).await
+/// 共用的轉發狀態（`:80` 與 `:443` 終結後的連線）
+#[derive(Clone)]
+pub(crate) struct Proxy {
+    pub routes: RouteTable,
+    pub tunnels: TunnelRegistry,
+    pub certs: CertStore,
+    client: Client<HttpConnector, Incoming>,
 }
 
-/// 同 [`serve_http`]，但使用已綁定的 listener（測試用 port 0）
-pub async fn serve_listener(listener: TcpListener, routes: RouteTable, tunnels: TunnelRegistry) -> anyhow::Result<()> {
-    let client: Client<HttpConnector, Incoming> = Client::builder(TokioExecutor::new()).build_http();
-    tracing::info!(addr = %listener.local_addr()?, "proxy listening");
-    loop {
-        let (stream, peer) = listener.accept().await?;
-        let routes = routes.clone();
-        let client = client.clone();
-        let tunnels = tunnels.clone();
-        tokio::spawn(async move {
-            let svc = hyper::service::service_fn(move |req| handle(req, peer, routes.clone(), client.clone(), tunnels.clone()));
-            if let Err(e) = auto::Builder::new(TokioExecutor::new())
-                .serve_connection_with_upgrades(TokioIo::new(stream), svc)
-                .await
-            {
-                tracing::debug!(error = %e, "connection closed");
-            }
-        });
+impl Proxy {
+    pub(crate) fn new(routes: RouteTable, tunnels: TunnelRegistry, certs: CertStore) -> Self {
+        Self {
+            routes,
+            tunnels,
+            certs,
+            client: Client::builder(TokioExecutor::new()).build_http(),
+        }
+    }
+
+    /// 以 HTTP/1 或 h2 服務一條連線；`https` 為 Edge 終結 TLS 後的連線
+    pub(crate) async fn serve_conn<I>(self, io: I, peer: SocketAddr, https: bool)
+    where
+        I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let svc = hyper::service::service_fn(move |req| handle(req, peer, https, self.clone()));
+        if let Err(e) = auto::Builder::new(TokioExecutor::new())
+            .serve_connection_with_upgrades(TokioIo::new(io), svc)
+            .await
+        {
+            tracing::debug!(error = %e, "connection closed");
+        }
     }
 }
 
-async fn handle(
-    mut req: Request<Incoming>,
-    peer: SocketAddr,
-    routes: RouteTable,
-    client: Client<HttpConnector, Incoming>,
-    tunnels: TunnelRegistry,
-) -> Result<Response<Body>, hyper::Error> {
+/// HTTP 反向代理（`:80`）。TLS 見 `passthrough::serve_tls`。
+///
+/// 上游在 Runner 節點上時經 `tunnels` 轉發（M4-07）；WebSocket／HTTP Upgrade 兩種上游都支援（FR-DOM-06）。
+/// host 有 Edge 憑證時回 308 轉 HTTPS（FR-DOM-05，ADR 0016）。
+pub async fn serve_http(addr: SocketAddr, routes: RouteTable, tunnels: TunnelRegistry, certs: CertStore) -> anyhow::Result<()> {
+    serve_listener(TcpListener::bind(addr).await?, routes, tunnels, certs).await
+}
+
+/// 同 [`serve_http`]，但使用已綁定的 listener（測試用 port 0）
+pub async fn serve_listener(listener: TcpListener, routes: RouteTable, tunnels: TunnelRegistry, certs: CertStore) -> anyhow::Result<()> {
+    let proxy = Proxy::new(routes, tunnels, certs);
+    tracing::info!(addr = %listener.local_addr()?, "proxy listening");
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        tokio::spawn(proxy.clone().serve_conn(stream, peer, false));
+    }
+}
+
+async fn handle(mut req: Request<Incoming>, peer: SocketAddr, https: bool, p: Proxy) -> Result<Response<Body>, hyper::Error> {
     // ACME HTTP-01：Caloud 自己的 token 優先；不認得的 token 依 Host 轉給 App（App 自行申請憑證，ADR 0009）
     if let Some(token) = req.uri().path().strip_prefix("/.well-known/acme-challenge/") {
-        if let Some(k) = routes.acme_challenge(token) {
+        if let Some(k) = p.routes.acme_challenge(token) {
             return Ok(text(StatusCode::OK, k));
         }
     }
@@ -57,25 +75,38 @@ async fn handle(
         .headers()
         .get(HOST)
         .and_then(|h| h.to_str().ok())
-        .or_else(|| req.uri().host())
+        .or_else(|| req.uri().authority().map(|a| a.as_str()))
         .unwrap_or_default()
         .to_string();
-    let Some(up) = routes.lookup_route(&host) else {
+
+    // FR-DOM-05：有 Edge 憑證的網域一律走 HTTPS
+    if !https && p.certs.has_cert(&host) {
+        return Ok(redirect_https(&host, &req));
+    }
+
+    let Some(up) = p.routes.lookup_route(&host) else {
         // FR-DOM-07
         return Ok(text(StatusCode::NOT_FOUND, format!("此網域尚未綁定運作中的 App：{host}")));
     };
 
+    // h2 進來的請求一律以 HTTP/1.1 轉給上游（:authority → Host）
+    *req.version_mut() = Version::HTTP_11;
     let h = req.headers_mut();
+    if !h.contains_key(HOST) {
+        if let Ok(v) = HeaderValue::from_str(&host) {
+            h.insert(HOST, v);
+        }
+    }
     if let Ok(v) = HeaderValue::from_str(&peer.ip().to_string()) {
         h.append("x-forwarded-for", v);
     }
     if let Ok(v) = HeaderValue::from_str(&host) {
         h.insert("x-forwarded-host", v);
     }
-    h.insert("x-forwarded-proto", HeaderValue::from_static("http"));
+    h.insert("x-forwarded-proto", HeaderValue::from_static(if https { "https" } else { "http" }));
 
     if up.node.is_some() || is_upgrade(&req) {
-        return Ok(forward_conn(req, &up, &tunnels).await);
+        return Ok(forward_conn(req, &up, &p.tunnels).await);
     }
 
     let path = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
@@ -83,13 +114,26 @@ async fn handle(
         return Ok(text(StatusCode::BAD_GATEWAY, "bad upstream".into()));
     };
     *req.uri_mut() = uri;
-    match client.request(req).await {
+    match p.client.request(req).await {
         Ok(res) => Ok(res.map(|b| b.boxed())),
         Err(e) => {
             tracing::warn!(error = %e, upstream = %up.target, "upstream error");
             Ok(bad_gateway())
         }
     }
+}
+
+/// 308 到 `https://<host 去掉 port><path>`
+fn redirect_https<B>(host: &str, req: &Request<B>) -> Response<Body> {
+    let bare = host
+        .rsplit_once(':')
+        .map_or(host, |(h, port)| if port.parse::<u16>().is_ok() { h } else { host });
+    let path = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let mut r = text(StatusCode::PERMANENT_REDIRECT, String::new());
+    if let Ok(v) = HeaderValue::from_str(&format!("https://{bare}{path}")) {
+        r.headers_mut().insert(LOCATION, v);
+    }
+    r
 }
 
 fn is_upgrade<B>(req: &Request<B>) -> bool {

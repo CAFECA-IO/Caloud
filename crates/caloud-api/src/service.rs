@@ -608,7 +608,7 @@ pub async fn verify_domain(s: &AppState, me: &CurrentUser, hostname: &str) -> Ap
         me.audit_detail(None).as_deref(),
     )
     .await;
-    // TODO(M2-02)：觸發 ACME 憑證申請
+    // FR-DOM-05：路由表重新載入會觸發憑證管理檢查（ADR 0016）
     Ok(d)
 }
 

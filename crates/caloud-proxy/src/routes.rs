@@ -20,6 +20,7 @@ pub struct RouteTable {
     passthrough: Arc<ArcSwap<HashMap<String, Upstream>>>,
     /// ACME HTTP-01：token → key authorization
     acme: Arc<ArcSwap<HashMap<String, String>>>,
+    changed: Arc<tokio::sync::Notify>,
 }
 
 impl RouteTable {
@@ -71,6 +72,7 @@ impl RouteTable {
         tracing::info!(count = map.len(), passthrough = pass.len(), "route table reloaded");
         self.inner.store(Arc::new(map));
         self.passthrough.store(Arc::new(pass));
+        self.changed.notify_one();
     }
 
     /// 從資料庫重新載入（網域、App 狀態變動後呼叫）
@@ -87,6 +89,17 @@ impl RouteTable {
         let mut m = (**self.acme.load()).clone();
         m.insert(token, key_auth);
         self.acme.store(Arc::new(m));
+    }
+
+    pub fn remove_acme_challenge(&self, token: &str) {
+        let mut m = (**self.acme.load()).clone();
+        m.remove(token);
+        self.acme.store(Arc::new(m));
+    }
+
+    /// 路由表變動通知（憑證管理據此重新檢查，ADR 0016）
+    pub fn changed(&self) -> Arc<tokio::sync::Notify> {
+        self.changed.clone()
     }
 }
 

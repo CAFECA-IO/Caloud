@@ -1,6 +1,6 @@
 //! Caloud：單一執行檔，同時提供
 //! - 管理介面與 API（`CALOUD_API_LISTEN`，預設 :8080）
-//! - 依網域轉發到容器的反向代理（`CALOUD_HTTP_LISTEN` :80，M2 加上 `CALOUD_HTTPS_LISTEN` :443）
+//! - 依網域轉發到容器的反向代理（`CALOUD_HTTP_LISTEN` :80、`CALOUD_HTTPS_LISTEN` :443，ADR 0016）
 #![forbid(unsafe_code)]
 use caloud_api::AppState;
 use caloud_auth::CafecaVerifier;
@@ -33,6 +33,11 @@ async fn main() -> anyhow::Result<()> {
     routes.reload(&db).await?;
 
     let tunnels = caloud_proxy::TunnelRegistry::default();
+    let certs = caloud_proxy::CertStore::default();
+    let master_key = caloud_core::secret::MasterKey::from_env()?.map(Arc::new);
+    if master_key.is_none() {
+        tracing::warn!("CALOUD_MASTER_KEY is not set; secrets (Cloudflare tokens) cannot be stored");
+    }
     let state = AppState {
         verifier: Arc::new(CafecaVerifier::new(cfg.cafeca_wallet.clone(), cfg.cafeca_rpc.clone())),
         runner,
@@ -42,14 +47,17 @@ async fn main() -> anyhow::Result<()> {
         cfg: cfg.clone(),
         agents: Default::default(),
         tunnels: tunnels.clone(),
+        certs: certs.clone(),
+        master_key,
     };
     caloud_api::spawn_offline_sweeper(state.clone());
+    caloud_api::certs::spawn(state.clone());
 
     let api = tokio::net::TcpListener::bind(&cfg.api_listen).await?;
     tracing::info!(addr = %cfg.api_listen, "api listening");
     let api = axum::serve(api, caloud_api::router(state));
-    let proxy = caloud_proxy::serve_http(cfg.http_listen.parse()?, routes.clone(), tunnels.clone());
-    let tls = caloud_proxy::serve_tls_passthrough(cfg.https_listen.parse()?, routes, tunnels);
+    let proxy = caloud_proxy::serve_http(cfg.http_listen.parse()?, routes.clone(), tunnels.clone(), certs.clone());
+    let tls = caloud_proxy::serve_tls(cfg.https_listen.parse()?, routes, tunnels, certs);
 
     tokio::select! {
         r = async { api.await } => r?,

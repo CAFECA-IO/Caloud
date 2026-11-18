@@ -36,7 +36,7 @@
 | Crate | 職責 | 主要依賴 |
 | --- | --- | --- |
 | `caloud` | 進入點，組裝 state，同時跑 API 與 proxy | tokio |
-| `caloud-core` | Config、DB 連線與 migration、模型、`project_name` 命名規則、祕密加密（`secret`，FR-OPS-14） | sqlx (sqlite), chacha20poly1305 |
+| `caloud-core` | Config、DB 連線與 migration、模型、`project_name` 命名規則、祕密加密（`secret`，ChaCha20-Poly1305，FR-OPS-14） | sqlx (sqlite), ring |
 | `caloud-auth` | `CafecaVerifier`、nonce/token 產生 | alloy-sol-types, reqwest |
 | `caloud-orchestrator` | compose 安全政策、override 產生、compose 生命週期 | serde_yaml, tokio::process |
 | `caloud-proxy` | 反向代理、路由表、ACME HTTP-01 回應、`:443` SNI 分流（直通或以 `CertStore` 終結 TLS）、`:80` 轉 HTTPS、WebSocket／Upgrade 轉接、Runner 通道（`TunnelRegistry`，FR-OPS-09） | hyper 1, arc-swap, rustls, tokio-rustls, tokio-yamux, tokio-util |
