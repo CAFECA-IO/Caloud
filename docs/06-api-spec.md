@@ -66,7 +66,7 @@
   "app_id": "uuid", "service": "web", "port": 80, "tls_status": "none", "tls_mode": "none", "tls_port": null, "created_at": 0 }
 ```
 
-`tls_status`：`none` | `pending` | `issued` | `failed`。`tls_mode`：`none`（HTTP 轉發）| `passthrough`（443 TLS 直通到 `tls_port`，FR-DOM-09）。
+`tls_status`：`none` | `pending` | `issued` | `failed`，由憑證管理實際更新（FR-DOM-05：已驗證、非直通、綁定運作中 App 的網域才會申請）。`tls_mode`：`none`（HTTP 轉發）| `passthrough`（443 TLS 直通到 `tls_port`，FR-DOM-09）。
 
 ### ContainerStatus
 
@@ -209,18 +209,35 @@
 | GET | `/api/admin/environments` | admin+ | FR-OPS-13 |
 | POST | `/api/admin/environments` | admin+ | FR-OPS-13 |
 | DELETE | `/api/admin/environments/{subdomain}` | admin+ | FR-OPS-13 |
+| GET | `/api/admin/certificates` | admin+ | FR-OPS-10、FR-DOM-05 |
 
 **DomainPool**
 
 ```json
 { "root": "caloud.tw", "purposes": ["production", "staging", "verify"], "cloudflare_zone": "caloud.tw",
+  "cloudflare_token_hint": "…a1b2",
   "id_lengths": { "production": 8, "staging": 12, "verify": 16 }, "created_at": 0, "updated_at": 0 }
 ```
 
 - `root`：主機名稱格式，正規化為小寫。`purposes` 為 `production`、`staging`、`verify`、`system` 的子集，至少一個；`production`、`staging`、`verify` 各自只能屬於一個網域池（重複回 `409`）。
 - `id_lengths` 每項 6–32，省略時為 8／12／16。`cloudflare_zone` 可為 null。
-- Cloudflare API 權杖於 M4-08 隨加密儲存加入，本版不接受。
+- `cloudflare_token`（只寫，FR-OPS-03、FR-OPS-14）：POST／PUT 可帶。省略表示不變；空字串表示清除。
+  - 有值時必須同時有 `cloudflare_zone`。Caloud 會以該權杖呼叫 Cloudflare `GET /zones?name=<zone>`，查無 zone 或權杖無效回 `400`。
+  - 驗證通過後以主金鑰加密保存；未設定 `CALOUD_MASTER_KEY` 回 `400`。
+  - 回應只會出現 `cloudflare_token_hint`（末 4 碼，未設定時為 null）。
+  - 設定權杖後，Caloud 會為 `root` 與 `*.root` 申請 wildcard 憑證（FR-OPS-10），進度見 `GET /api/admin/certificates`。
 - **PUT** 本體同 POST 但不含 `root`；**DELETE** → `204`。
+
+**Certificate**（`GET /api/admin/certificates` 回傳陣列，依 `name` 排序，ADR 0016）
+
+```json
+{ "name": "caloud.tw", "kind": "dns01", "names": ["caloud.tw", "*.caloud.tw"], "status": "issued",
+  "not_after": 1800000000, "error": null, "next_attempt": null, "staging": false, "updated_at": 0 }
+```
+
+- `kind`：`dns01`（網域池）| `http01`（已驗證網域）。`status`：`pending` | `issued` | `failed`。
+- `failed` 時 `error` 是最後一次的錯誤訊息，`next_attempt` 是下次重試時間（退避：1 小時起、最多 24 小時）。
+- `staging` 表示目前使用 Let's Encrypt staging（`CALOUD_ACME_STAGING=true`），瀏覽器不信任這類憑證。
 
 **ReservedName** `{ "name": "www", "created_at": 0 }`。**POST** `{ "name": "support" }`：1–32 字元，`a-z`、`0-9`、`-`，轉為小寫；重複回 `409`。3 字元以上的保留字連「包含」它的 ID 也排除，較短的只排除完全相同者。預設保留：`www`、`app`、`api`、`mcp`、`docs`、`status`、`admin`、`login`、`cafeca`、`caloud`。
 

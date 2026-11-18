@@ -37,7 +37,7 @@
 | 管理介面 | 總覽、Apps、網域、使用者、API 權杖；淺色／深色 | ✅ |
 | MCP 介面 | AI 助手以個人 API 權杖經 `POST /mcp` 操作 16 個工具 | ✅ |
 | 稽核紀錄 | 登入、部署、網域、角色、權杖變更皆有紀錄，標示來源（網頁／MCP） | ✅ |
-| HTTPS 自動憑證 | Let's Encrypt（ACME HTTP-01） | M2 規劃中 |
+| HTTPS 自動憑證 | Let's Encrypt：網域池 wildcard（Cloudflare DNS-01）與已驗證網域（HTTP-01），`:80` 轉 HTTPS | ✅ |
 | WebSocket 轉發、即時 log、資源配額 | | M2–M3 規劃中 |
 
 ## 運作原理
@@ -226,13 +226,15 @@ volumes:
 | `PUBLIC_ORIGIN` | `http://localhost:8080` | 管理介面 origin，**必須與網址列完全相同** |
 | `API_LISTEN` | `0.0.0.0:8080` | 管理介面、REST API、MCP |
 | `HTTP_LISTEN` | `0.0.0.0:80` | 反向代理 HTTP |
-| `HTTPS_LISTEN` | `0.0.0.0:443` | 反向代理 HTTPS（M2） |
+| `HTTPS_LISTEN` | `0.0.0.0:443` | 反向代理 HTTPS（SNI 直通或終結 TLS） |
 | `CAFECA_WALLET` | `https://cafeca.io` | CAFECA 錢包網址（讀取 `/.well-known/cafeca-configuration`） |
 | `CAFECA_RPC` | — | 覆寫 RPC，建議使用自架或付費節點 |
 | `DATA_DIR` | `./data`（容器內 `/data`） | SQLite、compose 檔、憑證 |
 | `EDGE_NETWORK` | `caloud-edge` | 被代理容器加入的 docker 網路 |
 | `DEFAULT_ROLE` | `pending` | 第一位以外的新使用者角色（`pending` 或 `member`） |
-| `ACME_EMAIL` / `ACME_STAGING` | — / `false` | Let's Encrypt（M2） |
+| `ACME_EMAIL` / `ACME_STAGING` | — / `false` | Let's Encrypt 聯絡信箱（未設定時不申請憑證）／改用 staging |
+| `MASTER_KEY` | — | 祕密加密主金鑰（32 bytes base64，`openssl rand -base64 32`）；設定 Cloudflare 權杖前必須設定，遺失後需重新設定權杖 |
+| `CLOUDFLARE_API` | `https://api.cloudflare.com/client/v4` | Cloudflare API 端點（測試用） |
 | `DOCKER_BIN` | `docker` | docker CLI 路徑 |
 | `DOH_URL` | `https://cloudflare-dns.com/dns-query` | 網域 TXT 驗證使用的 DNS-over-HTTPS 端點（JSON API） |
 | `GIT_BIN` | `git` | git CLI 路徑（Git 來源 App） |

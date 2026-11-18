@@ -35,6 +35,8 @@
 | 執行用戶程式碼 | 容器逃逸、打內網或 metadata | 控制面與 Runner 分機；gVisor（runsc）；每個環境獨立 `cld<索引>` bridge 與固定網段；防火牆 `CALOUD-ENV-FWD` 丟棄往 10/8、172.16/12、192.168/16、169.254/16、100.64/10 與 TCP 25 的轉送，`CALOUD-ENV-IN` 丟棄環境連往 Runner 主機本身的封包（[ADR 0015](adr/0015-runner-sandbox.md)）；agent 收到的 compose 再以平臺政策檢查一次，且 M4 不接受 `build` | FR-OPS-11 |
 | Runner 自我檢查 | 未設定隔離的主機接到用戶環境 | 啟動時檢查 runsc、防火牆 chain、磁碟，並以兩個探測環境實際驗證；未通過的節點不被調度平臺環境 | FR-OPS-12 |
 | Runner 主機設定 | 設定腳本破壞主機上其他服務 | `runner-setup.sh` 只新增 Caloud 自己的 chain、檔案與 daemon.json 的 `runtimes.runsc`，預設 runtime 不變，以 reload 生效不重啟容器；`uninstall` 完整移除 | FR-OPS-11 |
+| Edge TLS 與憑證（[ADR 0016](adr/0016-edge-tls.md)） | 替他人網域簽發憑證；終結錯誤網域的流量 | HTTP-01 只對 TXT 驗證通過、非直通且綁定運作中 App 的網域申請；DNS-01 只對設有權杖的網域池根網域；SNI 沒有直通設定也沒有憑證即關閉連線；wildcard 只配對一層 | FR-DOM-05、FR-OPS-10 |
+| Cloudflare 權杖 | 資料庫或備份外洩後被用來改 DNS | 以主金鑰加密保存（AAD 綁定網域池），只回傳末 4 碼；設定時先經 Cloudflare 驗證；建議權杖只給該 zone 的 DNS 編輯並限制來源 IP | FR-OPS-03、FR-OPS-14 |
 
 ## 2. 權限矩陣
 
@@ -177,7 +179,11 @@
 | 子網域 ID | `new_subdomain_id()` 以 CSPRNG 產生 |
 | log | 不記錄 token、cookie、完整簽章、compose 中的環境變數值 |
 | 設定檔 | `.env` 不進版控（`.gitignore`）；只提交 `.env.example` |
-| App 環境變數 | 存在資料庫（M3 改為加密，FR-APP-11）；API 與 MCP 只回傳變數名稱，不回傳值；稽核不記錄值 |
+| App 環境變數 | 存在資料庫（M7 改為以主金鑰加密，FR-APP-11）；API 與 MCP 只回傳變數名稱，不回傳值；稽核不記錄值 |
+| 主金鑰 `CALOUD_MASTER_KEY` | 32 bytes 的 base64，只從環境變數讀取；不寫入資料庫、日誌、API 回應或 `Config` 的 Debug 輸出；正式機另存一份離線備份，遺失時已加密的祕密需重新設定（FR-OPS-14） |
+| 加密的祕密 | `caloud_core::secret`：ChaCha20-Poly1305、隨機 nonce，格式 `v1:<base64(nonce‖密文)>`，AAD 為「用途:主鍵」 |
+| Cloudflare 權杖 | 加密存於 `domain_pools.cloudflare_token_enc`；只在簽發時解開，用完即丟；稽核只記錄「已設定／已清除」 |
+| ACME 帳號金鑰與憑證私鑰 | `<data_dir>/acme/`、`<data_dir>/certs/` 下的檔案權限 0600；不經 API 輸出 |
 
 ## 5. 安全相關變更的審查要求
 
@@ -187,5 +193,6 @@
 - `caloud-orchestrator::policy`
 - `caloud-api::auth`、`service.rs`、`tokens.rs`、`mcp.rs`、`admin.rs`、`agent.rs` 中的權限與驗證
 - `caloud-runner` 的權杖保存與連線
+- `caloud-core::secret`、`caloud-proxy::tls`、`caloud-api::certs`
 - `deploy/`、`Dockerfile`
 - 本文件

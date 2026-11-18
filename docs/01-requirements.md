@@ -85,10 +85,10 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-DOM-02 | 新增後顯示需設定的 DNS 紀錄（A/AAAA 與 TXT `_caloud-challenge.<host>`）；使用者按「驗證」後系統查詢 TXT，相符才標記已驗證 | P0 | M1 |
 | FR-DOM-03 | 可把網域綁定到自己有權管理的 App 的某個 service 與 port；service 必須存在於 compose 檔 | P0 | M1 |
 | FR-DOM-04 | 網域驗證、綁定、App 狀態改變後，路由**不需重啟即時生效**（≤ 1 秒） | P0 | M1 |
-| FR-DOM-05 | 已驗證網域自動申請並續簽 TLS 憑證（ACME HTTP-01），HTTP 自動轉 HTTPS | P0 | M2 |
+| FR-DOM-05 | 已驗證、非直通且綁定運作中 App 的網域，自動申請並續簽 TLS 憑證（ACME HTTP-01，到期前 30 天）；有憑證的網域 HTTP 以 308 轉 HTTPS（[ADR 0016](adr/0016-edge-tls.md)） | P0 | M4 |
 | FR-DOM-06 | 支援 WebSocket／HTTP Upgrade 轉發 | P0 | M2 |
 | FR-DOM-07 | 未綁定或 App 未運作的網域回應 404 頁面；upstream 無回應回 502 | P0 | M1 |
-| FR-DOM-08 | 同一 App 可綁多個網域；支援萬用字元網域（DNS-01） | P2 | M3 |
+| FR-DOM-08 | 同一 App 可綁多個網域（M4）；自訂萬用字元網域（DNS-01，需用戶的 DNS 委派）於 M7 | P2 | M4／M7 |
 | FR-DOM-09 | 網域可設為 **TLS 直通**：Caloud 在 443 依 TLS ClientHello 的 SNI 判斷網域，把整條 TCP 連線原封不動轉給 App 的指定 port，由 App 自己處理 TLS 與憑證（含 TLS-ALPN-01）；同一網域的 HTTP（80）仍依綁定的 port 轉發，供 App 的 HTTP-01 驗證使用 | P0 | M2 |
 | FR-DOM-10 | 綁定到 `network_mode: host` 的 service 時，Caloud 改以主機（`host.docker.internal`）的對應 port 轉發 | P0 | M2 |
 | FR-DOM-11 | 平臺用戶可在專案加入自己的網域，指到 production 或某個 staging；以 TXT `_caloud-challenge.<網域>` 驗證擁有權，並提示 CNAME 指向該環境的 caloud.tw 子網域（根網域用 A 記錄） | P1 | M7 |
@@ -218,17 +218,18 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | --- | --- | --- | --- |
 | FR-OPS-01 | 部署、權杖、秘密變更寫入稽核並標示來源（web、api、mcp、github） | P0 | M6 |
 | FR-OPS-02 | 維運者可看全部節點負載、暫停用戶、強制停止環境 | P1 | M8 |
-| FR-OPS-03 | 維運者在後台管理網域資源：網域池（根網域、用途、Cloudflare zone 與權杖、ID 長度）、保留字、封鎖清單 | P0 | M4 |
+| FR-OPS-03 | 維運者在後台管理網域資源：網域池（根網域、用途、Cloudflare zone 與權杖、ID 長度）、保留字、封鎖清單；權杖設定時先經 Cloudflare 驗證，加密保存，只回傳末 4 碼 | P0 | M4 |
 | FR-OPS-04 | Runner agent 啟動時自動偵測 CPU 核心數與架構、記憶體、可用磁碟、gVisor 與 BuildKit，以一次性加入權杖註冊（1 小時有效、只存雜湊）；之後每 15 秒心跳；60 秒無心跳標為離線 | P0 | M4 |
 | FR-OPS-05 | 方案、價格與配額在後台設定，不需改程式 | P1 | M8 |
 | FR-OPS-06 | 節點可設為排空：不再接新工作，待驗證結束、環境搬移後才可移除；服務在線時即可加入或排空 | P0 | M4 |
 | FR-OPS-07 | 整體已配置量 > 80% 或驗證排隊 > 5 分鐘時告警；離線節點上的 production 於其他平臺節點重建 | P1 | M7 |
 | FR-OPS-08 | 調度依剩餘可配置量（偵測規格保留 10% 給主機）選擇節點；自有設備只接擁有者的工作 | P0 | M4 |
 | FR-OPS-09 | Edge 依 Host 路由到環境所在節點；經 Runner 主動建立的通道轉發 | P0 | M4 |
-| FR-OPS-10 | `*.caloud.tw` 與 `caloud.tw` 以 ACME DNS-01 經 Cloudflare API 申請 wildcard 憑證並自動續簽 | P0 | M4 |
+| FR-OPS-10 | 網域池設有 Cloudflare 權杖時，`*.<根網域>` 與 `<根網域>`（如 `*.caloud.tw`、`caloud.tw`）以 ACME DNS-01 經 Cloudflare API 申請 wildcard 憑證；到期前 30 天自動續簽，失敗時退避重試（1 小時起、最多 24 小時）；`CALOUD_ACME_STAGING` 可改用 staging；後台可看各憑證狀態與錯誤（[ADR 0016](adr/0016-edge-tls.md)） | P0 | M4 |
 | FR-OPS-11 | 用戶容器以 gVisor 執行；環境之間網路不通；封鎖雲端 metadata、平臺內網、Runner 主機本身與外連 25 port（[ADR 0015](adr/0015-runner-sandbox.md)） | P0 | M4 |
 | FR-OPS-12 | Runner 啟動時自我檢查（gVisor runtime、防火牆、磁碟剩餘、以探測環境實際驗證隔離），結果顯示在節點規格；未通過的節點不接平臺環境 | P0 | M4 |
 | FR-OPS-13 | 維運者可經 Admin API 在節點開出、列出、刪除環境（image 版 compose），以「子網域 ID＋網域池根網域」經 Runner 通道對外 | P0 | M4 |
+| FR-OPS-14 | 祕密（Cloudflare 權杖，之後的祕密變數）以主金鑰 `CALOUD_MASTER_KEY` 加密保存（ChaCha20-Poly1305）；主金鑰只來自環境變數，不寫入資料庫、日誌或 API 回應；未設定時拒絕設定祕密 | P0 | M4 |
 
 ### 2.15 平臺：既有服務遷移 MIG
 

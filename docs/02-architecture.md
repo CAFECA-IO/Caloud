@@ -36,11 +36,11 @@
 | Crate | 職責 | 主要依賴 |
 | --- | --- | --- |
 | `caloud` | 進入點，組裝 state，同時跑 API 與 proxy | tokio |
-| `caloud-core` | Config、DB 連線與 migration、模型、`project_name` 命名規則 | sqlx (sqlite) |
+| `caloud-core` | Config、DB 連線與 migration、模型、`project_name` 命名規則、祕密加密（`secret`，FR-OPS-14） | sqlx (sqlite), chacha20poly1305 |
 | `caloud-auth` | `CafecaVerifier`、nonce/token 產生 | alloy-sol-types, reqwest |
 | `caloud-orchestrator` | compose 安全政策、override 產生、compose 生命週期 | serde_yaml, tokio::process |
-| `caloud-proxy` | 反向代理、路由表、ACME HTTP-01 回應、TLS（M2）、WebSocket／Upgrade 轉接、Runner 通道（`TunnelRegistry`，FR-OPS-09） | hyper 1, arc-swap, tokio-yamux, tokio-util |
-| `caloud-api` | 服務層（權限、驗證、稽核）、REST API、MCP 端點、session 與 API 權杖、Admin API、Agent WebSocket 端點、內嵌 Web UI 與 Design System 靜態檔 | axum 0.8（ws）, tokio-yamux |
+| `caloud-proxy` | 反向代理、路由表、ACME HTTP-01 回應、`:443` SNI 分流（直通或以 `CertStore` 終結 TLS）、`:80` 轉 HTTPS、WebSocket／Upgrade 轉接、Runner 通道（`TunnelRegistry`，FR-OPS-09） | hyper 1, arc-swap, rustls, tokio-rustls, tokio-yamux, tokio-util |
+| `caloud-api` | 服務層（權限、驗證、稽核）、REST API、MCP 端點、session 與 API 權杖、Admin API、Agent WebSocket 端點、憑證管理（`certs`、Cloudflare client）、內嵌 Web UI 與 Design System 靜態檔 | axum 0.8（ws）, tokio-yamux, instant-acme, rcgen |
 | `caloud-analyzer` | 服務自動解析：讀儲存庫產生平臺 compose 與解析報告（信心度與依據），不執行任何程式（[ADR 0014](adr/0014-analyzer-crate.md)） | toml, serde_yaml |
 | `caloud-runner` | `caloud-agent` 執行檔：規格偵測、連線控制面、心跳、通道、自我檢查、環境部署（[ADR 0012](adr/0012-runner-crate.md)、[ADR 0015](adr/0015-runner-sandbox.md)） | sysinfo, tokio-tungstenite, tokio-yamux |
 
@@ -149,6 +149,13 @@ MCP 用戶端 ──POST /mcp (Bearer cld_…)──► mcp.rs ──► service
 5. 路由表 = `verified=1 AND app.status='running'` 的網域；任何變動後 `RouteTable::reload()`，以 `ArcSwap` 原子替換，進行中的請求不受影響。
 6. 代理加上 `X-Forwarded-For/Host/Proto`；找不到路由回 404，upstream 無回應回 502。
 
+### TLS（M4-08，[ADR 0016](adr/0016-edge-tls.md)）
+
+- `:443`：讀 ClientHello 的 SNI → 直通網域原封轉送；`CertStore` 有憑證（完全相符或上一層 wildcard）→ rustls 終結後交給同一套 HTTP 代理（`X-Forwarded-Proto: https`）；其他關閉。
+- `:80`：Caloud 的 ACME token 優先 → 有憑證的 host 回 308 轉 HTTPS → 其他照舊轉發。
+- `caloud-api::certs` 背景任務：網域池（有 Cloudflare 權杖）以 DNS-01 申請 `root`＋`*.root`；已驗證、非直通、綁定運作中 App 的網域以 HTTP-01 申請。到期前 30 天續簽，失敗退避重試，結果寫入 `certificates` 與 `domains.tls_status`。
+- Cloudflare 權杖以 `caloud_core::secret`（主金鑰 `CALOUD_MASTER_KEY`）加密保存，只在簽發時解開。
+
 ## 7. 資料模型
 
 定義於 `crates/caloud-core/migrations/`，migration 只能新增、不可修改已發布的檔案。
@@ -162,7 +169,8 @@ MCP 用戶端 ──POST /mcp (Bearer cld_…)──► mcp.rs ──► service
 | `domains` | `hostname` | 驗證 token、是否已驗證、綁定的 app/service/port、轉發目標主機、TLS 模式（一般／直通）與直通 port、TLS 狀態 | FR-DOM-* |
 | `audit_log` | 自增 `id` | 操作者、動作、對象、細節、時間 | FR-AUD-01 |
 | `api_tokens` | `id`（UUID） | 擁有者、名稱、token 雜湊、前綴、建立／到期／最後使用時間 | FR-MCP-02、FR-MCP-03 |
-| `domain_pools` | `root` | 根網域、用途（production／staging／verify／system）、Cloudflare zone、權杖提示、ID 長度 | FR-OPS-03 |
+| `domain_pools` | `root` | 根網域、用途（production／staging／verify／system）、Cloudflare zone 與 zone id、權杖密文與提示、ID 長度 | FR-OPS-03、FR-OPS-14 |
+| `certificates` | `name` | 憑證：類型（dns01／http01）、名稱清單、狀態（pending／issued／failed）、到期、錯誤、下次重試 | FR-OPS-10、FR-DOM-05 |
 | `reserved_names` | `name` | 子網域保留字 | FR-OPS-03、FR-ENV-07 |
 | `blocked_hosts` | `hostname` | 封鎖的主機名稱、理由、操作者 | FR-OPS-03 |
 | `nodes` | `id`（UUID） | 名稱、擁有者（空值＝平臺節點）、偵測規格、可配置量、已配置量、狀態（active／draining／offline）、節點權杖雜湊、最後心跳 | FR-OPS-04、FR-OPS-06 |
@@ -216,7 +224,8 @@ Internet ──:80/:443──► [caloud 容器] ──docker.sock──► Dock
 ```
 
 - Caloud 本體以 `deploy/docker-compose.yml` 部署；它是唯一允許使用 `ports` 與 docker.sock 的 compose 專案（不經 Caloud 管理）。
-- 資料目錄：`/data/caloud.db`、`/data/apps/<app_id>/{compose.yml,caloud.override.yml}`、`/data/certs/<hostname>/`（M2）。
+- 資料目錄：`/data/caloud.db`、`/data/apps/<app_id>/{compose.yml,caloud.override.yml}`、`/data/certs/<staging|production>/<名稱>/{cert.pem,key.pem}`、`/data/acme/<staging|production>/account.json`（M4-08）。
+- `.env`（不進版控）：M4-08 起需要 `CALOUD_MASTER_KEY`（`openssl rand -base64 32`）、`CALOUD_ACME_EMAIL`，可選 `CALOUD_ACME_STAGING=true`。
 
 ### 平臺拓樸（M4 起，[ADR 0010](adr/0010-platform.md)）
 
@@ -257,3 +266,4 @@ Runner 主機以 `scripts/runner-setup.sh install` 準備：安裝 gVisor、在 
 | [0013](adr/0013-service-migration.md) | 既有服務遷移：寫入凍結、agent 遷移模式、DNS-01 委派、hosts 預覽驗收 |
 | [0014](adr/0014-analyzer-crate.md) | 新增 `caloud-analyzer` crate；範本以 `dockerfile_inline` 帶入；附加服務 compose 與範本合併 |
 | [0015](adr/0015-runner-sandbox.md) | Runner 環境沙箱：gVisor、固定網段＋extra_hosts 名稱解析、`cld+` 防火牆、自我檢查 |
+| [0016](adr/0016-edge-tls.md) | Edge TLS 終結：`:443` SNI 分流、wildcard（DNS-01）與已驗證網域（HTTP-01）憑證、主金鑰加密 Cloudflare 權杖 |

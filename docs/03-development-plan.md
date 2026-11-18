@@ -76,7 +76,7 @@
 | M3-03 | 環境變數與 secrets（加密） | FR-APP-11 | → M7-03 |
 | M3-04 | 使用者配額 | FR-APP-12 | ⬜ |
 | M3-05 | 稽核紀錄查詢介面 | FR-AUD-02 | ⬜ |
-| M3-06 | 多網域、萬用字元網域 | FR-DOM-08 | → M4-08 |
+| M3-06 | 多網域（→ M4-08）、自訂萬用字元網域（→ M7-04） | FR-DOM-08 | → M4-08 |
 
 狀態「→ M4-08」等表示併入平臺里程碑的該項目一起完成。
 
@@ -93,7 +93,7 @@
 | M4-05 | 節點加入權杖、WebSocket 註冊與心跳、離線判定、排空 | FR-OPS-04、FR-OPS-06 | ✅ |
 | M4-06 | 依容量選擇節點 | FR-OPS-08 | ✅ |
 | M4-07 | Edge 經 Runner 通道（yamux）轉發；WebSocket／Upgrade 轉發 | FR-OPS-09、FR-DOM-06 | ✅ |
-| M4-08 | `*.caloud.tw` wildcard 憑證（Cloudflare DNS-01）、rustls SNI、`:80` 轉 HTTPS | FR-OPS-10、FR-DOM-05、FR-DOM-08 | ⬜ |
+| M4-08 | Edge TLS 終結（rustls SNI，與直通共用 `:443`）；網域池 wildcard 憑證（Cloudflare DNS-01）、已驗證網域 HTTP-01；`:80` 轉 HTTPS；主金鑰加密 Cloudflare 權杖（[ADR 0016](adr/0016-edge-tls.md)） | FR-OPS-03、FR-OPS-10、FR-OPS-14、FR-DOM-05、FR-DOM-08 | 🚧 |
 | M4-09 | 用戶容器以 gVisor 執行、環境網路隔離、封鎖 metadata；Runner 主機設定腳本與自我檢查 | FR-OPS-11、FR-OPS-12 | ✅ |
 | M4-10 | Admin API 開出環境：environments 資料表、agent 部署與回報、路由經通道 | FR-OPS-13 | ✅ |
 
@@ -130,7 +130,7 @@
 | M7-01 | 發布、production 藍綠切換、回滾、發布關卡 | FR-ENV-01、FR-ENV-03、FR-ENV-04 | ⬜ |
 | M7-02 | Staging 隨選部署、休眠與喚醒 | FR-ENV-02 | ⬜ |
 | M7-03 | 秘密變數（加密、依環境、遮蔽） | FR-ENV-05、FR-APP-11 | ⬜ |
-| M7-04 | 自訂網域：驗證、憑證、直通、每日重驗 | FR-DOM-11～13 | ⬜ |
+| M7-04 | 自訂網域：驗證、憑證、直通、每日重驗、萬用字元網域 | FR-DOM-08、FR-DOM-11～13 | ⬜ |
 | M7-05 | 用戶自有設備：加入、執行位置、通道 | FR-DEV-01～03 | ⬜ |
 | M7-06 | 容量告警、離線節點重建 | FR-OPS-07 | ⬜ |
 | M7-07 | 範圍化 MCP 權杖、patch 驗證、部署工具、設定頁 | FR-MCP-09～12 | ⬜ |
