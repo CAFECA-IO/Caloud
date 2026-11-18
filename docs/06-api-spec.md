@@ -320,13 +320,15 @@
 { "id": "uuid", "git_ref": "HEAD", "commit": "98b705d…", "created_at": 0,
   "result": { "source": { "kind": "template", "template": "node/next" }, "root": "", "compose_dir": "",
               "compose": "services: …", "services": [ { "name": "web", "role": "app", "port": 3000, "public": true } ],
-              "env": [ { "name": "PORT", "provider": "platform", "evidence": [] } ],
+              "env": [ { "name": "PORT", "provider": "platform", "evidence": [], "build_time": false, "varies_by_env": false } ],
               "findings": [ { "key": "port", "message": "…", "confidence": "high", "evidence": [ { "file": "package.json", "line": 23 } ] } ],
               "errors": [], "needs_confirmation": false },
   "compose": null, "public_service": null, "acknowledged": [], "confirmed_by": null, "confirmed_at": null }
 ```
 
 - `result` 為 `caloud_analyzer::Analysis`；`compose` 為用戶編輯版（null 表示使用 `result.compose`）。
+- `env[].build_time`：建置時寫入前端的變數（FR-AN-09）；`env[].varies_by_env`：值隨環境不同（網址、origin 類），staging 與 production 需各自建置。舊紀錄缺少時視為 false。
+- M5-08 新增的 finding `key`：`persistent_dir`（FR-AN-07）、`system_package`、`native_module`（FR-AN-08）、`build_env`（FR-AN-09）。
 
 **PATCH /api/projects/{id}** `{ "name"?, "git_ref"?, "root"? }` → `200 Project`；`git_ref` 或 `root` 改變時重新解析（`git_ref` 給空字串表示預設分支）。
 

@@ -32,3 +32,26 @@
 - [02 架構](../02-architecture.md) 的相依圖新增 `caloud-analyzer ──► caloud-orchestrator`。
 - `dockerfile_inline` 需要 Docker Compose 2.17 以上；Runner 的 BuildKit 環境（M4-09）須符合。
 - [01 需求](../01-requirements.md) FR-AN-01 補上合併規則。
+
+## 增補：持久化、系統套件與建置時變數（2026-11-18，M5-08）
+
+相關需求：FR-AN-07、FR-AN-08、FR-AN-09。偵測規則集中在 `caloud-analyzer` 的 `runtime` 模組。
+
+- **來源分工**：
+  - 範本來源：解析器直接修改產出的 Dockerfile 與 compose；
+  - compose／Dockerfile 來源：只產生判斷，不修改用戶的 Dockerfile 或 compose。
+- **系統套件與原生模組**（FR-AN-08）：
+  - 範本依依賴加裝。Node 與 Python 在安裝依賴前執行一次 `apt-get install --no-install-recommends`；Playwright 以框架指令安裝 Chromium；Go 的 cgo 依賴改用 `CGO_ENABLED=1` 與 debian runtime；Rust 依賴 `openssl-sys` 時加裝 `libssl-dev`／`libssl3`。
+  - 儲存庫根目錄的 `Aptfile` 列出的套件一併加裝。
+  - 用戶自己的 Dockerfile 原文沒有安裝所需套件時，列為中信心。
+  - 無法以範本處理者，列為中信心並建議自備 Dockerfile。
+- **持久化目錄**（FR-AN-07）：
+  - 偵測來源：程式碼寫入工作目錄下的相對路徑、`*_DIR`／`*_PATH` 等變數的預設值、SQLite 檔案、儲存庫中保留的空目錄。
+  - 範本以具名 volume `<服務>-<目錄>` 掛到 `/app/<目錄>`。
+  - compose 來源中 build 服務沒有掛載對應路徑時，列為中信心。
+  - 不掛 `/tmp`、絕對路徑與建置產物目錄。
+- **建置時變數**（FR-AN-09）：
+  - 前綴 `NEXT_PUBLIC_`、`VITE_`、`REACT_APP_`、`NUXT_PUBLIC_`、`PUBLIC_`、`EXPO_PUBLIC_`、`GATSBY_` 視為建置時變數，`EnvVar.build_time = true`。
+  - 範本以 Dockerfile `ARG` 加上 compose `build.args: NAME: ${NAME}` 傳入。
+  - 名稱含網址、origin 類字詞者標示 `varies_by_env`，提示 staging 與 production 需各自建置（M7 依環境建置）。
+
