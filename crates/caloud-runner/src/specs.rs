@@ -8,6 +8,9 @@ use sysinfo::{Disks, System};
 pub const DOCKER_ROOT: &str = "/var/lib/docker";
 
 /// 偵測目前主機的規格
+/// `scripts/runner-setup.sh` 安裝 runsc 的位置（ADR 0015）
+pub const GVISOR_RUNSC: &str = "/usr/local/lib/caloud/gvisor/runsc";
+
 pub fn detect() -> NodeSpecs {
     let mut sys = System::new();
     sys.refresh_memory();
@@ -23,8 +26,11 @@ pub fn detect() -> NodeSpecs {
         memory_bytes: sys.total_memory(),
         disk_free_bytes: disk_free(&mounts, Path::new(DOCKER_ROOT)),
         os: System::long_os_version().unwrap_or_else(|| std::env::consts::OS.to_string()),
-        gvisor: on_path("runsc"),
+        gvisor: on_path("runsc") || Path::new(GVISOR_RUNSC).exists(),
         buildkit: on_path("buildctl") || on_path("docker-buildx") || Path::new("/usr/libexec/docker/cli-plugins/docker-buildx").exists(),
+        // 由自我檢查填入（FR-OPS-12）
+        isolation: false,
+        self_check: None,
         agent_version: env!("CARGO_PKG_VERSION").to_string(),
     }
 }

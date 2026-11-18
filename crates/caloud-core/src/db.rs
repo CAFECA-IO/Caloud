@@ -73,9 +73,28 @@ pub async fn load_routes(db: &Db) -> anyhow::Result<Vec<Route>> {
                     .then(|| r.tls_port.map(|p| format!("{host}:{p}")))
                     .flatten(),
                 hostname: r.hostname,
-                // 單機 App 直接在控制面主機上；平臺環境（M7）會帶節點
+                // 單機 App 直接在控制面主機上
                 node: None,
             }
+        })
+        .chain(load_env_routes(db).await?)
+        .collect())
+}
+
+/// FR-OPS-13：running 的平臺環境經所在節點的通道轉發到對外服務的固定 IP（ADR 0015）
+async fn load_env_routes(db: &Db) -> anyhow::Result<Vec<Route>> {
+    let rows: Vec<(String, String, i64, String)> = sqlx::query_as(
+        "SELECT hostname, public_ip, public_port, node FROM environments WHERE status = 'running' AND public_ip IS NOT NULL",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(hostname, ip, port, node)| Route {
+            hostname,
+            upstream: format!("http://{ip}:{port}"),
+            passthrough: None,
+            node: Some(node),
         })
         .collect())
 }

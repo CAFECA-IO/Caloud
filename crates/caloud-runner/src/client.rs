@@ -1,4 +1,6 @@
 //! 連線控制面（ADR 0011、docs/06 §6）：register → ack → 定期心跳；斷線以指數退避重連。
+use crate::envs::EnvRunner;
+use crate::selfcheck::SelfCheck;
 use crate::specs::{self, Usage};
 use crate::state::{self, NodeState};
 use caloud_core::agent::{AgentMsg, ServerMsg, CONNECT_PATH};
@@ -10,7 +12,7 @@ use tokio_tungstenite::tungstenite::Message;
 /// 重連退避上限
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Default)]
 pub struct Options {
     /// 控制面網址，例如 `https://caloud.cafeca.io`
     pub server: String,
@@ -18,6 +20,10 @@ pub struct Options {
     pub join_token: Option<String>,
     pub name: String,
     pub state_dir: PathBuf,
+    /// 環境部署（FR-OPS-13）
+    pub envs: EnvRunner,
+    /// 啟動時的自我檢查結果（FR-OPS-12）
+    pub check: SelfCheck,
 }
 
 /// 由控制面網址算出 WebSocket 位址
@@ -57,7 +63,13 @@ pub async fn run_once(opts: &Options) -> anyhow::Result<Outcome> {
         join_token,
         node_token,
         name: opts.name.clone(),
-        specs: specs::detect(),
+        specs: {
+            let mut s = specs::detect();
+            s.gvisor |= opts.check.gvisor;
+            s.isolation = opts.check.isolation;
+            s.self_check = opts.check.reason.clone();
+            s
+        },
     };
     ws.send(Message::Text(serde_json::to_string(&register)?.into())).await?;
 
@@ -95,12 +107,15 @@ pub async fn run_once(opts: &Options) -> anyhow::Result<Outcome> {
             (node_id, heartbeat_secs.max(1), token)
         }
         ServerMsg::Error { message } => return Ok(Outcome::Rejected(message)),
-        ServerMsg::Status { .. } => anyhow::bail!("控制面回應順序錯誤"),
+        _ => anyhow::bail!("控制面回應順序錯誤"),
     };
 
     // 通道與控制連線同生共死：任一條斷線就整個重連（docs/06 §6.1）
     let server = opts.server.clone();
     let mut tunnel = AbortOnDrop(tokio::spawn(async move { crate::tunnel::run(&server, &node_token).await }));
+
+    // 環境部署的結果經這個通道送回控制面
+    let (results_tx, mut results) = tokio::sync::mpsc::unbounded_channel::<AgentMsg>();
 
     let mut usage = Usage::new();
     let mut tick = tokio::time::interval(Duration::from_secs(heartbeat_secs));
@@ -116,11 +131,33 @@ pub async fn run_once(opts: &Options) -> anyhow::Result<Outcome> {
                 Some(Ok(Message::Text(t))) => match serde_json::from_str::<ServerMsg>(&t) {
                     Ok(ServerMsg::Status { status }) => tracing::info!(node = %node_id, %status, "status changed"),
                     Ok(ServerMsg::Error { message }) => return Ok(Outcome::Rejected(message)),
+                    Ok(ServerMsg::Deploy { env }) => {
+                        let (runner, tx, isolated) = (opts.envs.clone(), results_tx.clone(), opts.check.isolation);
+                        tokio::spawn(async move {
+                            let msg = if isolated {
+                                runner.deploy(&env).await
+                            } else {
+                                AgentMsg::EnvStatus { env_id: env.id.clone(), status: "failed".into(), error: Some("節點未通過自我檢查，不接平臺環境。".into()), services: vec![] }
+                            };
+                            let _ = tx.send(msg);
+                        });
+                    }
+                    Ok(ServerMsg::Destroy { env_id }) => {
+                        let (runner, tx) = (opts.envs.clone(), results_tx.clone());
+                        tokio::spawn(async move {
+                            let _ = tx.send(runner.destroy(&env_id).await);
+                        });
+                    }
                     _ => {}
                 },
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                 Some(Ok(_)) => {}
             },
+            Some(msg) = results.recv() => {
+                if ws.send(Message::Text(serde_json::to_string(&msg)?.into())).await.is_err() {
+                    break;
+                }
+            }
             r = &mut tunnel.0 => {
                 match r {
                     Ok(Err(e)) => tracing::warn!(error = %e, "tunnel failed"),

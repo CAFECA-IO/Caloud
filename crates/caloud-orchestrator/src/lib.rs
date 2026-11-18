@@ -7,6 +7,7 @@
 pub mod compose;
 pub mod git;
 pub mod policy;
+pub mod sandbox;
 
 pub use compose::{ComposeRunner, DeploySpec, GitSource, ServiceStatus};
 pub use policy::{prepare_platform, validate, validate_with, PlatformCompose, Policy, PolicyError, ValidatedCompose};

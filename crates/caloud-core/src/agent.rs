@@ -25,7 +25,39 @@ pub struct NodeSpecs {
     pub os: String,
     pub gvisor: bool,
     pub buildkit: bool,
+    /// 自我檢查通過：gVisor、防火牆、磁碟、探測環境（FR-OPS-12）
+    #[serde(default)]
+    pub isolation: bool,
+    /// 自我檢查未通過的原因
+    #[serde(default)]
+    pub self_check: Option<String>,
     pub agent_version: String,
+}
+
+/// 控制面送給 agent 的環境（FR-OPS-13，ADR 0015）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvSpec {
+    /// 子網域 ID
+    pub id: String,
+    /// `production` | `staging` | `verify`
+    pub kind: String,
+    /// 已通過平臺政策的 compose（M4 只有 image）
+    pub compose: String,
+    /// 節點內的網段索引（ADR 0015）
+    pub subnet_index: u16,
+    pub public_service: String,
+}
+
+/// 環境中服務的固定 IP
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvService {
+    pub name: String,
+    pub ip: String,
+}
+
+/// 環境 ID：小寫英數，6–32 字元（也作為目錄名稱）
+pub fn valid_env_id(id: &str) -> bool {
+    (6..=32).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
 }
 
 /// agent → 控制面
@@ -42,6 +74,15 @@ pub enum AgentMsg {
     },
     Heartbeat {
         used: Resources,
+    },
+    /// 部署或刪除環境的結果：`running` | `failed` | `destroyed`
+    EnvStatus {
+        env_id: String,
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        #[serde(default)]
+        services: Vec<EnvService>,
     },
 }
 
@@ -61,6 +102,12 @@ pub enum ServerMsg {
     },
     Error {
         message: String,
+    },
+    Deploy {
+        env: EnvSpec,
+    },
+    Destroy {
+        env_id: String,
     },
 }
 

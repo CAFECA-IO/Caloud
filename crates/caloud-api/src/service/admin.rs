@@ -349,7 +349,8 @@ pub async fn new_env_id(s: &AppState, kind: EnvKind) -> ApiResult<(String, Strin
         }
         let hostname = format!("{id}.{}", pool.root);
         let taken: i64 = sqlx::query_scalar(
-            "SELECT (SELECT COUNT(*) FROM blocked_hosts WHERE hostname = ?1) + (SELECT COUNT(*) FROM domains WHERE hostname = ?1)",
+            "SELECT (SELECT COUNT(*) FROM blocked_hosts WHERE hostname = ?1) + (SELECT COUNT(*) FROM domains WHERE hostname = ?1) \
+             + (SELECT COUNT(*) FROM environments WHERE hostname = ?1)",
         )
         .bind(&hostname)
         .fetch_one(&s.db)
@@ -426,7 +427,7 @@ impl TryFrom<NodeRow> for Node {
     }
 }
 
-async fn get_node(s: &AppState, id: &str) -> ApiResult<Node> {
+pub(crate) async fn get_node(s: &AppState, id: &str) -> ApiResult<Node> {
     let row: Option<NodeRow> = sqlx::query_as("SELECT * FROM nodes WHERE id = ?")
         .bind(id)
         .fetch_optional(&s.db)

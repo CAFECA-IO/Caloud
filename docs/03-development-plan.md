@@ -94,8 +94,8 @@
 | M4-06 | 依容量選擇節點 | FR-OPS-08 | ✅ |
 | M4-07 | Edge 經 Runner 通道（yamux）轉發；WebSocket／Upgrade 轉發 | FR-OPS-09、FR-DOM-06 | ✅ |
 | M4-08 | `*.caloud.tw` wildcard 憑證（Cloudflare DNS-01）、rustls SNI、`:80` 轉 HTTPS | FR-OPS-10、FR-DOM-05、FR-DOM-08 | ⬜ |
-| M4-09 | 用戶容器以 gVisor 執行、環境網路隔離、封鎖 metadata；Runner 主機設定腳本與自我檢查 | FR-OPS-11、FR-OPS-12 | 🚧 |
-| M4-10 | Admin API 開出環境：environments 資料表、agent 部署與回報、路由經通道 | FR-OPS-13 | 🚧 |
+| M4-09 | 用戶容器以 gVisor 執行、環境網路隔離、封鎖 metadata；Runner 主機設定腳本與自我檢查 | FR-OPS-11、FR-OPS-12 | ✅ |
+| M4-10 | Admin API 開出環境：environments 資料表、agent 部署與回報、路由經通道 | FR-OPS-13 | ✅ |
 
 ### M5 GitHub 與解析
 

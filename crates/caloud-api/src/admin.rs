@@ -1,6 +1,7 @@
 //! 後台 Admin API（docs/06 §3.6）：只做請求解析，業務邏輯在 `service::admin`。
 use crate::error::ApiResult;
 use crate::service::admin::{self as svc, BlockedHost, DomainPool, Node, PoolInput, ReservedName};
+use crate::service::environments as envs;
 use crate::{AppState, CurrentUser};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -116,4 +117,23 @@ pub async fn activate_node(State(s): State<AppState>, me: CurrentUser, Path(id):
 pub async fn delete_node(State(s): State<AppState>, me: CurrentUser, Path(id): Path<String>) -> ApiResult<StatusCode> {
     svc::delete_node(&s, &me, &id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ───────────────────────── 平臺環境（FR-OPS-13） ─────────────────────────
+
+pub async fn list_envs(State(s): State<AppState>, me: CurrentUser) -> ApiResult<Json<Vec<envs::Environment>>> {
+    Ok(Json(envs::list(&s, &me).await?))
+}
+
+pub async fn create_env(
+    State(s): State<AppState>,
+    me: CurrentUser,
+    Json(b): Json<envs::EnvInput>,
+) -> ApiResult<(StatusCode, Json<envs::Environment>)> {
+    Ok((StatusCode::CREATED, Json(envs::create(&s, &me, b).await?)))
+}
+
+pub async fn delete_env(State(s): State<AppState>, me: CurrentUser, Path(sub): Path<String>) -> ApiResult<StatusCode> {
+    envs::delete(&s, &me, &sub).await?;
+    Ok(StatusCode::ACCEPTED)
 }

@@ -1459,6 +1459,7 @@ async fn runner_agent_joins_once_heartbeats_and_can_be_drained() {
         join_token: Some(join.clone()),
         name: "runner-test-1".into(),
         state_dir: env.dir.join("agent1"),
+        ..Default::default()
     };
     let o = opts.clone();
     let agent = tokio::spawn(async move { run_once(&o).await.unwrap() });
@@ -1548,6 +1549,7 @@ async fn silent_node_goes_offline_and_returns_on_reconnect() {
         join_token: Some(jt["token"].as_str().unwrap().to_string()),
         name: "runner-test-2".into(),
         state_dir: env.dir.join("agent2"),
+        ..Default::default()
     };
     let o = opts.clone();
     let agent = tokio::spawn(async move { run_once(&o).await });
@@ -1678,6 +1680,7 @@ async fn edge_forwards_through_runner_tunnel_and_upgrades() {
         join_token: Some(jt["token"].as_str().unwrap().to_string()),
         name: "runner-tunnel".into(),
         state_dir: env.dir.join("agent-tunnel"),
+        ..Default::default()
     };
     let o = opts.clone();
     let agent = tokio::spawn(async move { run_once(&o).await.unwrap() });
@@ -2037,4 +2040,152 @@ async fn project_fetch_errors_and_quota() {
         )
         .await;
     assert_eq!(st, StatusCode::CONFLICT, "{e}");
+}
+
+// ───────────────────────── M4-09／M4-10：平臺環境（ADR 0015） ─────────────────────────
+
+async fn wait_env(env: &Env, admin: &str, sub: &str, want: Option<&str>) -> Option<Value> {
+    for _ in 0..200 {
+        let (_, list) = env.call("GET", "/api/admin/environments", admin, None).await;
+        let found = list.as_array().unwrap().iter().find(|e| e["subdomain"] == sub).cloned();
+        match (&found, want) {
+            (None, None) => return None,
+            (Some(e), Some(w)) if e["status"] == w => return found,
+            _ => {}
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("environment {sub} never reached {want:?}");
+}
+
+// FR-OPS-12、FR-OPS-13：開出環境、經 agent 部署、路由帶節點、刪除
+#[tokio::test]
+async fn admin_opens_environment_on_isolated_runner() {
+    use caloud_runner::client::{run_once, Options};
+    use caloud_runner::envs::EnvRunner;
+    use caloud_runner::selfcheck::SelfCheck;
+    let env = Env::new().await;
+    let (admin, member) = admin_and_member(&env).await;
+    env.call(
+        "POST",
+        "/api/admin/domain-pools",
+        &admin,
+        Some(json!({ "root": "caloud.tw", "purposes": ["production", "staging", "verify"] })),
+    )
+    .await;
+    let compose = "services:\n  web:\n    image: nginx:1.27\n  cache:\n    image: redis:7\n";
+    let body = json!({ "kind": "verify", "compose_yaml": compose, "public_service": "web", "public_port": 80 });
+
+    // 沒有節點
+    let (st, _) = env.call("POST", "/api/admin/environments", &admin, Some(body.clone())).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+
+    let docker = env.dir.join("fake-docker.sh").display().to_string();
+    let start = |name: &'static str, check: SelfCheck| {
+        let env_ref = &env;
+        let docker = docker.clone();
+        let admin = admin.clone();
+        async move {
+            let (_, jt) = env_ref.call("POST", "/api/admin/nodes/join-tokens", &admin, Some(json!({}))).await;
+            let opts = Options {
+                server: env_ref.base.clone(),
+                join_token: Some(jt["token"].as_str().unwrap().to_string()),
+                name: name.into(),
+                state_dir: env_ref.dir.join(name),
+                envs: EnvRunner::new(docker, env_ref.dir.join(name), vec!["1.1.1.1".into()]),
+                check,
+            };
+            let agent = tokio::spawn(async move { run_once(&opts).await });
+            let node = wait_node(env_ref, &admin, name, "active").await;
+            (agent, node)
+        }
+    };
+
+    // 未通過自我檢查的節點不接環境
+    let (plain, node) = start(
+        "runner-plain",
+        SelfCheck {
+            gvisor: true,
+            isolation: false,
+            reason: Some("防火牆不完整".into()),
+        },
+    )
+    .await;
+    assert_eq!(node["specs"]["isolation"], false);
+    assert_eq!(node["specs"]["self_check"], "防火牆不完整");
+    let (st, e) = env.call("POST", "/api/admin/environments", &admin, Some(body.clone())).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{e}");
+
+    let (agent, node) = start(
+        "runner-iso",
+        SelfCheck {
+            gvisor: true,
+            isolation: true,
+            reason: None,
+        },
+    )
+    .await;
+    let node_id = node["id"].as_str().unwrap().to_string();
+    assert_eq!(node["specs"]["isolation"], true);
+
+    // 權限與輸入檢查
+    let (st, _) = env.call("POST", "/api/admin/environments", &member, Some(body.clone())).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    for bad in [
+        json!({ "kind": "verify", "compose_yaml": "services:\n  web:\n    build: .\n", "public_service": "web", "public_port": 80 }),
+        json!({ "kind": "verify", "compose_yaml": "services:\n  web:\n    image: x\n    privileged: true\n", "public_service": "web", "public_port": 80 }),
+        json!({ "kind": "verify", "compose_yaml": compose, "public_service": "nope", "public_port": 80 }),
+        json!({ "kind": "dev", "compose_yaml": compose, "public_service": "web", "public_port": 80 }),
+        json!({ "kind": "verify", "compose_yaml": compose, "public_service": "web", "public_port": 0 }),
+    ] {
+        let (st, _) = env.call("POST", "/api/admin/environments", &admin, Some(bad.clone())).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}");
+    }
+
+    let (st, e1) = env.call("POST", "/api/admin/environments", &admin, Some(body.clone())).await;
+    assert_eq!(st, StatusCode::CREATED, "{e1}");
+    let sub = e1["subdomain"].as_str().unwrap().to_string();
+    assert_eq!(sub.len(), 16, "verify 環境 16 字元");
+    assert_eq!(e1["hostname"], format!("{sub}.caloud.tw"));
+    assert_eq!(e1["node"], node_id.as_str());
+    assert_eq!(e1["subnet_index"], 0);
+    let running = wait_env(&env, &admin, &sub, Some("running")).await.unwrap();
+    assert_eq!(
+        running["services"],
+        json!([{ "name": "web", "ip": "10.240.0.10" }, { "name": "cache", "ip": "10.240.0.11" }])
+    );
+
+    // Edge 路由：經該節點通道到對外服務的固定 IP
+    env.routes.reload(&env.db).await.unwrap();
+    let up = env.routes.lookup_route(&format!("{sub}.caloud.tw")).expect("route");
+    assert_eq!(up.target, "http://10.240.0.10:80");
+    assert_eq!(up.node.as_deref(), Some(node_id.as_str()));
+    // agent 以 gVisor override 執行 docker compose
+    let override_file = env.dir.join(format!("runner-iso/envs/{sub}/caloud.override.yml"));
+    assert!(std::fs::read_to_string(override_file).unwrap().contains("runtime: runsc"));
+    assert!(env.docker_log().contains(&format!("compose -p caloud-env-{sub}")));
+
+    // 第二個環境用下一個網段；production 為 8 字元
+    let mut b2 = body.clone();
+    b2["kind"] = json!("production");
+    let (_, e2) = env.call("POST", "/api/admin/environments", &admin, Some(b2)).await;
+    assert_eq!(e2["subnet_index"], 1);
+    assert_eq!(e2["subdomain"].as_str().unwrap().len(), 8);
+    let (_, nodes) = env.call("GET", "/api/admin/nodes", &admin, None).await;
+    let n = nodes.as_array().unwrap().iter().find(|n| n["id"] == node_id.as_str()).unwrap();
+    assert_eq!(n["allocated"]["cpu_millis"], 1000, "每個服務保留 250m");
+
+    // 刪除：agent 清除後紀錄與路由消失
+    let (st, _) = env.call("DELETE", &format!("/api/admin/environments/{sub}"), &admin, None).await;
+    assert_eq!(st, StatusCode::ACCEPTED);
+    assert!(wait_env(&env, &admin, &sub, None).await.is_none());
+    assert!(env.routes.lookup_route(&format!("{sub}.caloud.tw")).is_none());
+    assert!(env.docker_log().contains("down -v --remove-orphans"));
+    let actions: Vec<String> = sqlx::query_scalar("SELECT action FROM audit_log WHERE action LIKE 'env_%' ORDER BY id")
+        .fetch_all(&env.db)
+        .await
+        .unwrap();
+    assert_eq!(actions, ["env_create", "env_create", "env_delete"]);
+    agent.abort();
+    plain.abort();
 }

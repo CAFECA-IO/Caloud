@@ -89,6 +89,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/nodes/{id}", delete(admin::delete_node))
         .route("/api/admin/nodes/{id}/drain", post(admin::drain_node))
         .route("/api/admin/nodes/{id}/activate", post(admin::activate_node))
+        .route("/api/admin/environments", get(admin::list_envs).post(admin::create_env))
+        .route("/api/admin/environments/{subdomain}", delete(admin::delete_env))
         // Runner agent（ADR 0011）
         .route(caloud_core::agent::CONNECT_PATH, get(agent::connect))
         .route(caloud_core::tunnel::TUNNEL_PATH, get(agent::tunnel))
