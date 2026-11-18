@@ -42,7 +42,7 @@
 | `caloud-proxy` | 反向代理、路由表、ACME HTTP-01 回應、TLS（M2）、WebSocket／Upgrade 轉接、Runner 通道（`TunnelRegistry`，FR-OPS-09） | hyper 1, arc-swap, tokio-yamux, tokio-util |
 | `caloud-api` | 服務層（權限、驗證、稽核）、REST API、MCP 端點、session 與 API 權杖、Admin API、Agent WebSocket 端點、內嵌 Web UI 與 Design System 靜態檔 | axum 0.8（ws）, tokio-yamux |
 | `caloud-analyzer` | 服務自動解析：讀儲存庫產生平臺 compose 與解析報告（信心度與依據），不執行任何程式（[ADR 0014](adr/0014-analyzer-crate.md)） | toml, serde_yaml |
-| `caloud-runner` | `caloud-agent` 執行檔：規格偵測、連線控制面、心跳、通道（[ADR 0012](adr/0012-runner-crate.md)） | sysinfo, tokio-tungstenite, tokio-yamux |
+| `caloud-runner` | `caloud-agent` 執行檔：規格偵測、連線控制面、心跳、通道、自我檢查、環境部署（[ADR 0012](adr/0012-runner-crate.md)、[ADR 0015](adr/0015-runner-sandbox.md)） | sysinfo, tokio-tungstenite, tokio-yamux |
 
 ### 相依規則（不可違反）
 
@@ -51,7 +51,7 @@ caloud ──► caloud-api ──► caloud-auth
                      ├──► caloud-orchestrator ──► caloud-core
                      ├──► caloud-proxy ─────────► caloud-core
                      └──► caloud-core
-caloud-runner（caloud-agent）──────────────► caloud-core
+caloud-runner（caloud-agent）──► caloud-orchestrator ──► caloud-core
 caloud-analyzer ──► caloud-orchestrator ──► caloud-core
 ```
 
@@ -59,7 +59,7 @@ caloud-analyzer ──► caloud-orchestrator ──► caloud-core
 - `caloud-auth`、`caloud-orchestrator`、`caloud-proxy` 彼此不互相依賴
 - 只有 `caloud-api` 處理 HTTP 請求／權限；只有 `caloud` 組裝與啟動
 - `caloud-analyzer` 只依賴 `caloud-orchestrator`（重用平臺 compose 政策）與 `caloud-core`；由 `caloud-api` 呼叫（M5-05）
-- `caloud-runner` 只依賴 `caloud-core`；與控制面共用的協定型別（`caloud_core::agent`）與調度函式（`caloud_core::placement`）放在 core
+- `caloud-runner` 只依賴 `caloud-core` 與 `caloud-orchestrator`（平臺 compose 政策與環境沙箱 override，ADR 0015）；與控制面共用的協定型別（`caloud_core::agent`）與調度函式（`caloud_core::placement`）放在 core
 - 新增 crate 或改變相依方向須寫 ADR
 
 ## 3. 登入流程（Sign in with CAFECA）
@@ -169,6 +169,7 @@ MCP 用戶端 ──POST /mcp (Bearer cld_…)──► mcp.rs ──► service
 | `node_join_tokens` | `token_hash` | 一次性加入權杖、擁有者、到期、使用時間 | FR-OPS-04 |
 | `projects` | `id`（UUID） | 平臺專案：擁有者、名稱、儲存庫網址、ref、預設分支、根目錄、狀態（analyzing／needs_review／confirmed／error）、錯誤、已確認的解析 | FR-GH-04、FR-AN-06、FR-AN-10 |
 | `analyses` | `id`（UUID） | 專案、ref、commit、解析結果（`caloud_analyzer::Analysis` JSON）、用戶編輯的 compose、對外服務、已確認的低信心項目、確認者與時間 | FR-AN-03、FR-AN-04、FR-AN-10 |
+| `environments` | `subdomain` | 環境：主機名稱、用途（production／staging／verify）、所在節點、節點內網段索引、compose、對外服務與 port、狀態（deploying／running／failed／destroying）、錯誤、服務 IP、建立者 | FR-OPS-13 |
 | `migrations`（M7） | `id`（UUID） | 專案、自訂網域、狀態（盤點／演練／凍結／已切換／已回退）、遷移權杖雜湊、快照位置、時間線 | FR-MIG-01～10 |
 | `migration_checks`（M7） | 自增 `id` | 遷移、類型（資料表／檔案／帳號／驗收清單）、對象、來源值、目標值、結果、簽核者 | FR-MIG-06、FR-MIG-07 |
 
@@ -179,6 +180,7 @@ users 1 ──< apps 1 ──< domains (app_id, ON DELETE SET NULL)
 users 1 ──< domains
 users 1 ──< nodes（owner，自有設備）
 users 1 ──< projects 1 ──< analyses（ON DELETE CASCADE）
+nodes 1 ──< environments（node, subnet_index 唯一）
 ```
 
 ### 狀態機：App.status
@@ -226,6 +228,8 @@ Runner 的 caloud-agent ──WebSocket（主動連出）──► 控制面 /ag
 舊主機的 caloud-agent --migrate ──（主動連出，一次性）──► 控制面（快照、雜湊、最後同步，ADR 0013）
 ```
 
+Runner 主機以 `scripts/runner-setup.sh install` 準備：安裝 gVisor、在 daemon.json 註冊 `runsc`、建立 `CALOUD-ENV-*` 防火牆 chain 與開機還原服務；`uninstall` 完整移除（[ADR 0015](adr/0015-runner-sandbox.md)）。環境容器以 gVisor 執行，每個環境一個 `cld<索引>` bridge 與固定網段，Edge 經通道連到對外服務的固定 IP。
+
 | 網域 | 用途 |
 | --- | --- |
 | `*.caloud.tw` | 用戶環境（8／12／16 字元子網域） |
@@ -252,3 +256,4 @@ Runner 的 caloud-agent ──WebSocket（主動連出）──► 控制面 /ag
 | [0012](adr/0012-runner-crate.md) | 新增 `caloud-runner` crate 與 `caloud-agent` 執行檔 |
 | [0013](adr/0013-service-migration.md) | 既有服務遷移：寫入凍結、agent 遷移模式、DNS-01 委派、hosts 預覽驗收 |
 | [0014](adr/0014-analyzer-crate.md) | 新增 `caloud-analyzer` crate；範本以 `dockerfile_inline` 帶入；附加服務 compose 與範本合併 |
+| [0015](adr/0015-runner-sandbox.md) | Runner 環境沙箱：gVisor、固定網段＋extra_hosts 名稱解析、`cld+` 防火牆、自我檢查 |

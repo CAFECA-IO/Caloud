@@ -214,6 +214,9 @@
 | `TunnelRegistry::dial(node, target)` | `caloud-proxy` | 連到上游：有節點走通道、否則 TCP | Edge（HTTP、TLS 直通）連上游一律經此；節點移除時呼叫 `remove` |
 | `policy::validate(yaml)` | `caloud-orchestrator` | compose 檢查 | 任何使用 compose 內容前都要先呼叫 |
 | `analyze(repo, &Options)` | `caloud-analyzer` | 平臺專案的服務自動解析（FR-AN-01～06） | 解析儲存庫的唯一入口；不自行讀儲存庫檔案判斷服務；結果的 compose 已經過 `prepare_platform` |
+| `sandbox::{EnvNet, env_override, service_ips, check_image_only}` | `caloud-orchestrator` | 平臺環境的 gVisor、網段、固定 IP、名稱解析 override（[ADR 0015](adr/0015-runner-sandbox.md)） | 控制面與 agent 共用；環境網段與 IP 只在此計算 |
+| `envs::EnvRunner`、`selfcheck::check` | `caloud-runner` | agent 端環境部署／刪除與自我檢查（FR-OPS-12、FR-OPS-13） | agent 執行 docker 只經 `EnvRunner`；自我檢查未通過不接平臺環境 |
+| `service::environments::*` | `caloud-api::service` | 平臺環境的開出、刪除與 agent 回報（FR-OPS-13） | 只經 AgentHub 送出 `deploy`／`destroy`，路由由 `load_routes` 產生 |
 | `policy::prepare_platform(yaml, depth)` | `caloud-orchestrator` | 平臺 App 的 compose 轉換與檢查（[07 §3.6](07-security.md#36-平臺-app-政策)） | 平臺專案的 compose 一律經此，不直接用 `validate_with` |
 | `ComposeRunner` | `caloud-orchestrator` | 部署／停止／刪除／狀態／log | 唯一可執行 `docker` 指令的地方；執行檔由 `Config.docker_bin` 指定 |
 | `RouteTable::reload(db)` | `caloud-proxy` | 重新載入路由 | 網域或 App 狀態改變後必呼叫（FR-DOM-04） |

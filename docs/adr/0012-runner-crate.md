@@ -10,7 +10,7 @@ Runner agent 跑在平臺節點與用戶設備上，與控制面是不同的執�
 
 ## 決策
 
-- 新增 crate `caloud-runner`，產生執行檔 `caloud-agent`：規格偵測、連線與重連、節點權杖保存。只依賴 `caloud-core`。
+- 新增 crate `caloud-runner`，產生執行檔 `caloud-agent`：規格偵測、連線與重連、節點權杖保存。只依賴 `caloud-core`。（2026-11-18 修訂：另依賴 `caloud-orchestrator`，見 [ADR 0015](0015-runner-sandbox.md)）
 - 協定訊息型別（`AgentMsg`、`ServerMsg`、`NodeSpecs`）與調度函式 `choose_node` 放在 `caloud-core`，讓控制面與 agent 共用。
 - 新依賴：`sysinfo`（跨平臺規格偵測）、`tokio-tungstenite`（agent 端 WebSocket）。
 

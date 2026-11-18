@@ -226,7 +226,9 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-OPS-08 | 調度依剩餘可配置量（偵測規格保留 10% 給主機）選擇節點；自有設備只接擁有者的工作 | P0 | M4 |
 | FR-OPS-09 | Edge 依 Host 路由到環境所在節點；經 Runner 主動建立的通道轉發 | P0 | M4 |
 | FR-OPS-10 | `*.caloud.tw` 與 `caloud.tw` 以 ACME DNS-01 經 Cloudflare API 申請 wildcard 憑證並自動續簽 | P0 | M4 |
-| FR-OPS-11 | 用戶容器以 gVisor 執行；環境之間網路不通；封鎖雲端 metadata 與平臺內網 | P0 | M4 |
+| FR-OPS-11 | 用戶容器以 gVisor 執行；環境之間網路不通；封鎖雲端 metadata、平臺內網、Runner 主機本身與外連 25 port（[ADR 0015](adr/0015-runner-sandbox.md)） | P0 | M4 |
+| FR-OPS-12 | Runner 啟動時自我檢查（gVisor runtime、防火牆、磁碟剩餘、以探測環境實際驗證隔離），結果顯示在節點規格；未通過的節點不接平臺環境 | P0 | M4 |
+| FR-OPS-13 | 維運者可經 Admin API 在節點開出、列出、刪除環境（image 版 compose），以「子網域 ID＋網域池根網域」經 Runner 通道對外 | P0 | M4 |
 
 ### 2.15 平臺：既有服務遷移 MIG
 

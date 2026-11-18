@@ -206,6 +206,9 @@
 | POST | `/api/admin/nodes/{id}/drain` | admin+ | FR-OPS-06 |
 | POST | `/api/admin/nodes/{id}/activate` | admin+ | FR-OPS-06 |
 | DELETE | `/api/admin/nodes/{id}` | admin+ | FR-OPS-06 |
+| GET | `/api/admin/environments` | admin+ | FR-OPS-13 |
+| POST | `/api/admin/environments` | admin+ | FR-OPS-13 |
+| DELETE | `/api/admin/environments/{subdomain}` | admin+ | FR-OPS-13 |
 
 **DomainPool**
 
@@ -230,7 +233,7 @@
 ```json
 { "id": "uuid", "name": "runner-tky-01", "owner": null, "status": "active",
   "specs": { "cpu_cores": 16, "arch": "x86_64", "memory_bytes": 68719476736, "disk_free_bytes": 1932735283200,
-             "os": "Ubuntu 24.04", "gvisor": true, "buildkit": true, "agent_version": "0.1.0" },
+             "os": "Ubuntu 24.04", "gvisor": true, "buildkit": true, "isolation": true, "self_check": null, "agent_version": "0.1.0" },
   "allocatable": { "cpu_millis": 14400, "memory_bytes": 61847529062 },
   "allocated": { "cpu_millis": 0, "memory_bytes": 0 },
   "used": { "cpu_millis": 820, "memory_bytes": 2147483648 },
@@ -245,6 +248,27 @@
 **POST /api/admin/nodes/{id}/drain** → `200 Node`（`draining`，不再接新工作，FR-OPS-06）；**/activate** → `200 Node`（`active`，節點須在線，離線回 `409`）。
 
 **DELETE /api/admin/nodes/{id}** → `204`；只有 `draining` 或 `offline` 的節點可移除，否則 `409`。移除後該節點權杖失效。
+
+- `specs.isolation`：agent 自我檢查通過（FR-OPS-12，[ADR 0015](adr/0015-runner-sandbox.md)）；`specs.self_check` 為未通過的原因（通過時為 null）。平臺環境只調度到 `isolation: true` 的平臺節點。
+
+**Environment**（FR-OPS-13）
+
+```json
+{ "subdomain": "k2m9xq7a4tz1ab3c", "hostname": "k2m9xq7a4tz1ab3c.caloud.tw", "kind": "verify",
+  "node": "uuid", "subnet_index": 0, "status": "running", "error": null,
+  "public_service": "web", "public_port": 80, "services": [ { "name": "web", "ip": "10.240.0.10" } ],
+  "created_by": "0x…", "created_at": 0, "updated_at": 0 }
+```
+
+- `status`：`deploying` → `running` | `failed`；刪除時 `destroying`，agent 回報後紀錄移除。
+- **POST** `{ "kind", "compose_yaml", "public_service", "public_port", "node_id"? }` → `201 Environment`（`deploying`）：
+  - `kind`：`production` | `staging` | `verify`；子網域 ID 依該用途的網域池產生（FR-ENV-07）。
+  - `compose_yaml` 以平臺政策（[07 §3.6](07-security.md#36-平臺-app-政策)）檢查；M4 只接受 image，含 `build` 回 `400`。
+  - `public_service` 必須在 compose 中；`public_port` 1–65535。
+  - 依可配置量選擇 `isolation: true` 的平臺節點（可指定 `node_id`）；沒有可用節點回 `409`；沒有對應網域池回 `400`。
+  - 調度時每個服務保留 250 millicores、512 MiB，執行上限為 1 核、1 GB、512 個 process（ADR 0015）。
+- **DELETE** → `202`；節點在線時送出 `destroy`，否則直接刪除紀錄。
+- 環境為 `running` 時，Edge 將 `hostname` 經該節點的通道轉發到對外服務的固定 IP 與 port（M4-07）。
 
 ### 3.7 專案（平臺）
 
@@ -378,6 +402,7 @@
 | --- | --- | --- |
 | `register` | `join_token` 或 `node_token`（擇一）、`name`、`specs`（同 Node.specs） | 必須是第一則，10 秒內未收到即關閉。首次以加入權杖註冊；之後以節點權杖重連 |
 | `heartbeat` | `used`（`cpu_millis`、`memory_bytes`，主機目前用量） | 每 `heartbeat_secs` 秒一次；第一則在 `ack` 後立即送出 |
+| `env_status` | `env_id`、`status`（`running`／`failed`／`destroyed`）、`error`?、`services`（`[{name, ip}]`） | 部署或刪除的結果 |
 
 **控制面 → Agent**
 
@@ -385,6 +410,8 @@
 | --- | --- | --- |
 | `ack` | `node_id`、`node_token`（只在以加入權杖註冊時出現）、`status`、`heartbeat_secs` | 註冊成功 |
 | `status` | `status` | 維運者排空或恢復節點時通知 |
+| `deploy` | `env`（`id`、`kind`、`compose`、`subnet_index`、`public_service`） | 部署或重新部署環境（FR-OPS-13）；agent 以平臺政策再檢查 compose |
+| `destroy` | `env_id` | 停止並刪除環境與其 volume |
 | `error` | `message` | 隨即關閉連線（權杖無效、已使用、已過期、格式錯誤、節點被移除）；agent 收到後不再重連 |
 
 - 加入權杖 `caloud_join_…`：一次性、最長 1 小時、只存 keccak 雜湊；使用後立即作廢，不論成功與否。

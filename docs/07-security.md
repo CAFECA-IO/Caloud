@@ -32,7 +32,9 @@
 | 遷移快照 | 資料庫與檔案（含個資）在傳輸或保存時外洩 | TLS 傳輸；平臺端加密保存；只供該專案的遷移環境還原；遷移完成或取消後依保留期刪除 | FR-MIG-03、FR-MIG-05 |
 | 自訂網域憑證委派 | 委派的 `_acme-challenge` 被用來替他人簽發憑證 | 委派目標名稱含隨機值且只綁定該網域；只在網域 TXT 驗證通過後申請 | FR-MIG-02 |
 | hosts 預覽 | 預覽影響其他用戶或被當作正式站 | 只有改 hosts 的那台電腦會連到 Caloud；遷移環境的寫入會在最後同步時被舊站資料覆蓋，驗收清單提示不要在預覽中做正式交易 | FR-MIG-07 |
-| 執行用戶程式碼 | 容器逃逸、打內網或 metadata | 控制面與 Runner 分機；gVisor；環境間網路不通；封鎖 `169.254.169.254` 與內網段 | FR-OPS-11 |
+| 執行用戶程式碼 | 容器逃逸、打內網或 metadata | 控制面與 Runner 分機；gVisor（runsc）；每個環境獨立 `cld<索引>` bridge 與固定網段；防火牆 `CALOUD-ENV-FWD` 丟棄往 10/8、172.16/12、192.168/16、169.254/16、100.64/10 與 TCP 25 的轉送，`CALOUD-ENV-IN` 丟棄環境連往 Runner 主機本身的封包（[ADR 0015](adr/0015-runner-sandbox.md)）；agent 收到的 compose 再以平臺政策檢查一次，且 M4 不接受 `build` | FR-OPS-11 |
+| Runner 自我檢查 | 未設定隔離的主機接到用戶環境 | 啟動時檢查 runsc、防火牆 chain、磁碟，並以兩個探測環境實際驗證；未通過的節點不被調度平臺環境 | FR-OPS-12 |
+| Runner 主機設定 | 設定腳本破壞主機上其他服務 | `runner-setup.sh` 只新增 Caloud 自己的 chain、檔案與 daemon.json 的 `runtimes.runsc`，預設 runtime 不變，以 reload 生效不重啟容器；`uninstall` 完整移除 | FR-OPS-11 |
 
 ## 2. 權限矩陣
 
