@@ -276,6 +276,8 @@ impl Env {
             cloudflare_api: format!("{mock_base}/cf"),
             github_api: format!("{mock_base}/gh"),
             github_web: format!("{mock_base}/ghweb"),
+            // 測試的服務 IP 不存在；健康檢查另以單元測試驗證
+            deploy_health_secs: 0,
         };
         let db = caloud_core::db::connect(&cfg.data_dir).await.unwrap();
         let routes = RouteTable::default();
@@ -2216,6 +2218,7 @@ async fn admin_opens_environment_on_isolated_runner() {
         SelfCheck {
             gvisor: true,
             isolation: false,
+            buildkit: false,
             reason: Some("防火牆不完整".into()),
         },
     )
@@ -2230,6 +2233,7 @@ async fn admin_opens_environment_on_isolated_runner() {
         SelfCheck {
             gvisor: true,
             isolation: true,
+            buildkit: false,
             reason: None,
         },
     )
@@ -2297,6 +2301,166 @@ async fn admin_opens_environment_on_isolated_runner() {
     assert_eq!(actions, ["env_create", "env_create", "env_delete"]);
     agent.abort();
     plain.abort();
+}
+
+async fn wait_deploy(env: &Env, cookie: &str, id: &str, done: impl Fn(&Value) -> bool) -> Value {
+    for _ in 0..300 {
+        let (_, v) = env.call("GET", &format!("/api/projects/{id}"), cookie, None).await;
+        if done(&v["deployment"]) {
+            return v["deployment"].clone();
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let (_, v) = env.call("GET", &format!("/api/projects/{id}"), cookie, None).await;
+    panic!("deployment never finished: {}", v["deployment"]);
+}
+
+// FR-ENV-12（ADR 0018）：確認後部署 → agent 取得原始碼、gVisor BuildKit 建置、啟動 → 健康檢查 → 網址
+#[tokio::test]
+#[allow(clippy::async_yields_async)] // 回傳 agent 的 JoinHandle，測試結束時 abort
+async fn project_deploys_to_production_through_runner() {
+    use caloud_runner::client::{run_once, Options};
+    use caloud_runner::envs::EnvRunner;
+    use caloud_runner::selfcheck::SelfCheck;
+    let env = Env::new().await;
+    let (admin, member) = admin_and_member(&env).await;
+    env.call(
+        "POST",
+        "/api/admin/domain-pools",
+        &admin,
+        Some(json!({ "root": "caloud.tw", "purposes": ["production", "staging", "verify"] })),
+    )
+    .await;
+    set_repo(
+        &env,
+        &[
+            ("package.json", "{\n  \"scripts\": {\n    \"build\": \"next build\",\n    \"start\": \"next start -p 4000\"\n  },\n  \"dependencies\": { \"next\": \"15\" }\n}\n"),
+            ("package-lock.json", "{}"),
+        ],
+    );
+    let (_, p) = env
+        .call(
+            "POST",
+            "/api/projects",
+            &member,
+            Some(json!({ "repo_url": "https://github.com/CAFECA-IO/SwarmStorage" })),
+        )
+        .await;
+    let id = p["id"].as_str().unwrap().to_string();
+    wait_project(&env, &member, &id).await;
+
+    // 未確認 → 409
+    let path = format!("/api/projects/{id}/deploy");
+    let deploy = || env.call("POST", &path, &member, None);
+    let (st, e) = deploy().await;
+    assert_eq!(st, StatusCode::CONFLICT, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("確認"));
+    let (st, _) = env
+        .call(
+            "PUT",
+            &format!("/api/projects/{id}/analysis"),
+            &member,
+            Some(json!({ "public_service": "web" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK);
+
+    // 沒有具備建置環境的節點 → 409
+    let start = |name: &'static str, buildkit: bool| {
+        let env_ref = &env;
+        let admin = admin.clone();
+        async move {
+            let (_, jt) = env_ref.call("POST", "/api/admin/nodes/join-tokens", &admin, Some(json!({}))).await;
+            let mut runner = EnvRunner::new(
+                env_ref.dir.join("fake-docker.sh").display().to_string(),
+                env_ref.dir.join(name),
+                vec!["1.1.1.1".into()],
+            );
+            runner.git_bin = env_ref.dir.join("fake-git.sh").display().to_string();
+            let opts = Options {
+                server: env_ref.base.clone(),
+                join_token: Some(jt["token"].as_str().unwrap().to_string()),
+                name: name.into(),
+                state_dir: env_ref.dir.join(name),
+                envs: runner,
+                check: SelfCheck {
+                    gvisor: true,
+                    isolation: true,
+                    buildkit,
+                    reason: None,
+                },
+            };
+            let agent = tokio::spawn(async move { run_once(&opts).await });
+            wait_node(env_ref, &admin, name, "active").await;
+            agent
+        }
+    };
+    let nobuild = start("runner-nobuild", false).await;
+    let (st, e) = deploy().await;
+    assert_eq!(st, StatusCode::CONFLICT, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("建置環境"), "{e}");
+    let agent = start("runner-build", true).await;
+
+    let (st, d) = deploy().await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    let sub = d["subdomain"].as_str().unwrap().to_string();
+    assert_eq!(sub.len(), 8, "production 8 字元");
+    assert_eq!(d["url"], format!("https://{sub}.caloud.tw"));
+    assert_eq!(d["commit"], "98b705d0123456789abcdef0123456789abcdef0");
+    // 進行中不可重複部署
+    let (st, _) = deploy().await;
+    assert_eq!(st, StatusCode::CONFLICT);
+
+    let d = wait_deploy(&env, &member, &id, |d| d["status"] == "running").await;
+    assert_eq!(d["stage"], "done");
+    assert!(d["error"].is_null());
+    let stages: Vec<&str> = d["logs"].as_array().unwrap().iter().map(|l| l["stage"].as_str().unwrap()).collect();
+    for s in ["fetch", "build", "health"] {
+        assert!(stages.contains(&s), "{s}: {}", d["logs"]);
+    }
+    assert!(d["logs"].to_string().contains("caloud-env/"), "{}", d["logs"]);
+    let docker_log = env.docker_log();
+    assert!(
+        docker_log.contains(&format!(
+            "run --rm --name caloud-build-{sub}-web --runtime runsc --network caloud-build"
+        )),
+        "{docker_log}"
+    );
+    let compose = std::fs::read_to_string(env.dir.join(format!("runner-build/envs/{sub}/compose.yml"))).unwrap();
+    assert!(compose.contains(&format!("image: caloud-env/{sub}/web:98b705d01234")), "{compose}");
+    // 路由：經節點通道到對外服務
+    let up = env.routes.lookup_route(&format!("{sub}.caloud.tw")).expect("route");
+    assert_eq!(up.target, "http://10.240.0.10:4000");
+
+    // 重新部署沿用同一個子網域；建置失敗時舊版繼續執行、路由不變
+    std::fs::write(env.dir.join("docker.fail"), "").unwrap();
+    let (st, d2) = deploy().await;
+    assert_eq!(st, StatusCode::ACCEPTED);
+    assert_eq!(d2["subdomain"], sub.as_str());
+    let d2 = wait_deploy(&env, &member, &id, |d| !d["error"].is_null()).await;
+    assert_eq!(
+        (d2["status"].as_str(), d2["stage"].as_str()),
+        (Some("running"), Some("build")),
+        "{d2}"
+    );
+    assert!(env.routes.lookup_route(&format!("{sub}.caloud.tw")).is_some());
+    std::fs::remove_file(env.dir.join("docker.fail")).unwrap();
+    deploy().await;
+    wait_deploy(&env, &member, &id, |d| d["stage"] == "done").await;
+
+    let actions: Vec<String> = sqlx::query_scalar("SELECT action FROM audit_log WHERE action = 'project_deploy'")
+        .fetch_all(&env.db)
+        .await
+        .unwrap();
+    assert_eq!(actions.len(), 3);
+
+    // 刪除專案：環境一併清除
+    let (st, _) = env.call("DELETE", &format!("/api/projects/{id}"), &member, None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    assert!(wait_env(&env, &admin, &sub, None).await.is_none());
+    assert!(env.routes.lookup_route(&format!("{sub}.caloud.tw")).is_none());
+    agent.abort();
+    nobuild.abort();
 }
 
 // ───────────────────────── Edge TLS 與憑證（ADR 0016） ─────────────────────────

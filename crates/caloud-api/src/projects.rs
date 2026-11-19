@@ -46,3 +46,8 @@ pub async fn confirm(
 ) -> ApiResult<Json<Project>> {
     Ok(Json(projects::confirm(&s, &me, &id, b).await?))
 }
+
+/// FR-ENV-12：部署到 production（ADR 0018）
+pub async fn deploy(State(s): State<AppState>, me: CurrentUser, Path(id): Path<String>) -> ApiResult<(StatusCode, Json<Value>)> {
+    Ok((StatusCode::ACCEPTED, Json(crate::service::deploy::deploy(&s, &me, &id).await?)))
+}

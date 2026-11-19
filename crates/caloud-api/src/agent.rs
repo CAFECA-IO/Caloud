@@ -141,9 +141,14 @@ async fn session(s: AppState, mut sock: WebSocket) {
                         Ok(false) => break,
                         Err(e) => tracing::warn!(error = %e, "heartbeat failed"),
                     },
-                    Ok(AgentMsg::EnvStatus { env_id, status, error, services }) => {
-                        if let Err(e) = crate::service::environments::report(&s, &node.id, &env_id, &status, error, services).await {
+                    Ok(AgentMsg::EnvStatus { env_id, status, stage, error, services }) => {
+                        if let Err(e) = crate::service::environments::report(&s, &node.id, &env_id, &status, stage, error, services).await {
                             tracing::warn!(error = %e, "environment status failed");
+                        }
+                    }
+                    Ok(AgentMsg::EnvLog { env_id, stage, line }) => {
+                        if let Err(e) = crate::service::environments::add_log(&s, Some(&node.id), &env_id, &stage, &line).await {
+                            tracing::warn!(error = %e, "deploy log failed");
                         }
                     }
                     _ => tracing::debug!(node = %node.id, "unexpected agent message"),

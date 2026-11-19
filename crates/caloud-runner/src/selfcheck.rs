@@ -23,6 +23,8 @@ pub struct SelfCheck {
     pub gvisor: bool,
     /// 全部通過
     pub isolation: bool,
+    /// 建置網路 `caloud-build` 與 BuildKit 映像就緒（ADR 0018）
+    pub buildkit: bool,
     /// 未通過的原因
     pub reason: Option<String>,
 }
@@ -32,6 +34,7 @@ impl SelfCheck {
         Self {
             gvisor,
             isolation: false,
+            buildkit: false,
             reason: Some(reason.into()),
         }
     }
@@ -113,10 +116,36 @@ pub async fn check(env: &EnvRunner, iptables: &str, disk_free: u64) -> SelfCheck
         Ok(()) => SelfCheck {
             gvisor: true,
             isolation: true,
+            buildkit: buildkit_ready(env).await,
             reason: None,
         },
         Err(e) => SelfCheck::fail(true, format!("探測環境未通過：{e}")),
     }
+}
+
+/// 建置網路的介面名稱須符合 `cld+`（沿用環境防火牆），BuildKit 映像已拉取
+async fn buildkit_ready(env: &EnvRunner) -> bool {
+    let bridge = env
+        .docker(
+            &[
+                "network",
+                "inspect",
+                crate::build::BUILD_NETWORK,
+                "--format",
+                "{{index .Options \"com.docker.network.bridge.name\"}}",
+            ],
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap_or_default();
+    bridge.trim().starts_with("cld")
+        && env
+            .docker(
+                &["image", "inspect", "--format", "{{.Id}}", &env.buildkit_image],
+                Duration::from_secs(30),
+            )
+            .await
+            .is_ok()
 }
 
 async fn probe(env: &EnvRunner) -> Result<(), String> {
@@ -128,6 +157,7 @@ async fn probe(env: &EnvRunner) -> Result<(), String> {
         compose: format!("services:\n{web}  probe:\n    image: {PROBE_IMAGE}\n    command: [\"sleep\", \"600\"]\n"),
         subnet_index: PROBE_INDEXES[0],
         public_service: "web".into(),
+        source: None,
     };
     let b = EnvSpec {
         id: PROBE_B.into(),
@@ -202,7 +232,7 @@ mod tests {
         let iptables_none = script(&base, "ipt-none.sh", "exit 1");
         let docker = |name: &str, runtimes: &str, probe: &str| {
             let body = format!(
-                "echo \"$*\" >> {log}\ncase \"$*\" in 'info '*) echo '{runtimes}';; *' exec '*) printf '{probe}';; esac; exit 0",
+                "echo \"$*\" >> {log}\ncase \"$*\" in 'info '*) echo '{runtimes}';; *' exec '*) printf '{probe}';; 'network inspect caloud-build'*) echo cldbuild;; esac; exit 0",
                 log = base.join("docker.log").display()
             );
             script(&base, name, &body)
@@ -225,6 +255,7 @@ mod tests {
             SelfCheck {
                 gvisor: true,
                 isolation: true,
+                buildkit: true,
                 reason: None
             }
         );

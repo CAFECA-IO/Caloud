@@ -41,6 +41,8 @@ pub struct Config {
     /// GitHub API 與網站（ADR 0017；測試時指向 mock）
     pub github_api: String,
     pub github_web: String,
+    /// 部署後健康檢查的等待秒數（ADR 0018）；0 表示不檢查（測試用）
+    pub deploy_health_secs: u64,
 }
 
 impl Config {
@@ -87,6 +89,7 @@ impl Config {
             cloudflare_api: get("CLOUDFLARE_API", "https://api.cloudflare.com/client/v4"),
             github_api: get("GITHUB_API", "https://api.github.com"),
             github_web: get("GITHUB_WEB", "https://github.com"),
+            deploy_health_secs: get("DEPLOY_HEALTH_SECS", "60").parse().unwrap_or(60),
         })
     }
 }

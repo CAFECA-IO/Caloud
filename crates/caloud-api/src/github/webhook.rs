@@ -130,7 +130,8 @@ async fn dispatch(s: &AppState, event: &str, v: &Value) -> anyhow::Result<()> {
                     Some(&format!("via=github; {event} {branch}")),
                 )
                 .await;
-                crate::service::projects::spawn_analysis(s.clone(), p);
+                // ADR 0018：push 到已部署的分支時，解析後自動重新部署
+                crate::service::projects::spawn_analysis(s.clone(), p, event == "push");
             }
         }
         _ => {}

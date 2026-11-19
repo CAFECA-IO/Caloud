@@ -268,7 +268,7 @@
 
 **DELETE /api/admin/nodes/{id}** → `204`；只有 `draining` 或 `offline` 的節點可移除，否則 `409`。移除後該節點權杖失效。
 
-- `specs.isolation`：agent 自我檢查通過（FR-OPS-12，[ADR 0015](adr/0015-runner-sandbox.md)）；`specs.self_check` 為未通過的原因（通過時為 null）。平臺環境只調度到 `isolation: true` 的平臺節點。
+- `specs.isolation`：agent 自我檢查通過（FR-OPS-12，[ADR 0015](adr/0015-runner-sandbox.md)）；`specs.self_check` 為未通過的原因（通過時為 null）。平臺環境只調度到 `isolation: true` 的平臺節點。`specs.buildkit`：建置網路 `caloud-build` 與 BuildKit 映像就緒（ADR 0018），從原始碼部署只調度到這類節點。
 
 **Environment**（FR-OPS-13）
 
@@ -349,12 +349,16 @@
 **POST /api/projects/{id}/deploy** → `202 Deployment`（FR-ENV-12，ADR 0018）：專案必須已確認（否則 `409`）；第一次部署時配置 production 環境（8 字元子網域，之後固定）；部署中再呼叫回 `409`；沒有可用節點回 `409`。`GET /api/projects/{id}` 另回 `deployment`（未部署為 null）：
 
 ```json
-{ "subdomain": "q7v2m4kx", "url": "https://q7v2m4kx.caloud.tw", "status": "deploying", "stage": "build",
+{ "subdomain": "q7v2m4kx", "hostname": "q7v2m4kx.caloud.tw", "url": "https://q7v2m4kx.caloud.tw",
+  "status": "deploying", "stage": "build", "in_progress": true, "pending_changes": false,
   "commit": "98b705d…", "error": null, "node": "uuid", "updated_at": 0,
   "logs": [ { "stage": "build", "line": "#5 [2/4] RUN npm ci", "at": 0 } ] }
 ```
 
-- `status`：`deploying` → `running` | `failed`；`stage`：`fetch`、`build`、`start`、`health`。`logs` 為最近 300 行。
+- `status`：`deploying` → `running` | `failed`；`stage`：`fetch`、`build`、`start`、`health`，成功後為 `done`。`logs` 為最近 300 行。
+- 重新部署時，`fetch`、`build` 階段舊版仍在執行（`status` 維持 `running`）；這兩個階段失敗時 `status` 仍為 `running`，`error` 與 `stage` 指出失敗的階段。進入 `start` 後舊版停止，路由暫時移除，健康檢查通過後恢復。
+- `pending_changes`：最新解析的 compose 與確認版本不同；確認前部署仍使用確認時的 commit。設定相同時部署最新解析的 commit。
+- 需要有通過自我檢查且具備建置環境（`specs.buildkit`）的平臺節點。
 
 ### 3.8 GitHub（ADR 0017）
 
@@ -463,7 +467,7 @@
 | --- | --- | --- |
 | `register` | `join_token` 或 `node_token`（擇一）、`name`、`specs`（同 Node.specs） | 必須是第一則，10 秒內未收到即關閉。首次以加入權杖註冊；之後以節點權杖重連 |
 | `heartbeat` | `used`（`cpu_millis`、`memory_bytes`，主機目前用量） | 每 `heartbeat_secs` 秒一次；第一則在 `ack` 後立即送出 |
-| `env_status` | `env_id`、`status`（`deploying`／`running`／`failed`／`destroyed`）、`stage`?（`fetch`／`build`／`start`）、`error`?、`services`（`[{name, ip}]`） | 部署進度與結果；`deploying` 只用於回報目前階段（ADR 0018） |
+| `env_status` | `env_id`、`status`（`deploying`／`running`／`failed`／`destroyed`）、`stage`?（`fetch`／`build`／`start`；`failed` 時為失敗的階段）、`error`?、`services`（`[{name, ip}]`） | 部署進度與結果；`deploying` 只用於回報目前階段（ADR 0018） |
 | `env_log` | `env_id`、`stage`、`line` | 部署過程的輸出，逐行；每行最多 500 字、每階段最多 2000 行 |
 
 **控制面 → Agent**

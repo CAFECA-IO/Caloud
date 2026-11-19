@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Runner 主機設定（ADR 0015、FR-OPS-11）：gVisor runtime 與環境防火牆。
+# Runner 主機設定（ADR 0015、ADR 0018、FR-OPS-11）：gVisor runtime、環境防火牆、建置環境與 agent 服務。
 #
-#   sudo scripts/runner-setup.sh install     # 安裝並生效（不重啟既有容器）
+#   sudo scripts/runner-setup.sh install [--agent <caloud-agent 執行檔>] [--server <控制面網址> --join <加入權杖>]
+#                                            # 安裝並生效（不重啟既有容器）；有 --server 時安裝並啟動 agent 服務
 #   sudo scripts/runner-setup.sh status      # 顯示目前狀態
-#   sudo scripts/runner-setup.sh uninstall   # 完整移除
+#   sudo scripts/runner-setup.sh uninstall   # 完整移除（含 agent 服務、節點權杖、建置網路與映像）
 #
 # 函式名稱以 do_ 開頭，避免遮蔽同名指令（例如 install）。
 # 只動 Caloud 自己的檔案與 chain：
@@ -11,6 +12,8 @@
 #   /etc/docker/daemon.json                  只合併 runtimes.runsc（預設 runtime 不變）
 #   iptables CALOUD-ENV-FWD（DOCKER-USER）、CALOUD-ENV-IN（INPUT）
 #   /etc/systemd/system/caloud-firewall.service  開機還原規則
+#   docker 網路 caloud-build（bridge cldbuild，10.239.0.0/24）與 BuildKit 映像（ADR 0018）
+#   /etc/systemd/system/caloud-agent.service、/etc/caloud/agent.env、/var/lib/caloud-agent/
 set -euo pipefail
 
 GVISOR_VERSION="20261116.0"
@@ -21,6 +24,13 @@ RUNSC="$PREFIX/gvisor/runsc"
 DAEMON_JSON=/etc/docker/daemon.json
 MARKER="$PREFIX/daemon-json-created"
 UNIT=/etc/systemd/system/caloud-firewall.service
+AGENT_UNIT=/etc/systemd/system/caloud-agent.service
+AGENT_ENV=/etc/caloud/agent.env
+AGENT_STATE=/var/lib/caloud-agent
+# 建置沙箱（ADR 0018）：介面名稱符合 cld+，沿用環境防火牆
+BUILD_NET=caloud-build
+BUILD_SUBNET=10.239.0.0/24
+BUILDKIT_IMAGE="moby/buildkit@sha256:5987568f92dafbfb679879de59c1cd8d26597f5f6635c314e166164e2615870c"
 # 環境網段介面（ADR 0015：bridge 名稱 cld<索引>）
 IFACE="cld+"
 BLOCKED="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10"
@@ -111,11 +121,53 @@ UNIT
   install -m 755 "$0" "$PREFIX/runner-setup.sh"
   systemctl daemon-reload
   systemctl enable caloud-firewall.service >/dev/null 2>&1
-  echo "✓ 完成。用 caloud-agent --self-check 驗證。"
+  echo "▸ 建置環境（網路 $BUILD_NET、BuildKit 映像）"
+  docker network inspect "$BUILD_NET" >/dev/null 2>&1 \
+    || docker network create --driver bridge --subnet "$BUILD_SUBNET" -o com.docker.network.bridge.name=cldbuild "$BUILD_NET" >/dev/null
+  docker pull -q "$BUILDKIT_IMAGE" >/dev/null
+  agent_install
+  echo "✓ 完成。用 $PREFIX/bin/caloud-agent --self-check --state-dir $AGENT_STATE 驗證。"
+}
+
+# agent 執行檔與 systemd 服務；加入權杖只寫入 root 可讀的 env 檔，註冊後改用節點權杖
+agent_install() {
+  if [ -n "$AGENT_BIN" ]; then
+    mkdir -p "$PREFIX/bin"
+    install -m 755 "$AGENT_BIN" "$PREFIX/bin/caloud-agent"
+  fi
+  [ -n "$SERVER" ] || return 0
+  [ -x "$PREFIX/bin/caloud-agent" ] || { echo "找不到 caloud-agent，請以 --agent 指定執行檔。" >&2; exit 1; }
+  echo "▸ agent 服務（$SERVER）"
+  mkdir -p "$(dirname "$AGENT_ENV")" "$AGENT_STATE"
+  chmod 700 "$AGENT_STATE"
+  ( umask 077
+    { echo "CALOUD_AGENT_SERVER=$SERVER"; [ -n "$JOIN" ] && echo "CALOUD_AGENT_JOIN=$JOIN"; } > "$AGENT_ENV" )
+  cat > "$AGENT_UNIT" <<UNIT
+[Unit]
+Description=Caloud Runner agent (ADR 0012, ADR 0018)
+After=docker.service caloud-firewall.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+EnvironmentFile=$AGENT_ENV
+ExecStart=$PREFIX/bin/caloud-agent --state-dir $AGENT_STATE
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable caloud-agent.service >/dev/null 2>&1
+  systemctl restart caloud-agent.service
 }
 
 do_uninstall() {
   need_root
+  systemctl disable --now caloud-agent.service >/dev/null 2>&1 || true
+  rm -f "$AGENT_UNIT" "$AGENT_ENV"; rm -rf "$AGENT_STATE"
+  docker network rm "$BUILD_NET" >/dev/null 2>&1 || true
+  docker image rm "$BUILDKIT_IMAGE" >/dev/null 2>&1 || true
   systemctl disable caloud-firewall.service >/dev/null 2>&1 || true
   rm -f "$UNIT"; systemctl daemon-reload
   firewall_down
@@ -138,13 +190,28 @@ do_status() {
   echo "防火牆 FWD:    $(iptables -S CALOUD-ENV-FWD 2>/dev/null | grep -c -- '-A' || true) 條"
   echo "防火牆 IN:     $(iptables -S CALOUD-ENV-IN 2>/dev/null | grep -c -- '-A' || true) 條"
   echo "開機還原:      $(systemctl is-enabled caloud-firewall.service 2>/dev/null || echo 未安裝)"
+  echo "建置網路:      $(docker network inspect "$BUILD_NET" --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || echo 未建立)"
+  echo "BuildKit:     $(docker image inspect --format '{{.Id}}' "$BUILDKIT_IMAGE" >/dev/null 2>&1 && echo 已拉取 || echo 未拉取)"
+  echo "agent 服務:    $(systemctl is-active caloud-agent.service 2>/dev/null || echo 未安裝)"
 }
 
-case "${1:-}" in
+AGENT_BIN="" SERVER="" JOIN=""
+cmd="${1:-}"; [ $# -gt 0 ] && shift
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --agent) AGENT_BIN="${2:?}"; shift 2 ;;
+    --server) SERVER="${2:?}"; shift 2 ;;
+    --join) JOIN="${2:?}"; shift 2 ;;
+    *) echo "未知參數：$1" >&2; exit 2 ;;
+  esac
+done
+case "$SERVER" in ""|https://*) ;; *) echo "--server 需以 https:// 開頭。" >&2; exit 2 ;; esac
+
+case "$cmd" in
   install) do_install ;;
   uninstall) do_uninstall ;;
   status) do_status ;;
   firewall-up) need_root; firewall_up ;;
   firewall-down) need_root; firewall_down ;;
-  *) echo "用法：$0 install|status|uninstall" >&2; exit 2 ;;
+  *) echo "用法：$0 install [--agent <執行檔>] [--server <網址> --join <權杖>]|status|uninstall" >&2; exit 2 ;;
 esac

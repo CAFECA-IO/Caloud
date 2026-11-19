@@ -87,6 +87,7 @@ const PAGES = [
   { id: "apps", label: "Apps", icon: "box", render: renderApps },
   { id: "domains", label: "網域", icon: "globe", render: renderDomains },
   { id: "users", label: "使用者", icon: "users", render: renderUsers, admin: true },
+  { id: "nodes", label: "Runner 節點", icon: "box", render: renderNodes, admin: true },
   { id: "tls", label: "HTTPS 憑證", icon: "shield", render: renderTls, admin: true },
   { id: "github", label: "GitHub App", icon: "key", render: renderGithubApp, admin: true },
   { id: "tokens", label: "API 權杖", icon: "key", render: renderTokens },
@@ -508,9 +509,11 @@ async function renderProject(id) {
   $("#page").innerHTML = pageHeader(p.name,
     `${repoShort(p.repo_url)} · ${p.git_ref || p.branch || "預設分支"}${commitShort ? ` · ${commitShort}` : ""}${p.root ? ` · 根目錄 ${p.root}/` : ""}`,
     `<a class="c-btn" href="#projects">專案列表</a><button class="c-btn" id="pj-reanalyze" ${analyzing ? "disabled" : ""}>${icon("refresh")}<span>重新解析</span></button><button class="c-btn c-btn--danger" id="pj-delete">${icon("trash")}<span>刪除</span></button>`) +
-    `<div class="l-row" role="list" aria-label="匯入步驟">${step(1, "選擇儲存庫", "done")}${step(2, "解析", analyzing ? "current" : r ? "done" : "")}${step(3, "確認設定", reviewState)}${step(4, "第一次驗證（尚未開放）", "")}</div>
+    `<div class="l-row" role="list" aria-label="匯入步驟">${step(1, "選擇儲存庫", "done")}${step(2, "解析", analyzing ? "current" : r ? "done" : "")}${step(3, "確認設定", reviewState)}${step(4, "部署", data.deployment?.stage === "done" && data.deployment.status === "running" ? "done" : data.deployment ? "current" : "")}</div>
     <div id="pj-banners" class="l-stack"></div>
+    <div id="pj-deploy"></div>
     <div id="pj-body" class="l-stack"></div>`;
+  drawDeploy(id, data);
 
   const banners = [];
   if (analyzing) banners.push(`<div class="c-banner">${icon("loader")}<div class="c-banner__body"><strong>正在取得並解析儲存庫</strong><span class="u-small">通常在一分鐘內完成，這頁會自動更新。</span></div></div>`);
@@ -521,7 +524,7 @@ async function renderProject(id) {
     const dirs = [...suggest.message.matchAll(/`([^`]+)\/`/g)].map((m) => m[1]);
     banners.push(`<div class="c-banner c-banner--warning">${icon("info")}<div class="c-banner__body"><strong>根目錄沒有可解析的檔案</strong><span class="u-small">${fmtMsg(suggest.message)}</span><div class="l-row">${dirs.map((d) => `<button class="c-btn c-btn--sm" data-root="${esc(d)}">改用 ${esc(d)}/ 重新解析</button>`).join("")}</div></div></div>`);
   } else if (r && !isConfirmedLatest && lows.length) banners.push(`<div class="c-banner c-banner--warning">${icon("alert")}<div class="c-banner__body"><strong>${lows.length} 個項目需要你確認</strong><span class="u-small">低信心的判斷在第一次驗證前需要確認；請檢查後在「判斷與依據」勾選。</span></div></div>`);
-  if (isConfirmedLatest) banners.push(`<div class="c-banner">${icon("check")}<div class="c-banner__body"><strong>已確認</strong><span class="u-small">${relTime(c.confirmed_at)} 確認${c.compose ? "（使用編輯過的 compose）" : ""}；對外服務 <code class="c-code">${esc(c.public_service)}</code>。驗證功能開放後會以這份設定執行。</span></div></div>`);
+  if (isConfirmedLatest) banners.push(`<div class="c-banner">${icon("check")}<div class="c-banner__body"><strong>已確認</strong><span class="u-small">${relTime(c.confirmed_at)} 確認${c.compose ? "（使用編輯過的 compose）" : ""}；對外服務 <code class="c-code">${esc(c.public_service)}</code>。按「部署」以這份設定上線。</span></div></div>`);
   $("#pj-banners").innerHTML = banners.join("");
 
   if (r) {
@@ -605,11 +608,55 @@ async function renderProject(id) {
     catch (err) { toast(err.message, "danger"); }
   }));
   $("#pj-delete").addEventListener("click", async () => {
-    if (!(await confirmDialog({ title: `刪除 ${p.name}？`, body: "解析紀錄與取得的原始碼會一併刪除，無法復原。", confirmText: "刪除專案" }))) return;
+    if (!(await confirmDialog({ title: `刪除 ${p.name}？`, body: "解析紀錄、取得的原始碼與部署的環境會一併刪除，無法復原。", confirmText: "刪除專案" }))) return;
     try { await api(`/api/projects/${id}`, { method: "DELETE" }); toast(`已刪除 ${p.name}`); location.hash = "projects"; }
     catch (err) { toast(err.message, "danger"); }
   });
   if (analyzing) pollTimer = setTimeout(() => currentPage() === "projects" && pageArg() === id && renderProject(id), 2000);
+}
+
+/** FR-ENV-12（ADR 0018）：部署卡片；部署中每 3 秒只更新這張卡片 */
+const DEPLOY_STAGES = [["fetch", "取得原始碼"], ["build", "建置"], ["start", "啟動"], ["health", "健康檢查"]];
+let deployTimer = null;
+function drawDeploy(id, data) {
+  const box = $("#pj-deploy"); if (!box) return;
+  clearTimeout(deployTimer);
+  const { confirmed: c, deployment: d } = data;
+  if (!c) return (box.innerHTML = "");
+  const at = d ? DEPLOY_STAGES.findIndex(([k]) => k === d.stage) : -1;
+  const doneAll = d?.stage === "done";
+  const stageBadge = ([k, label], i) => {
+    const cls = doneAll || (at >= 0 && i < at) ? "c-badge--success" : i === at && d.error ? "c-badge--danger" : i === at && d.in_progress ? "c-badge--accent c-badge--pulse" : "";
+    return `<span role="listitem" class="c-badge ${cls}"><span class="c-badge__dot" aria-hidden="true"></span>${i + 1} ${label}</span>`;
+  };
+  const live = d && d.status === "running";
+  const head = statusPill("deploy", !d ? "none" : d.in_progress ? "deploying" : live ? "running" : "failed");
+  const notes = [];
+  if (d?.error) notes.push(`<div class="c-banner c-banner--danger">${icon("alert")}<div class="c-banner__body"><strong>${live ? "這次部署失敗，仍在執行上一版" : "部署失敗"}</strong><span class="u-small">${esc(d.error)}</span></div></div>`);
+  if (d?.pending_changes) notes.push(`<div class="c-banner c-banner--warning">${icon("info")}<div class="c-banner__body"><strong>設定有變動，請重新確認</strong><span class="u-small">最新解析的 compose 與確認版本不同；確認前部署仍使用 ${esc(c.commit.slice(0, 7))} 的程式碼。</span></div></div>`);
+  const logs = d?.logs?.length ? d.logs.map((l) => `[${l.stage}] ${l.line}`).join("\n") : "";
+  box.innerHTML = `<section class="c-card"><div class="c-card__header"><h2 class="c-card__title">部署</h2>${head}<span class="l-spacer"></span>
+      ${live ? `<a class="c-btn c-btn--sm" href="${esc(d.url)}" target="_blank" rel="noopener">${icon("link")}<span>開啟網站</span></a>` : ""}
+      <button class="c-btn c-btn--primary c-btn--sm" id="pj-deploy-btn" ${d?.in_progress ? "disabled" : ""}>${icon("upload")}<span>${d ? "重新部署" : "部署"}</span></button></div>
+    <div class="c-card__body l-stack">
+      ${d ? `<p class="u-small">網址 <a class="u-mono" href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.hostname)}</a>${d.commit ? ` · 版本 <span class="u-mono">${esc(d.commit.slice(0, 7))}</span>` : ""} · ${relTime(d.updated_at)}更新</p>
+        <div class="l-row" role="list" aria-label="部署階段">${DEPLOY_STAGES.map(stageBadge).join("")}</div>`
+        : `<p class="u-small u-muted">部署到 production：在 Runner 以隔離的 BuildKit 建置、gVisor 執行，通過健康檢查後開放固定網址 <span class="u-mono">https://&lt;8 碼&gt;.caloud.tw</span>。</p>`}
+      ${notes.join("")}
+      ${logs ? `<pre class="c-log" aria-label="部署 log" id="pj-log">${esc(logs)}</pre>` : ""}
+      <span class="c-field__error" id="pj-deploy-err" role="alert"></span></div></section>`;
+  const log = $("#pj-log"); if (log) log.scrollTop = log.scrollHeight;
+  $("#pj-deploy-btn").addEventListener("click", async (e) => {
+    showMsg($("#pj-deploy-err"), null);
+    try { await busy(e.currentTarget, api(`/api/projects/${id}/deploy`, { method: "POST" })); toast("已開始部署"); pollDeploy(id); }
+    catch (err) { showMsg($("#pj-deploy-err"), err); }
+  });
+  if (d?.in_progress) deployTimer = setTimeout(() => pollDeploy(id), 3000);
+}
+async function pollDeploy(id) {
+  if (currentPage() !== "projects" || pageArg() !== id) return;
+  try { drawDeploy(id, await api(`/api/projects/${encodeURIComponent(id)}`)); }
+  catch (err) { toast(err.message, "danger"); }
 }
 
 // ─────────────── 網域 FR-DOM-* / FR-UI-06 / FR-UI-07 ───────────────
@@ -760,6 +807,52 @@ document.addEventListener("change", async (e) => {
 
 // ─────────────── HTTPS 憑證 FR-OPS-03、FR-OPS-10、FR-DOM-05（ADR 0016） ───────────────
 const PURPOSE_LABEL = { production: "Production", staging: "Staging", verify: "驗證", system: "系統" };
+// ─────────────── Runner 節點 FR-OPS-04 / FR-OPS-06 / FR-OPS-12（M4-11） ───────────────
+const GB = 1024 * 1024 * 1024;
+async function renderNodes() {
+  $("#page").innerHTML = pageHeader("Runner 節點", "平臺環境在 Runner 上以 gVisor 執行。節點通過自我檢查（gVisor、防火牆、磁碟、探測環境）才會接環境；從原始碼部署還需要建置環境。",
+    `<button class="c-btn c-btn--primary" id="new-node">${icon("plus")}<span>加入節點</span></button>`) +
+    `<section class="c-card"><div class="c-card__body c-card__body--flush"><div class="c-table-wrap"><table class="c-table">
+      <thead><tr><th>節點</th><th>狀態</th><th>自我檢查</th><th>已配置／可配置</th><th>最後回報</th><th><span class="u-sr-only">操作</span></th></tr></thead>
+      <tbody id="nodes">${skeletonRows(6)}</tbody></table></div></div></section>
+    <p class="c-msg c-msg--danger" id="nodes-msg" role="alert"></p>`;
+  $("#new-node").addEventListener("click", openJoin);
+  let nodes;
+  try { nodes = await api("/api/admin/nodes"); showMsg($("#nodes-msg"), null); }
+  catch (err) { return showMsg($("#nodes-msg"), err); }
+  $("#nodes").innerHTML = nodes.map((n) => {
+    const sp = n.specs;
+    const check = sp.isolation
+      ? `<span class="c-badge c-badge--success">隔離通過</span> ${sp.buildkit ? '<span class="c-badge c-badge--success">可建置</span>' : '<span class="c-badge c-badge--warning">未安裝建置環境</span>'}`
+      : `<span class="c-badge c-badge--danger">未通過</span><div class="c-table__secondary">${esc(sp.self_check || "")}</div>`;
+    return `<tr data-node="${esc(n.id)}">
+      <td><div class="c-table__primary">${esc(n.name)}</div><div class="c-table__secondary u-mono">${esc(n.id)} · ${sp.cpu_cores} 核 · ${(sp.memory_bytes / GB).toFixed(0)} GB · 磁碟剩 ${(sp.disk_free_bytes / GB).toFixed(0)} GB · agent ${esc(sp.agent_version)}</div></td>
+      <td>${statusPill("node", n.status)}</td>
+      <td class="u-small">${check}</td>
+      <td class="u-small u-nowrap u-mono">${n.allocated.cpu_millis}m / ${n.allocatable.cpu_millis}m<br>${(n.allocated.memory_bytes / GB).toFixed(1)} / ${(n.allocatable.memory_bytes / GB).toFixed(1)} GB</td>
+      <td class="u-small u-nowrap">${relTime(n.last_seen)}</td>
+      <td><div class="c-table__actions">${n.status === "draining" ? `<button class="c-btn c-btn--sm" data-node-act="activate">${icon("play")}<span>啟用</span></button>` : `<button class="c-btn c-btn--sm" data-node-act="drain">${icon("stop")}<span>排空</span></button>`}</div></td></tr>`;
+  }).join("") || `<tr><td colspan="6">${empty({ iconName: "box", title: "還沒有 Runner 節點", body: "按「加入節點」產生一次性加入權杖，在 Runner 主機上執行安裝指令。" })}</td></tr>`;
+}
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("#nodes [data-node-act]"); if (!b) return;
+  const id = b.closest("tr").dataset.node;
+  try { await busy(b, api(`/api/admin/nodes/${encodeURIComponent(id)}/${b.dataset.nodeAct}`, { method: "POST" })); toast(b.dataset.nodeAct === "drain" ? "已排空，不再接新環境" : "已啟用"); renderNodes(); }
+  catch (err) { toast(err.message, "danger"); }
+});
+async function openJoin() {
+  const dr = drawer({ title: "加入 Runner 節點", subtitle: "加入權杖只顯示這一次，60 分鐘內有效、只能使用一次。", onClose: () => currentPage() === "nodes" && renderNodes() });
+  dr.body.innerHTML = `<span class="c-skeleton"></span>`;
+  try {
+    const res = await api("/api/admin/nodes/join-tokens", { method: "POST", body: {} });
+    const cmd = `sudo ./scripts/runner-setup.sh install --server ${location.origin} --join ${res.token}`;
+    dr.body.innerHTML = `
+      <div class="c-field"><span class="c-label">加入權杖</span>${copyField(res.token, "加入權杖")}<span class="c-field__hint">${relTime(res.expires_at)}到期</span></div>
+      <div class="c-field"><span class="c-label">在 Runner 主機上執行（Ubuntu 22.04 以上，需要 Docker）</span>${copyField(cmd, "安裝指令")}
+        <span class="c-field__hint">安裝 gVisor、環境防火牆、建置網路與 BuildKit 映像，並以 systemd 啟動 caloud-agent。節點會在自我檢查後出現在列表。</span></div>`;
+  } catch (err) { dr.body.innerHTML = `<p class="c-msg c-msg--danger" role="alert">${esc(err.message)}</p>`; }
+}
+
 async function renderTls() {
   $("#page").innerHTML = pageHeader("HTTPS 憑證", "網域池設定 Cloudflare 權杖後，Caloud 以 DNS-01 申請 wildcard 憑證；已驗證並綁定 App 的網域以 HTTP-01 申請。到期前 30 天自動續簽。",
     `<button class="c-btn c-btn--primary" id="new-pool">${icon("plus")}<span>新增網域池</span></button>`) +

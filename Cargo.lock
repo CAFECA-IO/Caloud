@@ -895,6 +895,7 @@ dependencies = [
  "futures-util",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sysinfo",
  "tokio",
  "tokio-tungstenite",

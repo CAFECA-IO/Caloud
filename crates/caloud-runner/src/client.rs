@@ -67,6 +67,8 @@ pub async fn run_once(opts: &Options) -> anyhow::Result<Outcome> {
             let mut s = specs::detect();
             s.gvisor |= opts.check.gvisor;
             s.isolation = opts.check.isolation;
+            // ADR 0018：建置網路與 BuildKit 映像就緒
+            s.buildkit = opts.check.buildkit;
             s.self_check = opts.check.reason.clone();
             s
         },
@@ -135,9 +137,9 @@ pub async fn run_once(opts: &Options) -> anyhow::Result<Outcome> {
                         let (runner, tx, isolated) = (opts.envs.clone(), results_tx.clone(), opts.check.isolation);
                         tokio::spawn(async move {
                             let msg = if isolated {
-                                runner.deploy(&env).await
+                                runner.deploy_with(&env, Some(&tx)).await
                             } else {
-                                AgentMsg::EnvStatus { env_id: env.id.clone(), status: "failed".into(), error: Some("節點未通過自我檢查，不接平臺環境。".into()), services: vec![] }
+                                AgentMsg::EnvStatus { env_id: env.id.clone(), status: "failed".into(), stage: None, error: Some("節點未通過自我檢查，不接平臺環境。".into()), services: vec![] }
                             };
                             let _ = tx.send(msg);
                         });

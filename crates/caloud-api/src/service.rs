@@ -11,6 +11,7 @@ use caloud_orchestrator::{DeploySpec, GitSource, Policy, ValidatedCompose};
 use serde_json::{json, Value};
 
 pub mod admin;
+pub mod deploy;
 pub mod environments;
 pub mod projects;
 

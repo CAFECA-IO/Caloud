@@ -153,7 +153,7 @@ pub async fn create(s: &AppState, me: &CurrentUser, input: ProjectInput) -> ApiR
     )
     .await;
     let p = get_project(s, &id).await?;
-    spawn_analysis(s.clone(), p.clone());
+    spawn_analysis(s.clone(), p.clone(), false);
     Ok(p)
 }
 
@@ -196,10 +196,12 @@ pub async fn get(s: &AppState, me: &CurrentUser, id: &str) -> ApiResult<Value> {
         }
         None => None,
     };
+    let deployment = super::deploy::deployment(s, &p).await?;
     Ok(json!({
         "project": p,
         "analysis": last.as_ref().map(analysis_json),
         "confirmed": confirmed.as_ref().map(analysis_json),
+        "deployment": deployment,
     }))
 }
 
@@ -259,7 +261,7 @@ async fn start(s: &AppState, id: &str) -> ApiResult<()> {
     if n == 0 {
         return Err(ApiError::Conflict("正在解析，請稍候。".into()));
     }
-    spawn_analysis(s.clone(), get_project(s, id).await?);
+    spawn_analysis(s.clone(), get_project(s, id).await?, false);
     Ok(())
 }
 
@@ -280,6 +282,15 @@ pub async fn reanalyze(s: &AppState, me: &CurrentUser, id: &str) -> ApiResult<Pr
 
 pub async fn delete(s: &AppState, me: &CurrentUser, id: &str) -> ApiResult<()> {
     let p = owned(s, me, id).await?;
+    // 專案的環境一併刪除（FR-ENV-12）
+    let envs: Vec<String> = sqlx::query_scalar("SELECT subdomain FROM environments WHERE project = ?")
+        .bind(id)
+        .fetch_all(&s.db)
+        .await?;
+    for sub in envs {
+        let env = super::environments::get(s, &sub).await?;
+        super::environments::destroy(s, &env).await?;
+    }
     sqlx::query("DELETE FROM analyses WHERE project = ?")
         .bind(id)
         .execute(&s.db)
@@ -297,10 +308,11 @@ pub async fn delete(s: &AppState, me: &CurrentUser, id: &str) -> ApiResult<()> {
     Ok(())
 }
 
-/// 背景：取得儲存庫 → 解析 → 寫入一筆 analyses
-pub(crate) fn spawn_analysis(s: AppState, p: Project) {
+/// 背景：取得儲存庫 → 解析 → 寫入一筆 analyses；`deploy_after` 時解析成功後自動重新部署（GitHub push，ADR 0018）
+pub(crate) fn spawn_analysis(s: AppState, p: Project, deploy_after: bool) {
     tokio::spawn(async move {
         let out = run_analysis(&s, &p).await;
+        let deploy = deploy_after && out.is_ok();
         let t = now();
         let res = match out {
             Ok(()) => {
@@ -325,6 +337,9 @@ pub(crate) fn spawn_analysis(s: AppState, p: Project) {
         };
         if let Err(e) = res {
             tracing::error!(project = %p.id, error = %e, "failed to record analysis");
+        }
+        if deploy {
+            super::deploy::redeploy_after_push(&s, &p.id).await;
         }
     });
 }

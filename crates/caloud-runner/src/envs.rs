@@ -2,7 +2,8 @@
 //!
 //! 每個環境的檔案在 `<state>/envs/<id>/`：`compose.yml`、`caloud.override.yml`、`resolv.conf`；
 //! 以 `docker compose -p caloud-env-<id>` 執行，容器跑在 gVisor 與環境自己的網段。
-use caloud_core::agent::{valid_env_id, AgentMsg, EnvService, EnvSpec};
+use crate::build::{self, Log, BUILD_TIMEOUT};
+use caloud_core::agent::{valid_env_id, AgentMsg, EnvService, EnvSource, EnvSpec};
 use caloud_orchestrator::sandbox::{self, EnvNet, Limits};
 use caloud_orchestrator::{validate_with, Policy};
 use std::collections::HashMap;
@@ -11,6 +12,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::process::Command;
+use tokio::sync::mpsc::UnboundedSender;
 
 /// 一次部署的逾時
 const DEPLOY_TIMEOUT: Duration = Duration::from_secs(600);
@@ -22,6 +24,10 @@ pub struct EnvRunner {
     pub docker_bin: String,
     pub dir: PathBuf,
     pub dns: Vec<String>,
+    /// git CLI（從原始碼部署，ADR 0018）
+    pub git_bin: String,
+    /// 建置用的 BuildKit 映像
+    pub buildkit_image: String,
     locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
@@ -39,8 +45,20 @@ fn status(env_id: &str, status: &str, error: Option<String>, services: Vec<EnvSe
     AgentMsg::EnvStatus {
         env_id: env_id.to_string(),
         status: status.to_string(),
+        stage: None,
         error,
         services,
+    }
+}
+
+/// 部署失敗：附上失敗的階段
+fn failed_at(env_id: &str, stage: Option<&str>, error: String) -> AgentMsg {
+    AgentMsg::EnvStatus {
+        env_id: env_id.to_string(),
+        status: "failed".into(),
+        stage: stage.map(str::to_string),
+        error: Some(error),
+        services: vec![],
     }
 }
 
@@ -57,8 +75,14 @@ impl EnvRunner {
             docker_bin,
             dir: state_dir.join("envs"),
             dns,
+            git_bin: "git".into(),
+            buildkit_image: build::BUILDKIT_IMAGE.into(),
             locks: Default::default(),
         }
+    }
+
+    fn builds_dir(&self, env_id: &str) -> PathBuf {
+        self.dir.with_file_name("builds").join(env_id)
     }
 
     fn lock(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -106,30 +130,198 @@ impl EnvRunner {
 
     /// 由控制面送來的部署；索引不可使用自我檢查保留的範圍
     pub async fn deploy(&self, env: &EnvSpec) -> AgentMsg {
+        self.deploy_with(env, None).await
+    }
+
+    /// 同 [`deploy`](Self::deploy)，並把階段與 log 送到 `tx`（ADR 0018）
+    pub async fn deploy_with(&self, env: &EnvSpec, tx: Option<&UnboundedSender<AgentMsg>>) -> AgentMsg {
         if env.subnet_index > sandbox::MAX_ALLOC_INDEX {
             return status(&env.id, "failed", Some("網段索引超出範圍。".into()), vec![]);
         }
-        self.deploy_unchecked(env).await
+        self.deploy_inner(env, tx).await
     }
 
     pub(crate) async fn deploy_unchecked(&self, env: &EnvSpec) -> AgentMsg {
+        self.deploy_inner(env, None).await
+    }
+
+    async fn deploy_inner(&self, env: &EnvSpec, tx: Option<&UnboundedSender<AgentMsg>>) -> AgentMsg {
         if !valid_env_id(&env.id) {
             return status(&env.id, "failed", Some("環境 ID 格式錯誤。".into()), vec![]);
         }
         let lock = self.lock(&env.id);
         let _guard = lock.lock().await;
-        match self.try_deploy(env).await {
-            Ok(services) => status(&env.id, "running", None, services),
+        let stage = |s: &str| {
+            if let Some(tx) = tx {
+                let _ = tx.send(AgentMsg::EnvStatus {
+                    env_id: env.id.clone(),
+                    status: "deploying".into(),
+                    stage: Some(s.into()),
+                    error: None,
+                    services: vec![],
+                });
+            }
+        };
+        let compose = match &env.source {
+            None => env.compose.clone(),
+            Some(src) => match self.build_source(env, src, tx, &stage).await {
+                Ok(c) => c,
+                Err((st, e)) => {
+                    tracing::warn!(env = %env.id, stage = st, error = %e, "build failed");
+                    let _ = tokio::fs::remove_dir_all(self.builds_dir(&env.id)).await;
+                    return failed_at(&env.id, Some(st), short(&e.to_string()));
+                }
+            },
+        };
+        if env.source.is_some() {
+            stage("start");
+        }
+        match self.try_deploy(env, &compose).await {
+            Ok(services) => {
+                if env.source.is_some() {
+                    self.prune_images(&env.id).await;
+                }
+                status(&env.id, "running", None, services)
+            }
             Err(e) => {
                 tracing::warn!(env = %env.id, error = %e, "deploy failed");
-                status(&env.id, "failed", Some(short(&e.to_string())), vec![])
+                failed_at(&env.id, env.source.as_ref().map(|_| "start"), short(&e.to_string()))
             }
         }
     }
 
-    async fn try_deploy(&self, env: &EnvSpec) -> anyhow::Result<Vec<EnvService>> {
+    /// fetch → build；回傳改寫成 image 的 compose
+    async fn build_source(
+        &self,
+        env: &EnvSpec,
+        src: &EnvSource,
+        tx: Option<&UnboundedSender<AgentMsg>>,
+        stage: &(dyn Fn(&str) + Send + Sync),
+    ) -> Result<String, (&'static str, anyhow::Error)> {
+        let work = self.builds_dir(&env.id);
+        let repo = work.join("src");
+        stage("fetch");
+        let mut log = Log::new(tx, &env.id, "fetch");
+        log.line(&format!(
+            "取得 {} @ {}",
+            src.repo_url,
+            src.commit.chars().take(12).collect::<String>()
+        ));
+        self.fetch(src, &repo).await.map_err(|e| ("fetch", e))?;
+        log.line("完成");
+
+        stage("build");
+        let (jobs, compose) = build::plan(&env.compose, &repo, src, &env.id).map_err(|e| ("build", e))?;
+        let mut log = Log::new(tx, &env.id, "build");
+        let job = async {
+            let resolv = work.join("resolv.conf");
+            tokio::fs::write(&resolv, sandbox::resolv_conf(&self.dns)).await?;
+            for j in &jobs {
+                log.line(&format!("▶ 建置 {} → {}", j.service, j.tag));
+                let out = work.join("out");
+                let _ = tokio::fs::remove_dir_all(&out).await;
+                tokio::fs::create_dir_all(&out).await?;
+                set_mode(&out, 0o777).await;
+                let (df_dir, df_name) = match (&j.inline, &j.dockerfile) {
+                    (Some(text), _) => {
+                        let d = work.join("inline").join(build::container_name(&env.id, &j.service));
+                        tokio::fs::create_dir_all(&d).await?;
+                        tokio::fs::write(d.join("Dockerfile"), text).await?;
+                        (d, "Dockerfile".to_string())
+                    }
+                    (None, Some((d, f))) => (d.clone(), f.clone()),
+                    (None, None) => anyhow::bail!("service `{}` 沒有 Dockerfile", j.service),
+                };
+                let args = build::build_command(j, &env.id, &self.buildkit_image, &resolv, &df_dir, &df_name, &out);
+                let mut cmd = Command::new(&self.docker_bin);
+                cmd.args(&args);
+                build::run_logged(cmd, &mut log).await?;
+                let tar = out.join("image.tar").display().to_string();
+                let mut load = Command::new(&self.docker_bin);
+                load.args(["load", "-i", &tar]);
+                build::run_logged(load, &mut log).await?;
+                let _ = tokio::fs::remove_dir_all(&out).await;
+            }
+            anyhow::Ok(())
+        };
+        let res = tokio::time::timeout(BUILD_TIMEOUT, job).await;
+        // 逾時時 docker CLI 已被終止，建置容器要另外移除
+        if res.is_err() {
+            for j in &jobs {
+                let _ = self
+                    .docker(&["rm", "-f", &build::container_name(&env.id, &j.service)], Duration::from_secs(30))
+                    .await;
+            }
+        }
+        let _ = tokio::fs::remove_dir_all(&work).await;
+        match res {
+            Err(_) => Err(("build", anyhow::anyhow!("建置超過 20 分鐘，已中止。"))),
+            Ok(Err(e)) => Err(("build", e)),
+            Ok(Ok(())) => {
+                if jobs.is_empty() {
+                    log.line("沒有需要建置的服務");
+                }
+                Ok(compose)
+            }
+        }
+    }
+
+    async fn fetch(&self, src: &EnvSource, repo: &std::path::Path) -> anyhow::Result<()> {
+        use caloud_orchestrator::git::{fetch_repo, fetch_repo_with_auth};
+        let get = |r: Option<String>| {
+            let r = r.clone();
+            async move {
+                match &src.auth_header {
+                    Some(h) => fetch_repo_with_auth(&self.git_bin, repo, &src.repo_url, r.as_deref(), h).await,
+                    None => fetch_repo(&self.git_bin, repo, &src.repo_url, r.as_deref()).await,
+                }
+            }
+        };
+        // 先以 commit 取得；不支援時改取分支再比對
+        let fetched = match get(Some(src.commit.clone())).await {
+            Ok(f) => f,
+            Err(e) if src.git_ref.is_some() => {
+                tracing::debug!(error = %e, "fetch by commit failed, trying ref");
+                get(src.git_ref.clone()).await?
+            }
+            Err(e) => return Err(e),
+        };
+        if !fetched.commit.is_empty() && !src.commit.is_empty() && fetched.commit != src.commit {
+            anyhow::bail!(
+                "取得的版本 {} 與預期的 {} 不同，請重新部署。",
+                fetched.commit.chars().take(12).collect::<String>(),
+                src.commit.chars().take(12).collect::<String>()
+            );
+        }
+        Ok(())
+    }
+
+    /// 每個服務只保留最近的映像（ADR 0018）
+    async fn prune_images(&self, env_id: &str) {
+        let filter = format!("reference={}{env_id}/*", build::IMAGE_PREFIX);
+        let Ok(out) = self
+            .docker(
+                &["image", "ls", "--filter", &filter, "--format", "{{.Repository}}:{{.Tag}}"],
+                Duration::from_secs(30),
+            )
+            .await
+        else {
+            return;
+        };
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for img in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let repo = img.rsplit_once(':').map(|(r, _)| r).unwrap_or(img).to_string();
+            let n = seen.entry(repo).or_default();
+            *n += 1;
+            if *n > build::KEEP_IMAGES {
+                let _ = self.docker(&["rmi", img], Duration::from_secs(60)).await;
+            }
+        }
+    }
+
+    async fn try_deploy(&self, env: &EnvSpec, compose_yaml: &str) -> anyhow::Result<Vec<EnvService>> {
         // 控制面已檢查過；agent 再以同一份平臺政策檢查一次（docs/07）
-        let compose = validate_with(&env.compose, Policy::platform(0)).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let compose = validate_with(compose_yaml, Policy::platform(0)).map_err(|e| anyhow::anyhow!("{e}"))?;
         if !compose.services.contains(&env.public_service) {
             anyhow::bail!("compose 中沒有服務 `{}`", env.public_service);
         }
@@ -137,7 +329,7 @@ impl EnvRunner {
         let overlay = sandbox::env_override(&env.id, &compose, &net, Limits::default()).map_err(|e| anyhow::anyhow!(e))?;
         let dir = self.dir.join(&env.id);
         tokio::fs::create_dir_all(&dir).await?;
-        tokio::fs::write(dir.join("compose.yml"), &env.compose).await?;
+        tokio::fs::write(dir.join("compose.yml"), compose_yaml).await?;
         tokio::fs::write(dir.join("caloud.override.yml"), overlay).await?;
         tokio::fs::write(dir.join("resolv.conf"), sandbox::resolv_conf(&self.dns)).await?;
         self.compose(&env.id, &["up", "-d", "--wait", "--remove-orphans"], DEPLOY_TIMEOUT)
@@ -166,11 +358,40 @@ impl EnvRunner {
         match res {
             Ok(_) => {
                 let _ = tokio::fs::remove_dir_all(&dir).await;
+                let _ = tokio::fs::remove_dir_all(self.builds_dir(env_id)).await;
+                // 平臺建置的映像與建置快取（ADR 0018）
+                let filter = format!("reference={}{env_id}/*", build::IMAGE_PREFIX);
+                if let Ok(ids) = self
+                    .docker(&["image", "ls", "-q", "--filter", &filter], Duration::from_secs(30))
+                    .await
+                {
+                    let mut args = vec!["rmi", "-f"];
+                    args.extend(ids.split_whitespace());
+                    if args.len() > 2 {
+                        let _ = self.docker(&args, Duration::from_secs(120)).await;
+                    }
+                }
+                let _ = self
+                    .docker(
+                        &["volume", "rm", "-f", &format!("caloud-bkcache-{env_id}")],
+                        Duration::from_secs(60),
+                    )
+                    .await;
                 status(env_id, "destroyed", None, vec![])
             }
             Err(e) => status(env_id, "failed", Some(short(&e.to_string())), vec![]),
         }
     }
+}
+
+async fn set_mode(p: &std::path::Path, mode: u32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).await;
+    }
+    #[cfg(not(unix))]
+    let _ = (p, mode);
 }
 
 #[cfg(test)]
@@ -208,6 +429,7 @@ mod tests {
             compose: compose.into(),
             subnet_index: idx,
             public_service: "web".into(),
+            source: None,
         };
         let ok = "services:\n  web:\n    image: nginx:1.27\n  db:\n    image: postgres:16\n";
         match r.deploy(&spec(ok, 3)).await {
@@ -271,6 +493,99 @@ mod tests {
         assert!(std::fs::read_to_string(base.join("docker.log"))
             .unwrap()
             .contains("down -v --remove-orphans"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // FR-ENV-12、ADR 0018：fetch → build（gVisor BuildKit）→ start，回報階段與 log
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn deploys_from_source_with_stages_and_logs() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("caloud-envs-src-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join("app")).unwrap();
+        std::fs::write(repo.join("app/Dockerfile"), "FROM alpine\n").unwrap();
+        let git = base.join("git.sh");
+        std::fs::write(
+            &git,
+            format!(
+                "#!/bin/sh\necho \"$* [auth=${{GIT_CONFIG_VALUE_0:-none}}]\" >> '{log}'\ncase \"$*\" in *' checkout '*) cp -R '{repo}/.' \"$2\";; *' rev-parse '*) echo 98b705d0123456789abcdef0123456789abcdef0;; esac\nexit 0\n",
+                log = base.join("git.log").display(),
+                repo = repo.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // 建置失敗：buildctl 輸出含 boom
+        let docker = fake_docker(
+            &base,
+            "case \"$*\" in *buildctl-daemonless*) echo '#5 RUN make'; case \"$*\" in *fail-me*) echo 'boom' >&2; exit 1;; esac;; esac",
+        );
+        let mut r = EnvRunner::new(docker, base.join("state"), vec!["1.1.1.1".into()]);
+        r.git_bin = git.display().to_string();
+        let mut spec = EnvSpec {
+            id: "k2m9xq7a".into(),
+            kind: "production".into(),
+            compose: "services:\n  web:\n    build: ./app\n  db:\n    image: postgres:16\n".into(),
+            subnet_index: 5,
+            public_service: "web".into(),
+            source: Some(EnvSource {
+                repo_url: "https://github.com/a/b".into(),
+                commit: "98b705d0123456789abcdef0123456789abcdef0".into(),
+                git_ref: Some("main".into()),
+                compose_dir: String::new(),
+                auth_header: Some("AUTHORIZATION: basic c2VjcmV0".into()),
+            }),
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let res = r.deploy_with(&spec, Some(&tx)).await;
+        assert!(matches!(&res, AgentMsg::EnvStatus { status, .. } if status == "running"), "{res:?}");
+        let mut stages = Vec::new();
+        let mut logs = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            match m {
+                AgentMsg::EnvStatus { stage: Some(s), .. } => stages.push(s),
+                AgentMsg::EnvLog { stage, line, .. } => logs.push(format!("{stage}: {line}")),
+                m => panic!("{m:?}"),
+            }
+        }
+        assert_eq!(stages, ["fetch", "build", "start"]);
+        assert!(logs.iter().any(|l| l == "build: #5 RUN make"), "{logs:?}");
+        let compose = std::fs::read_to_string(base.join("state/envs/k2m9xq7a/compose.yml")).unwrap();
+        assert!(compose.contains("image: caloud-env/k2m9xq7a/web:98b705d01234") && !compose.contains("build"));
+        let log = std::fs::read_to_string(base.join("docker.log")).unwrap();
+        assert!(
+            log.contains("run --rm --name caloud-build-k2m9xq7a-web --runtime runsc --network caloud-build"),
+            "{log}"
+        );
+        assert!(log.contains("load -i"));
+        // 權杖只經環境變數給 git，不在參數中
+        let glog = std::fs::read_to_string(base.join("git.log")).unwrap();
+        assert!(glog
+            .contains("fetch -q --depth 1 --no-tags https://github.com/a/b 98b705d0123456789abcdef0123456789abcdef0 [auth=AUTHORIZATION"));
+        assert!(!glog.lines().any(|l| l.split(" [auth=").next().unwrap().contains("c2VjcmV0")));
+        assert!(!base.join("state/builds/k2m9xq7a").exists(), "原始碼建置後清除");
+        assert!(!format!("{:?}", spec.source).contains("c2VjcmV0"));
+
+        // 建置失敗：回報失敗階段與最後幾行 log，不動到 compose
+        spec.compose = "services:\n  web:\n    build: {context: ./app, args: {X: fail-me}}\n".into();
+        match r.deploy_with(&spec, None).await {
+            AgentMsg::EnvStatus { status, stage, error, .. } => {
+                assert_eq!((status.as_str(), stage.as_deref()), ("failed", Some("build")));
+                assert!(error.unwrap().contains("boom"));
+            }
+            m => panic!("{m:?}"),
+        }
+        // 版本不符
+        spec.source.as_mut().unwrap().commit = "1111111111111111111111111111111111111111".into();
+        match r.deploy_with(&spec, None).await {
+            AgentMsg::EnvStatus { stage, error, .. } => {
+                assert_eq!(stage.as_deref(), Some("fetch"));
+                assert!(error.unwrap().contains("不同"));
+            }
+            m => panic!("{m:?}"),
+        }
         let _ = std::fs::remove_dir_all(&base);
     }
 }

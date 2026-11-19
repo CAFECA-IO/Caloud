@@ -49,8 +49,10 @@ const UI = (() => {
     role: { super_admin: ["Super Admin", "accent"], admin: ["Admin", "accent"], member: ["Member", ""], pending: ["待核准", "warning"], disabled: ["已停用", "danger"] },
     project: { analyzing: ["解析中", "warning", true], needs_review: ["待確認", "warning"], confirmed: ["已確認", "success"], error: ["失敗", "danger"] },
     confidence: { high: ["高", "success"], medium: ["中", "warning"], low: ["低", "danger"] },
+    deploy: { none: ["尚未部署", ""], deploying: ["部署中", "accent", true], running: ["運作中", "success"], failed: ["失敗", "danger"] },
+    node: { active: ["運作中", "success"], draining: ["排空中", "warning"], offline: ["離線", "danger"] },
   };
-  /** 產生 Badge（StatusPill）HTML；kind 為 app／domain／route／tls／role／project／confidence */
+  /** 產生 Badge（StatusPill）HTML；kind 為 app／domain／route／tls／role／project／confidence／deploy／node */
   function statusPill(kind, value) {
     const [label, tone, pulse] = STATUS[kind][String(value)] || [String(value), ""];
     const cls = ["c-badge", tone && `c-badge--${tone}`, pulse && "c-badge--pulse"].filter(Boolean).join(" ");

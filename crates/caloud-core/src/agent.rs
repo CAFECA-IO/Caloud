@@ -41,12 +41,46 @@ pub struct EnvSpec {
     pub id: String,
     /// `production` | `staging` | `verify`
     pub kind: String,
-    /// 已通過平臺政策的 compose（M4 只有 image）
+    /// 已通過平臺政策的 compose；有 `source` 時可含 `build`（ADR 0018）
     pub compose: String,
     /// 節點內的網段索引（ADR 0015）
     pub subnet_index: u16,
     pub public_service: String,
+    /// 從原始碼建置（ADR 0018）；None 表示 compose 只用 image
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<EnvSource>,
 }
+
+/// 原始碼位置；`auth_header` 只在記憶體使用，Debug 輸出遮蔽（ADR 0018）
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvSource {
+    pub repo_url: String,
+    /// 40 字元 commit
+    pub commit: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
+    /// compose 所在目錄（儲存庫相對）；build context 以此為基準
+    #[serde(default)]
+    pub compose_dir: String,
+    /// git 的 `http.extraHeader`（私有儲存庫）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_header: Option<String>,
+}
+
+impl std::fmt::Debug for EnvSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnvSource")
+            .field("repo_url", &self.repo_url)
+            .field("commit", &self.commit)
+            .field("git_ref", &self.git_ref)
+            .field("compose_dir", &self.compose_dir)
+            .field("auth_header", &self.auth_header.as_ref().map(|_| "***"))
+            .finish()
+    }
+}
+
+/// 部署階段（ADR 0018）
+pub const STAGES: [&str; 4] = ["fetch", "build", "start", "health"];
 
 /// 環境中服務的固定 IP
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,14 +109,22 @@ pub enum AgentMsg {
     Heartbeat {
         used: Resources,
     },
-    /// 部署或刪除環境的結果：`running` | `failed` | `destroyed`
+    /// 部署進度與結果：`deploying`（附 stage）| `running` | `failed` | `destroyed`
     EnvStatus {
         env_id: String,
         status: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        stage: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
         #[serde(default)]
         services: Vec<EnvService>,
+    },
+    /// 部署輸出，逐行（ADR 0018）
+    EnvLog {
+        env_id: String,
+        stage: String,
+        line: String,
     },
 }
 
@@ -137,6 +179,20 @@ mod tests {
         let s = serde_json::to_string(&ack).unwrap();
         assert_eq!(s, r#"{"type":"ack","node_id":"n","status":"active","heartbeat_secs":15}"#);
         assert!(valid_node_name("runner-tky-01"));
+        // ADR 0018：權杖不出現在 Debug；舊訊息沒有 source 仍可解析
+        let src = EnvSource {
+            repo_url: "https://github.com/a/b".into(),
+            commit: "c".repeat(40),
+            git_ref: None,
+            compose_dir: String::new(),
+            auth_header: Some("Authorization: Basic c2VjcmV0".into()),
+        };
+        assert!(!format!("{src:?}").contains("c2VjcmV0"));
+        let d: ServerMsg = serde_json::from_str(
+            r#"{"type":"deploy","env":{"id":"abcdefgh","kind":"verify","compose":"services: {}","subnet_index":1,"public_service":"web"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(d, ServerMsg::Deploy { env } if env.source.is_none()));
         assert!(!valid_node_name("-x"));
         assert!(!valid_node_name("Runner"));
     }
