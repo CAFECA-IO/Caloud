@@ -110,7 +110,7 @@
 | M5-06 | 平臺 App compose 政策（repo 內 build、`env_file` 轉換） | FR-AN-05 | ✅ |
 | M5-07 | 子目錄（monorepo）根目錄 | FR-AN-06 | ✅ |
 | M5-08 | 偵測持久化目錄、系統套件與原生模組、建置時變數（[ADR 0014](adr/0014-analyzer-crate.md) 增補） | FR-AN-07、FR-AN-08、FR-AN-09 | ✅ |
-| M5-09 | 服務間位址自動填入（`localhost:port` → 服務名稱）；持久化偵測補強（`process.cwd()` 組合路徑、`*_DATA_DIR` 自動掛 volume 並填入變數）。下一輪（SwarmStorage 部署回饋） | FR-AN-11、FR-AN-07 | ⬜ |
+| M5-09 | 服務間位址自動填入（`localhost:port` → 服務名稱）；持久化偵測補強（`process.cwd()` 組合路徑、`*_DATA_DIR` 自動掛 volume 並填入變數）。下一輪（SwarmStorage 部署回饋） | FR-AN-11、FR-AN-07 | 🚧 |
 
 ### M6 驗證與報告
 
@@ -131,7 +131,7 @@
 | --- | --- | --- | --- |
 | M7-01 | 發布、production 藍綠切換、回滾、發布關卡 | FR-ENV-01、FR-ENV-03、FR-ENV-04 | ⬜ |
 | M7-02 | Staging 隨選部署、休眠與喚醒 | FR-ENV-02 | ⬜ |
-| M7-03 | 秘密變數（加密、依環境、遮蔽）；專案頁依「環境變數」表填值，部署時注入。下一輪，提前於 M7 其他項目 | FR-ENV-05、FR-APP-11 | ⬜ |
+| M7-03 | 秘密變數（加密、依環境、遮蔽）；專案頁依「環境變數」表填值，部署時注入（[ADR 0019](adr/0019-project-vars.md)）。提前於 M7 其他項目 | FR-ENV-05、FR-APP-11 | 🚧 |
 | M7-04 | 自訂網域：驗證、憑證、直通、每日重驗、萬用字元網域 | FR-DOM-08、FR-DOM-11～13 | ⬜ |
 | M7-05 | 用戶自有設備：加入、執行位置、通道 | FR-DEV-01～03 | ⬜ |
 | M7-06 | 容量告警、離線節點重建 | FR-OPS-07 | ⬜ |

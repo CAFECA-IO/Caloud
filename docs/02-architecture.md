@@ -182,6 +182,7 @@ MCP 用戶端 ──POST /mcp (Bearer cld_…)──► mcp.rs ──► service
 | `analyses` | `id`（UUID） | 專案、ref、commit、解析結果（`caloud_analyzer::Analysis` JSON）、用戶編輯的 compose、對外服務、已確認的低信心項目、確認者與時間 | FR-AN-03、FR-AN-04、FR-AN-10 |
 | `environments` | `subdomain` | 環境：所屬專案、部署的 commit 與階段（fetch／build／start／health／done）、主機名稱、用途（production／staging／verify）、所在節點、節點內網段索引、compose、對外服務與 port、狀態（deploying／running／failed／destroying）、錯誤、服務 IP、建立者 | FR-OPS-13 |
 | `deploy_logs` | 自增 `id` | 部署 log：環境、階段、內容、時間；每個環境保留最近 2000 行（ADR 0018） | FR-ENV-12 |
+| `project_vars` | `(project, env, name)` | 秘密變數：值以主金鑰加密、提示（末 4 碼）、是否平臺產生、更新者與時間；`projects.vars_rev` 每次變更加 1，`environments.vars_rev` 記錄部署時的版本（ADR 0019） | FR-ENV-05、FR-APP-11 |
 | `migrations`（M7） | `id`（UUID） | 專案、自訂網域、狀態（盤點／演練／凍結／已切換／已回退）、遷移權杖雜湊、快照位置、時間線 | FR-MIG-01～10 |
 | `migration_checks`（M7） | 自增 `id` | 遷移、類型（資料表／檔案／帳號／驗收清單）、對象、來源值、目標值、結果、簽核者 | FR-MIG-06、FR-MIG-07 |
 
@@ -273,3 +274,4 @@ Runner 主機以 `scripts/runner-setup.sh install` 準備：安裝 gVisor、在 
 | [0016](adr/0016-edge-tls.md) | Edge TLS 終結：`:443` SNI 分流、wildcard（DNS-01）與已驗證網域（HTTP-01）憑證、主金鑰加密 Cloudflare 權杖 |
 | [0017](adr/0017-github-app-public-console.md) | GitHub App：安裝時確認安裝者、installation token 只在記憶體、webhook 驗簽；主控台經 Edge 對外與基本防護 |
 | [0018](adr/0018-minimal-deploy.md) | 最小部署流程：確認後建置（每次建置一個 gVisor BuildKit 臨時容器）、啟動、健康檢查、production 網址 |
+| [0019](adr/0019-project-vars.md) | 秘密變數：依環境加密保存、只寫不讀；部署時以行程環境變數注入建置的服務；平臺產生資料庫密碼 |

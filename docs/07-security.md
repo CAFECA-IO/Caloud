@@ -184,6 +184,7 @@
 | log | 不記錄 token、cookie、完整簽章、compose 中的環境變數值 |
 | 設定檔 | `.env` 不進版控（`.gitignore`）；只提交 `.env.example` |
 | App 環境變數 | 存在資料庫（M7 改為以主金鑰加密，FR-APP-11）；API 與 MCP 只回傳變數名稱，不回傳值；稽核不記錄值 |
+| 專案秘密變數 | 以主金鑰加密存於 `project_vars`（AAD `project_var:<專案>:<環境>:<名稱>`）；只寫不讀，API 只回名稱與末 4 碼提示（值 ≥ 12 字元時）；在 `deploy` 訊息中送給 agent，agent 只放在記憶體、以行程環境變數交給 `docker compose`，不寫檔；agent 送出的 log 與錯誤把值遮蔽為 `***`；建置時變數（build args）會寫進映像，UI 標示且不建議放秘密；平臺產生的資料庫密碼不可修改（ADR 0019、FR-ENV-05） |
 | 主金鑰 `CALOUD_MASTER_KEY` | 32 bytes 的 base64，只從環境變數讀取；不寫入資料庫、日誌、API 回應或 `Config` 的 Debug 輸出；正式機另存一份離線備份，遺失時已加密的祕密需重新設定（FR-OPS-14） |
 | 加密的祕密 | `caloud_core::secret`：ChaCha20-Poly1305、隨機 nonce，格式 `v1:<base64(nonce‖密文)>`，AAD 為「用途:主鍵」 |
 | Cloudflare 權杖 | 加密存於 `domain_pools.cloudflare_token_enc`；只在簽發時解開，用完即丟；稽核只記錄「已設定／已清除」 |

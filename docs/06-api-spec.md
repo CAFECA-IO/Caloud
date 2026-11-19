@@ -302,6 +302,8 @@
 | DELETE | `/api/projects/{id}` | 擁有者 | FR-AN-10 |
 | POST | `/api/projects/{id}/analysis` | 擁有者 | FR-AN-10 |
 | POST | `/api/projects/{id}/deploy` | 擁有者 | FR-ENV-12 |
+| GET | `/api/projects/{id}/vars` | 擁有者 | FR-ENV-05 |
+| PUT | `/api/projects/{id}/vars` | 擁有者 | FR-ENV-05 |
 | PUT | `/api/projects/{id}/analysis` | 擁有者 | FR-AN-03、FR-AN-04 |
 
 **Project**
@@ -352,6 +354,7 @@
 { "subdomain": "q7v2m4kx", "hostname": "q7v2m4kx.caloud.tw", "url": "https://q7v2m4kx.caloud.tw",
   "status": "deploying", "stage": "build", "in_progress": true, "pending_changes": false,
   "commit": "98b705d…", "error": null, "node": "uuid", "updated_at": 0,
+  "vars_pending": false, "missing_vars": [ "SESSION_SECRET" ],
   "logs": [ { "stage": "build", "line": "#5 [2/4] RUN npm ci", "at": 0 } ] }
 ```
 
@@ -359,6 +362,21 @@
 - 重新部署時，`fetch`、`build` 階段舊版仍在執行（`status` 維持 `running`）；這兩個階段失敗時 `status` 仍為 `running`，`error` 與 `stage` 指出失敗的階段。進入 `start` 後舊版停止，路由暫時移除，健康檢查通過後恢復。
 - `pending_changes`：最新解析的 compose 與確認版本不同；確認前部署仍使用確認時的 commit。設定相同時部署最新解析的 commit。
 - 需要有通過自我檢查且具備建置環境（`specs.buildkit`）的平臺節點。
+- `vars_pending`：秘密變數在上次部署後有變更，重新部署後生效；`missing_vars`：解析需要（provider `user`）但這個環境尚未設定的變數名稱，不阻擋部署。
+
+**秘密變數**（FR-ENV-05，[ADR 0019](adr/0019-project-vars.md)）：依環境分開（`env`：本輪只有 `production`），只寫不讀。
+
+**GET /api/projects/{id}/vars?env=production** → `200`：
+
+```json
+{ "env": "production", "rev": 3, "items": [
+  { "name": "SESSION_SECRET", "set": true, "hint": "…k3Zq", "source": "user", "needed": true, "build_time": false, "evidence": [ { "file": "src/lib/auth_session.ts", "line": 29 } ], "updated_at": 0 },
+  { "name": "CALOUD_DB_PASSWORD", "set": true, "hint": null, "source": "generated", "needed": false, "build_time": false, "evidence": [], "updated_at": 0 } ] }
+```
+
+- 列出確認的解析中需要用戶提供的變數（未設定時 `set: false`）、已設定的變數與平臺產生的變數；`hint` 只在值長度 ≥ 12 時為末 4 碼。
+
+**PUT /api/projects/{id}/vars** `{ "env": "production", "set": { "NAME": "value" }, "unset": ["NAME"] }` → `200`（同 GET）。名稱須為 `[A-Za-z_][A-Za-z0-9_]*`，`CALOUD_` 開頭保留給平臺（`400`）；值最長 32 KB、每個環境最多 200 個（`400`）；未設定主金鑰回 `409`。值不出現在回應、稽核與 log。
 
 ### 3.8 GitHub（ADR 0017）
 
@@ -476,7 +494,7 @@
 | --- | --- | --- |
 | `ack` | `node_id`、`node_token`（只在以加入權杖註冊時出現）、`status`、`heartbeat_secs` | 註冊成功 |
 | `status` | `status` | 維運者排空或恢復節點時通知 |
-| `deploy` | `env`（`id`、`kind`、`compose`、`subnet_index`、`public_service`、`source`?） | 部署或重新部署環境（FR-OPS-13）；agent 以平臺政策再檢查 compose。`source`（ADR 0018）：`repo_url`、`commit`、`git_ref`?、`compose_dir`、`auth_header`?；有 source 時 compose 可含 `build`（只限儲存庫內路徑與 `dockerfile_inline`），agent 先取得原始碼、在 gVisor BuildKit 建置後改寫為 image |
+| `deploy` | `env`（`id`、`kind`、`compose`、`subnet_index`、`public_service`、`source`?、`vars`?） | 部署或重新部署環境（FR-OPS-13）；agent 以平臺政策再檢查 compose。`source`（ADR 0018）：`repo_url`、`commit`、`git_ref`?、`compose_dir`、`auth_header`?；有 source 時 compose 可含 `build`（只限儲存庫內路徑與 `dockerfile_inline`），agent 先取得原始碼、在 gVisor BuildKit 建置後改寫為 image。`vars`（ADR 0019）：`[{name, value, user}]`，`docker compose up` 時放進行程環境變數；`user: true` 的名稱列入建置服務的 `environment`；build args 的 `${NAME}` 以此內插；log 與錯誤中的值遮蔽為 `***` |
 | `destroy` | `env_id` | 停止並刪除環境與其 volume |
 | `error` | `message` | 隨即關閉連線（權杖無效、已使用、已過期、格式錯誤、節點被移除）；agent 收到後不再重連 |
 
