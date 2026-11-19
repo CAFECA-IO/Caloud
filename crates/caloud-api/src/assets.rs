@@ -17,6 +17,8 @@ const FILES: &[(&str, &str, &str)] = &[
     ),
     ("ds/theme.css", "text/css; charset=utf-8", include_str!("../../../web/ds/theme.css")),
     ("ds/ui.js", "text/javascript; charset=utf-8", include_str!("../../../web/ds/ui.js")),
+    // 品牌標誌（docs/04 §4.1）
+    ("ds/logo.svg", "image/svg+xml", include_str!("../../../web/ds/logo.svg")),
 ];
 
 pub async fn serve(Path(path): Path<String>) -> Response {

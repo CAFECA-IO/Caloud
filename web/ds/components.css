@@ -40,7 +40,7 @@ p { margin: 0; }
   min-width: 0;
 }
 .c-sidebar__brand { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-2); color: var(--color-sidebar-text-active); font-family: var(--font-display); font-weight: var(--weight-semibold); font-size: var(--text-lg); }
-.c-sidebar__mark { width: 24px; height: 24px; border-radius: 7px; background: var(--brand-mark); display: grid; place-items: center; color: var(--color-on-accent); font-size: var(--text-xs); font-weight: var(--weight-semibold); }
+.c-sidebar__mark { width: 24px; height: 24px; flex: none; display: block; } /* 品牌標誌圖（docs/04 §4.1） */
 .c-sidebar__nav { display: flex; flex-direction: column; gap: 2px; }
 .c-sidebar__item {
   display: flex; align-items: center; gap: var(--space-3);
@@ -245,7 +245,7 @@ a.c-stat:hover, button.c-stat:hover { border-color: var(--color-border-strong); 
 /* ───────── Login ───────── */
 .c-login { min-height: 100vh; display: grid; place-items: center; padding: var(--space-6) max(var(--space-4), env(safe-area-inset-right, 0px)) var(--space-6) max(var(--space-4), env(safe-area-inset-left, 0px)); }
 .c-login__panel { width: min(400px, 100%); display: flex; flex-direction: column; align-items: center; gap: var(--space-4); padding: var(--space-10) var(--space-8); text-align: center; background: var(--color-surface); border: var(--border); border-radius: var(--radius-overlay); box-shadow: var(--shadow-card); }
-.c-login__mark { width: 48px; height: 48px; border-radius: 14px; background: var(--brand-mark); display: grid; place-items: center; color: var(--color-on-accent); font-weight: var(--weight-semibold); font-size: var(--text-xl); }
+.c-login__mark { width: 48px; height: 48px; display: block; } /* 品牌標誌圖（docs/04 §4.1） */
 .c-login__title { font-size: var(--text-2xl); font-weight: var(--weight-semibold); }
 .c-login__desc { color: var(--color-text-muted); }
 .c-login .c-btn { width: 100%; min-height: 44px; }

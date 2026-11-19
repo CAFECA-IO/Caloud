@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Caloud</title>
+<link rel="icon" type="image/svg+xml" href="/assets/ds/logo.svg">
 <link rel="stylesheet" href="/assets/ds/tokens.css">
 <link rel="stylesheet" href="/assets/ds/theme.css">
 <link rel="stylesheet" href="/assets/ds/components.css">
@@ -15,7 +16,7 @@
 <!-- FR-AUTH-01 登入 -->
 <main class="c-login u-hidden" id="login">
   <section class="c-login__panel">
-    <div class="c-login__mark" aria-hidden="true">C</div>
+    <img class="c-login__mark" src="/assets/ds/logo.svg" alt="" aria-hidden="true">
     <h1 class="c-login__title">登入 Caloud</h1>
     <p class="c-login__desc">使用 CAFECA 身分登入。部署後第一位登入的人會成為 Super Admin。</p>
     <button class="c-btn c-btn--primary" id="login-btn">以 CAFECA 登入</button>
@@ -26,7 +27,7 @@
 <!-- FR-UI-11 AppShell -->
 <div class="c-shell u-hidden" id="shell">
   <aside class="c-sidebar">
-    <div class="c-sidebar__brand"><span class="c-sidebar__mark" aria-hidden="true">C</span>Caloud</div>
+    <div class="c-sidebar__brand"><img class="c-sidebar__mark" src="/assets/ds/logo.svg" alt="" aria-hidden="true">Caloud</div>
     <nav class="c-sidebar__nav" aria-label="主要導覽" id="nav"></nav>
     <div class="c-sidebar__footer">
       <div class="c-account" id="account"></div>
@@ -830,7 +831,7 @@ async function boot() {
   }
   if (state.me.role === "pending") { // FR-USER-04
     $("#login").classList.remove("u-hidden");
-    $("#login").innerHTML = `<section class="c-login__panel"><div class="c-login__mark" aria-hidden="true">C</div><h1 class="c-login__title">等待核准</h1><p class="c-login__desc">你的帳戶已建立。管理員核准後，就能部署 App 與托管網域。</p><button class="c-btn" id="pending-logout">${icon("logout")}<span>登出</span></button></section>`;
+    $("#login").innerHTML = `<section class="c-login__panel"><img class="c-login__mark" src="/assets/ds/logo.svg" alt="" aria-hidden="true"><h1 class="c-login__title">等待核准</h1><p class="c-login__desc">你的帳戶已建立。管理員核准後，就能部署 App 與托管網域。</p><button class="c-btn" id="pending-logout">${icon("logout")}<span>登出</span></button></section>`;
     $("#pending-logout").addEventListener("click", async () => { await api("/api/auth/logout", { method: "POST" }); location.replace("/"); });
     return;
   }
