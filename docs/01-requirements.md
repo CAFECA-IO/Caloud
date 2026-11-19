@@ -168,10 +168,11 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-AN-04 | 每個判斷標示信心度（高、中、低）與依據的檔案及行號；低信心項目在第一次驗證前需用戶確認 | P1 | M5 |
 | FR-AN-05 | 平臺 App 適用 [07 §3.6](07-security.md#36-平臺-app-政策)：允許儲存庫內的 `build`（context、dockerfile 不超出儲存庫）；仍禁止 host 網路、主機路徑、`docker.sock`、privileged、`ports`；儲存庫 compose 中的 `env_file` 轉為平臺注入的環境變數 | P0 | M5 |
 | FR-AN-06 | 專案可指定儲存庫子目錄作為根目錄（monorepo，例：`app/`） | P1 | M5 |
-| FR-AN-07 | 偵測持久化目錄（寫入工作目錄下的路徑、`*_DIR`／`*_PATH` 變數），建議具名 volume；寫入但未掛 volume 列為 Medium | P1 | M5 |
+| FR-AN-07 | 偵測持久化目錄（寫入工作目錄下的路徑，含 `path.join(process.cwd(), …)` 等組合寫法；`*_DIR`／`*_PATH` 變數，可設定時自動填入掛載路徑），建議具名 volume；寫入但未掛 volume 列為 Medium | P1 | M5 |
 | FR-AN-08 | 偵測系統套件與原生模組（ffmpeg、Chromium／Playwright、sharp、onnxruntime、node-gyp 編譯）：範本能加裝者自動加裝，否則列為 Medium 並建議自備 Dockerfile | P1 | M5 |
 | FR-AN-09 | 偵測建置時變數（`NEXT_PUBLIC_*`、`VITE_*` 等），標示其值是否隨環境不同（網址、origin 類） | P1 | M5 |
 | FR-AN-10 | 解析在背景執行，每次解析保存為一筆紀錄（ref、commit、結果、時間）；用戶確認的版本（含編輯過的 compose、對外服務、已確認的低信心項目）保留，不被之後的重新解析覆蓋；每位用戶最多 20 個專案 | P0 | M5 |
+| FR-AN-11 | 偵測服務之間的位址：程式或環境變數預設值以 `localhost`／`127.0.0.1` 連到同一份 compose 中其他服務的 port（例：`http://127.0.0.1:5001` 對應 `ipfs_bootstrap` 的 5001），可由環境變數設定時在產生的 compose 自動填入服務名稱位址（`http://ipfs_bootstrap:5001`），列為中信心需確認；寫死無法設定時列為 High 並附依據與修改建議 | P1 | M5 |
 
 ### 2.11 平臺：環境 ENV
 
