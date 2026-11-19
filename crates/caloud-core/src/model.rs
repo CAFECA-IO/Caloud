@@ -161,6 +161,9 @@ pub struct Project {
     pub status: String,
     pub error: Option<String>,
     pub confirmed_analysis: Option<String>,
+    /// 以 GitHub App 安裝匯入時的安裝 id 與儲存庫全名（ADR 0017）
+    pub installation_id: Option<i64>,
+    pub repo_full_name: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }

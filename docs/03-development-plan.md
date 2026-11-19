@@ -55,11 +55,11 @@
 | --- | --- | --- | --- |
 | M2-01 | rustls SNI 憑證選擇、`:443` 監聽 | FR-DOM-05 | → M4-08 |
 | M2-02 | instant-acme 申請／續簽、HTTP-01、`:80` 轉 HTTPS | FR-DOM-05 | → M4-08 |
-| M2-03 | 管理介面改經 `:443` 的 `PUBLIC_ORIGIN` 提供（[ADR 0017](adr/0017-github-app-public-console.md)） | FR-DOM-05、NFR-SEC-01 | 🚧 |
+| M2-03 | 管理介面改經 `:443` 的 `PUBLIC_ORIGIN` 提供（[ADR 0017](adr/0017-github-app-public-console.md)） | FR-DOM-05、NFR-SEC-01 | ✅ |
 | M2-04 | WebSocket／Upgrade 轉發 | FR-DOM-06 | → M4-07 |
 | M2-05 | 每 App 部署互斥鎖 | FR-APP-08 | ⬜ |
 | M2-06 | 啟動對帳與定期對帳 | FR-APP-09 | ⬜ |
-| M2-07 | 寫入 API 檢查 `Origin` header、速率限制、安全標頭 | NFR-SEC-01 | 🚧 |
+| M2-07 | 寫入 API 檢查 `Origin` header、速率限制、安全標頭 | NFR-SEC-01 | ✅ |
 | M2-08 | 代理效能基準測試 | NFR-PERF-01 | ⬜ |
 | M2-09 | Git 來源 App、環境變數、指定 service | FR-APP-13、FR-APP-14、FR-APP-15 | ✅ |
 | M2-10 | 特權 App 政策與保留連接埠移除（`!override`） | FR-APP-16 | ✅ |
@@ -101,7 +101,7 @@
 
 | # | 工作項目 | 需求 | 狀態 |
 | --- | --- | --- | --- |
-| M5-01 | GitHub App 安裝（確認安裝者）、installation token、webhook 驗簽；後台 App 設定；從已安裝的私有儲存庫匯入 | FR-GH-01、FR-GH-02、FR-GH-05 | 🚧 |
+| M5-01 | GitHub App 安裝（確認安裝者）、installation token、webhook 驗簽；後台 App 設定；從已安裝的私有儲存庫匯入 | FR-GH-01、FR-GH-02、FR-GH-05 | ✅ |
 | M5-02 | 公開儲存庫網址匯入 | FR-GH-04 | ✅ |
 | M5-03 | 解析器：compose、Dockerfile、Node、Rust、Go、Python 範本、附加資料庫、環境變數 | FR-AN-01、FR-AN-02 | ✅ |
 | M5-04 | 信心度與依據；`.caloud/compose.yml` 覆寫；編輯產生結果 | FR-AN-03、FR-AN-04 | ✅ |

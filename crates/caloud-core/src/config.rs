@@ -38,9 +38,24 @@ pub struct Config {
     pub git_bin: String,
     /// Cloudflare API 端點（ADR 0016；測試時指向 mock）
     pub cloudflare_api: String,
+    /// GitHub API 與網站（ADR 0017；測試時指向 mock）
+    pub github_api: String,
+    pub github_web: String,
 }
 
 impl Config {
+    /// 管理介面的 host（不含 scheme 與 port），作為 Edge 的系統路由（ADR 0017）
+    pub fn public_host(&self) -> Option<String> {
+        let rest = self.public_origin.split_once("://")?.1;
+        let host = rest.split(['/', ':']).next()?.to_ascii_lowercase();
+        (!host.is_empty() && host != "localhost" && host.parse::<std::net::IpAddr>().is_err()).then_some(host)
+    }
+
+    /// API 監聽的 port
+    pub fn api_port(&self) -> Option<u16> {
+        self.api_listen.rsplit(':').next()?.parse().ok()
+    }
+
     /// Caloud 自己佔用的主機連接埠（HTTP、HTTPS、API），特權 App 的 `ports` 會移除這些（FR-APP-16）
     pub fn reserved_ports(&self) -> Vec<u16> {
         [&self.http_listen, &self.https_listen, &self.api_listen]
@@ -70,6 +85,30 @@ impl Config {
             doh_url: get("DOH_URL", "https://cloudflare-dns.com/dns-query"),
             git_bin: get("GIT_BIN", "git"),
             cloudflare_api: get("CLOUDFLARE_API", "https://api.cloudflare.com/client/v4"),
+            github_api: get("GITHUB_API", "https://api.github.com"),
+            github_web: get("GITHUB_WEB", "https://github.com"),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    // ADR 0017：只有網域形式的 public origin 會成為 Edge 的系統路由
+    #[test]
+    fn public_host_and_api_port() {
+        let mut c = Config::from_env().unwrap();
+        for (origin, want) in [
+            ("https://Caloud.CAFECA.io", Some("caloud.cafeca.io")),
+            ("https://caloud.cafeca.io:8443/x", Some("caloud.cafeca.io")),
+            ("http://localhost:8080", None),
+            ("http://127.0.0.1:3000", None),
+        ] {
+            c.public_origin = origin.into();
+            assert_eq!(c.public_host().as_deref(), want, "{origin}");
+        }
+        c.api_listen = "0.0.0.0:8080".into();
+        assert_eq!(c.api_port(), Some(8080));
     }
 }

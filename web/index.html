@@ -88,6 +88,7 @@ const PAGES = [
   { id: "domains", label: "網域", icon: "globe", render: renderDomains },
   { id: "users", label: "使用者", icon: "users", render: renderUsers, admin: true },
   { id: "tls", label: "HTTPS 憑證", icon: "shield", render: renderTls, admin: true },
+  { id: "github", label: "GitHub App", icon: "key", render: renderGithubApp, admin: true },
   { id: "tokens", label: "API 權杖", icon: "key", render: renderTokens },
 ];
 function renderShell() {
@@ -111,6 +112,7 @@ $("#theme-btn").addEventListener("click", UI.toggleTheme);
 $("#logout-btn").addEventListener("click", async () => { await api("/api/auth/logout", { method: "POST" }); location.replace("/"); });
 
 function route() {
+  if (currentPage() === "github-complete") return completeGithub();
   const page = PAGES.find((p) => p.id === currentPage() && (!p.admin || isAdmin())) || PAGES[0];
   markNav();
   document.title = `${page.label} · Caloud`;
@@ -369,7 +371,7 @@ const repoShort = (url) => url.replace(/^https:\/\/(www\.)?github\.com\//, "").r
 async function renderProjects() {
   clearTimeout(pollTimer);
   if (pageArg()) return renderProject(pageArg());
-  $("#page").innerHTML = pageHeader("專案", "貼上公開儲存庫網址，Caloud 會自動解析服務、port 與需要的環境變數；確認後才開始驗證。",
+  $("#page").innerHTML = pageHeader("專案", "從 GitHub 匯入儲存庫（含私有），Caloud 會自動解析服務、port 與需要的環境變數；確認後才開始驗證。",
     `<button class="c-btn c-btn--primary" id="new-project">${icon("plus")}<span>匯入專案</span></button>`) +
     `<section class="c-card"><div class="c-card__body c-card__body--flush"><div class="c-table-wrap"><table class="c-table">
       <thead><tr><th>名稱</th><th>儲存庫</th><th>狀態</th><th>更新</th></tr></thead>
@@ -387,7 +389,7 @@ async function loadProjects() {
       <td><span class="u-mono u-small">${esc(repoShort(p.repo_url))}</span><div class="c-table__secondary u-mono">${esc(p.git_ref || p.branch || "預設分支")}</div></td>
       <td>${statusPill("project", p.status)}${p.error ? `<div class="c-table__secondary u-truncate" title="${esc(p.error)}">${esc(p.error)}</div>` : ""}</td>
       <td class="u-muted u-small u-nowrap">${relTime(p.updated_at)}</td></tr>`).join("")
-    : `<tr><td colspan="4">${empty({ iconName: "branch", title: "還沒有專案", body: "匯入一個公開的 GitHub 儲存庫，Caloud 會解析它需要的服務。", action: `<button class="c-btn c-btn--primary" data-act="import">${icon("plus")}<span>匯入專案</span></button>` })}</td></tr>`;
+    : `<tr><td colspan="4">${empty({ iconName: "branch", title: "還沒有專案", body: "從 GitHub 匯入一個儲存庫，Caloud 會解析它需要的服務。", action: `<button class="c-btn c-btn--primary" data-act="import">${icon("plus")}<span>匯入專案</span></button>` })}</td></tr>`;
   if (list.some((p) => p.status === "analyzing") && currentPage() === "projects" && !pageArg()) pollTimer = setTimeout(loadProjects, 2000);
 }
 document.addEventListener("click", (e) => {
@@ -397,11 +399,23 @@ document.addEventListener("click", (e) => {
   if (tr) location.hash = `projects/${tr.dataset.id}`;
 });
 
-/** FR-GH-04、FR-AN-06：以公開儲存庫網址匯入 */
-function openImport() {
-  const dr = drawer({ title: "匯入專案", subtitle: "目前支援公開的 https:// 儲存庫；GitHub App 授權之後開放。" });
+/** FR-GH-01、FR-GH-04、FR-AN-06：從 GitHub 安裝或公開網址匯入 */
+async function openImport() {
+  const dr = drawer({ title: "匯入專案", subtitle: "從已連結的 GitHub 帳號選擇儲存庫（含私有），或貼上公開儲存庫網址。" });
+  dr.body.innerHTML = `<span class="c-skeleton"></span>`;
+  const insts = await api("/api/github/installations").catch(() => []);
   dr.body.innerHTML = `
-    <label class="c-field"><span class="c-field__label">儲存庫網址</span><input class="c-input u-mono" id="ip-url" placeholder="https://github.com/CAFECA-IO/SwarmStorage" autocomplete="off" spellcheck="false"></label>
+    <div class="c-field"><span class="c-field__label">來源</span>
+      <label class="c-check"><input type="radio" name="ip-src" value="github" ${insts.length ? "checked" : ""}><span>GitHub（已連結的帳號）</span></label>
+      <label class="c-check"><input type="radio" name="ip-src" value="url" ${insts.length ? "" : "checked"}><span>公開儲存庫網址</span></label></div>
+    <div id="ip-gh">
+      ${insts.length ? `<div class="l-grid">
+        <label class="c-field"><span class="c-field__label">GitHub 帳號</span><select class="c-select" id="ip-inst">${insts.map((i) => `<option value="${i.id}">${esc(i.account_login)}${i.suspended ? "（已暫停）" : ""}</option>`).join("")}</select></label>
+        <label class="c-field"><span class="c-field__label">儲存庫</span><select class="c-select u-mono" id="ip-repo"><option value="">載入中…</option></select></label></div>`
+      : `<div class="c-banner">${icon("info")}<div class="c-banner__body"><strong>尚未連結 GitHub</strong><span class="u-small">安裝 Caloud GitHub App 後，就能匯入私有儲存庫，並在 push 時自動重新解析。</span></div></div>`}
+      <button class="c-btn" id="ip-connect" type="button">${icon("link")}<span>${insts.length ? "連結其他 GitHub 帳號" : "連結 GitHub"}</span></button>
+    </div>
+    <label class="c-field" id="ip-url-field"><span class="c-field__label">儲存庫網址</span><input class="c-input u-mono" id="ip-url" placeholder="https://github.com/CAFECA-IO/SwarmStorage" autocomplete="off" spellcheck="false"></label>
     <div class="l-grid">
       <label class="c-field"><span class="c-field__label">分支／標籤（選填）</span><input class="c-input u-mono" id="ip-ref" placeholder="預設分支"></label>
       <label class="c-field"><span class="c-field__label">根目錄（選填）</span><input class="c-input u-mono" id="ip-root" placeholder="例如 app"><span class="c-field__hint">monorepo 時指定專案所在的子目錄。</span></label>
@@ -409,18 +423,57 @@ function openImport() {
     <label class="c-field"><span class="c-field__label">名稱（選填）</span><input class="c-input" id="ip-name" placeholder="預設為儲存庫名稱" autocomplete="off"></label>
     <span class="c-field__error" id="ip-err" role="alert"></span>
     <div class="c-banner">${icon("shield")}<div class="c-banner__body"><strong>只讀取，不執行</strong><span class="u-small">解析只讀儲存庫中的檔案，不會執行任何程式；確認之前不會建置或部署。</span></div></div>`;
+  const src = () => $("[name=ip-src]:checked", dr.el).value;
+  const sync = () => {
+    $("#ip-gh", dr.el).classList.toggle("u-hidden", src() !== "github");
+    $("#ip-url-field", dr.el).classList.toggle("u-hidden", src() !== "url");
+  };
+  const loadRepos = async () => {
+    const sel = $("#ip-repo", dr.el); if (!sel) return;
+    sel.innerHTML = `<option value="">載入中…</option>`;
+    try {
+      const repos = await api(`/api/github/installations/${$("#ip-inst", dr.el).value}/repositories`);
+      sel.innerHTML = repos.map((r) => `<option value="${esc(r.full_name)}">${esc(r.full_name)}${r.private ? "（私有）" : ""}</option>`).join("") || `<option value="">沒有可存取的儲存庫</option>`;
+    } catch (err) { sel.innerHTML = `<option value="">無法載入</option>`; showMsg($("#ip-err", dr.el), err); }
+  };
+  $$("[name=ip-src]", dr.el).forEach((r) => r.addEventListener("change", sync));
+  $("#ip-inst", dr.el)?.addEventListener("change", loadRepos);
+  $("#ip-connect", dr.el).addEventListener("click", async (e) => {
+    try { const { url } = await busy(e.currentTarget, api("/api/github/install")); location.href = url; }
+    catch (err) { showMsg($("#ip-err", dr.el), err); }
+  });
+  sync(); loadRepos();
   dr.footer.classList.remove("u-hidden");
   dr.footer.innerHTML = `<button class="c-btn" data-close>取消</button><button class="c-btn c-btn--primary" id="ip-submit">${icon("search")}<span>匯入並解析</span></button>`;
   $("#ip-submit", dr.el).addEventListener("click", async (e) => {
-    const v = (id) => $(id, dr.el).value.trim() || null;
+    const v = (id) => $(id, dr.el)?.value.trim() || null;
     showMsg($("#ip-err", dr.el), null);
-    if (!v("#ip-url")) return showMsg($("#ip-err", dr.el), new Error("請輸入儲存庫網址。"));
+    const body = { git_ref: v("#ip-ref"), root: v("#ip-root"), name: v("#ip-name") };
+    if (src() === "github") {
+      if (!v("#ip-repo")) return showMsg($("#ip-err", dr.el), new Error("請選擇儲存庫。"));
+      Object.assign(body, { installation_id: Number(v("#ip-inst")), repo_full_name: v("#ip-repo") });
+    } else {
+      if (!v("#ip-url")) return showMsg($("#ip-err", dr.el), new Error("請輸入儲存庫網址。"));
+      body.repo_url = v("#ip-url");
+    }
     try {
-      const p = await busy(e.currentTarget, api("/api/projects", { method: "POST", body: { repo_url: v("#ip-url"), git_ref: v("#ip-ref"), root: v("#ip-root"), name: v("#ip-name") } }));
+      const p = await busy(e.currentTarget, api("/api/projects", { method: "POST", body }));
       dr.close();
       location.hash = p ? `projects/${p.id}` : "projects";
     } catch (err) { showMsg($("#ip-err", dr.el), err); }
   });
+}
+
+/** FR-GH-01：GitHub 安裝完成後導回（跨站導回不帶 cookie，因此由同站頁面完成綁定） */
+async function completeGithub() {
+  const q = new URLSearchParams(location.hash.split("/").slice(1).join("/"));
+  history.replaceState(null, "", "#projects");
+  try {
+    if (!q.get("code") || !q.get("state")) throw new Error("GitHub 沒有回傳授權資料，請重新連結。");
+    const inst = await api("/api/github/complete", { method: "POST", body: { code: q.get("code"), installation_id: Number(q.get("installation_id")), state: q.get("state") } });
+    toast(`已連結 GitHub：${inst.account_login}`);
+  } catch (err) { toast(err.message, "danger"); }
+  route();
 }
 
 /** 依據：GitHub 儲存庫連到該 commit 的檔案與行號 */
@@ -760,6 +813,39 @@ function openPool(p) {
       else await busy(e.currentTarget, api("/api/admin/domain-pools", { method: "POST", body: { root: $("#pl-root", dr.el).value.trim(), ...body } }));
       toast("已儲存網域池"); dr.close();
     } catch (err) { showMsg($("#pl-err", dr.el), err); }
+  });
+}
+
+// ─────────────── GitHub App FR-GH-05（ADR 0017） ───────────────
+async function renderGithubApp() {
+  $("#page").innerHTML = pageHeader("GitHub App", "Caloud 以 GitHub App 讀取用戶授權的儲存庫並接收 push 事件。機密以主金鑰加密保存，只顯示末 4 碼。") +
+    `<section class="c-card"><div class="c-card__body" id="gh-body"><span class="c-skeleton"></span></div></section>`;
+  let info;
+  try { info = await api("/api/admin/github-app"); } catch (err) { return showMsg($("#gh-body"), err); }
+  const origin = location.origin;
+  const keep = info.configured ? "留空表示不變" : "";
+  $("#gh-body").innerHTML = `
+    ${info.configured ? `<div class="c-banner">${icon("check")}<div class="c-banner__body"><strong>已設定：${esc(info.slug)}（App ID ${info.app_id}）</strong><span class="u-small">最後更新 ${relTime(info.updated_at)}</span></div></div>` : ""}
+    <div class="c-field"><span class="c-label">在 GitHub App 設定頁填入</span>
+      <div class="c-field"><span class="c-label">Callback URL</span>${copyField(`${origin}/api/github/callback`, "Callback URL")}</div>
+      <div class="c-field"><span class="c-label">Webhook URL</span>${copyField(`${origin}/api/github/webhook`, "Webhook URL")}</div>
+      <span class="c-field__hint">勾選「Request user authorization (OAuth) during installation」；權限只需 Contents、Metadata 讀取與 Checks、Pull requests 讀寫；事件訂閱 Push、Create、Pull request。</span></div>
+    <div class="l-grid">
+      <label class="c-field"><span class="c-field__label">App ID</span><input class="c-input u-mono" id="gh-app-id" inputmode="numeric" value="${esc(info.app_id ?? "")}"></label>
+      <label class="c-field"><span class="c-field__label">Client ID</span><input class="c-input u-mono" id="gh-client-id" value="${esc(info.client_id ?? "")}" autocomplete="off" spellcheck="false"></label>
+    </div>
+    <label class="c-field"><span class="c-field__label">Client secret${info.client_secret_hint ? `（目前 ${esc(info.client_secret_hint)}）` : ""}</span><input class="c-input u-mono" type="password" id="gh-client-secret" placeholder="${keep}" autocomplete="off"></label>
+    <label class="c-field"><span class="c-field__label">Webhook secret${info.webhook_secret_hint ? `（目前 ${esc(info.webhook_secret_hint)}）` : ""}</span><input class="c-input u-mono" type="password" id="gh-webhook-secret" placeholder="${keep}" autocomplete="off"></label>
+    <label class="c-field"><span class="c-field__label">私鑰（.pem 內容）${info.private_key_hint ? `（目前 ${esc(info.private_key_hint)}）` : ""}</span><textarea class="c-textarea c-textarea--sm u-mono" id="gh-private-key" spellcheck="false" placeholder="${keep || "-----BEGIN RSA PRIVATE KEY-----"}"></textarea><span class="c-field__hint">儲存前會以此私鑰向 GitHub 驗證 App ID。</span></label>
+    <span class="c-field__error" id="gh-err" role="alert"></span>
+    <div><button class="c-btn c-btn--primary" id="gh-save">${icon("check")}<span>儲存</span></button></div>`;
+  $("#gh-save").addEventListener("click", async (e) => {
+    showMsg($("#gh-err"), null);
+    const v = (id) => $(id).value.trim() || undefined;
+    try {
+      await busy(e.currentTarget, api("/api/admin/github-app", { method: "PUT", body: { app_id: Number(v("#gh-app-id")), client_id: v("#gh-client-id") || "", client_secret: v("#gh-client-secret"), webhook_secret: v("#gh-webhook-secret"), private_key: v("#gh-private-key") } }));
+      toast("已儲存 GitHub App 設定"); renderGithubApp();
+    } catch (err) { showMsg($("#gh-err"), err); }
   });
 }
 

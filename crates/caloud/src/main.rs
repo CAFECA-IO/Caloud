@@ -30,6 +30,16 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let routes = RouteTable::default();
+    // ADR 0017：管理介面網域轉到本機 API
+    if let (Some(host), Some(port)) = (cfg.public_host(), cfg.api_port()) {
+        tracing::info!(%host, "console served through edge");
+        routes.set_fixed(vec![caloud_core::model::Route {
+            hostname: host,
+            upstream: format!("http://127.0.0.1:{port}"),
+            passthrough: None,
+            node: None,
+        }]);
+    }
     routes.reload(&db).await?;
 
     let tunnels = caloud_proxy::TunnelRegistry::default();
@@ -49,13 +59,18 @@ async fn main() -> anyhow::Result<()> {
         tunnels: tunnels.clone(),
         certs: certs.clone(),
         master_key,
+        github: Default::default(),
+        limiter: Default::default(),
     };
     caloud_api::spawn_offline_sweeper(state.clone());
     caloud_api::certs::spawn(state.clone());
 
     let api = tokio::net::TcpListener::bind(&cfg.api_listen).await?;
     tracing::info!(addr = %cfg.api_listen, "api listening");
-    let api = axum::serve(api, caloud_api::router(state));
+    let api = axum::serve(
+        api,
+        caloud_api::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    );
     let proxy = caloud_proxy::serve_http(cfg.http_listen.parse()?, routes.clone(), tunnels.clone(), certs.clone());
     let tls = caloud_proxy::serve_tls(cfg.https_listen.parse()?, routes, tunnels, certs);
 

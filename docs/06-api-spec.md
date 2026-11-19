@@ -350,7 +350,8 @@
 | Method | Path | 權限 | 需求 |
 | --- | --- | --- | --- |
 | GET | `/api/github/install` | member+ | FR-GH-01 |
-| GET | `/api/github/callback` | member+（session） | FR-GH-01 |
+| GET | `/api/github/callback` | 任何人（只轉址） | FR-GH-01 |
+| POST | `/api/github/complete` | member+ | FR-GH-01 |
 | GET | `/api/github/installations` | member+ | FR-GH-01 |
 | GET | `/api/github/installations/{id}/repositories` | 安裝擁有者 | FR-GH-01 |
 | POST | `/api/github/webhook` | GitHub（HMAC） | FR-GH-02 |
@@ -364,7 +365,8 @@
 
 - **PUT** `{ "app_id", "client_id", "client_secret"?, "private_key"?, "webhook_secret"? }`：省略的機密維持原值；首次設定三者都必須提供。以私鑰簽 JWT 呼叫 GitHub `GET /app` 確認 App ID 相符並取得 slug，失敗回 `400`；未設定 `CALOUD_MASTER_KEY` 回 `400`。
 - **GET /api/github/install** → `200 { "url": "https://github.com/apps/<slug>/installations/new?state=…" }`；state 一次性、綁定 session、10 分鐘有效。App 未設定回 `409`。
-- **GET /api/github/callback** `?code&installation_id&state&setup_action`：驗證 state、交換 user token、確認安裝屬於該 GitHub 使用者後綁定，`302` 回 `/#projects`（失敗時 `/#projects?github_error=<訊息>`）。安裝已綁定到其他帳號為錯誤。
+- **GET /api/github/callback** `?code&installation_id&state&setup_action`：GitHub 安裝後導回這裡。session cookie（`SameSite=Strict`）在跨站導回時不會帶上，因此這裡不做綁定，只以 `303` 轉到 `/#github-complete/<同樣的參數>`（只保留英數、`-`、`_` 的值）。
+- **POST /api/github/complete** `{ "code", "installation_id", "state" }` → `200 Installation`：主控台頁面呼叫。state 必須是同一個帳號發起且未過期（否則 `400`；他人的 state `403`）；以 code 交換一次性 user token，`GET /user/installations` 中沒有此安裝回 `403`；已綁定到其他帳號回 `409`。
 - **Installation** `{ "id": 1234, "account_login": "CAFECA-IO", "account_type": "Organization", "suspended": false, "created_at": 0 }`；`GET /api/github/installations` 列出自己的（admin+ 看全部）。
 - **GET /api/github/installations/{id}/repositories** → `200 [ { "full_name": "CAFECA-IO/iSunFA", "private": true, "default_branch": "main" } ]`。
 - **POST /api/github/webhook**：`X-Hub-Signature-256` 錯誤或缺少回 `401`；本體超過 5 MB 回 `413`；同一 `X-GitHub-Delivery` 重送回 `200` 但不重複處理。push、create（branch）、pull_request（opened／synchronize／reopened）使相符專案重新解析；installation deleted 刪除安裝、suspend／unsuspend 更新狀態。

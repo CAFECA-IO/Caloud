@@ -75,6 +75,9 @@ pub async fn list(s: &AppState, me: &CurrentUser) -> ApiResult<Vec<Project>> {
 #[derive(Debug, Default, Deserialize)]
 pub struct ProjectInput {
     pub repo_url: Option<String>,
+    /// 以 GitHub App 安裝匯入私有儲存庫（取代 `repo_url`，ADR 0017）
+    pub installation_id: Option<i64>,
+    pub repo_full_name: Option<String>,
     pub git_ref: Option<String>,
     pub root: Option<String>,
     pub name: Option<String>,
@@ -88,8 +91,25 @@ fn opt(v: &Option<String>) -> Option<String> {
 /// FR-GH-04：建立專案並在背景解析
 pub async fn create(s: &AppState, me: &CurrentUser, input: ProjectInput) -> ApiResult<Project> {
     me.require_deploy()?;
-    let url = opt(&input.repo_url).ok_or_else(|| bad("請提供儲存庫網址。"))?;
-    check_repo_url(&url)?;
+    // FR-GH-01：以安裝匯入時，安裝必須屬於自己
+    let (url, installation_id, full_name) = match (input.installation_id, opt(&input.repo_full_name)) {
+        (Some(inst), Some(full)) => {
+            if !crate::github::install::valid_full_name(&full) {
+                return Err(bad("儲存庫名稱格式為 owner/repo。"));
+            }
+            let i = crate::github::install::owned(s, me, inst).await?;
+            if i.suspended {
+                return Err(ApiError::Conflict("這個 GitHub 安裝已暫停。".into()));
+            }
+            (format!("{}/{full}", s.cfg.github_web.trim_end_matches('/')), Some(inst), Some(full))
+        }
+        (None, None) => {
+            let url = opt(&input.repo_url).ok_or_else(|| bad("請提供儲存庫網址。"))?;
+            check_repo_url(&url)?;
+            (url, None, None)
+        }
+        _ => return Err(bad("installation_id 與 repo_full_name 需同時提供。")),
+    };
     let git_ref = opt(&input.git_ref);
     if let Some(r) = &git_ref {
         check_git_ref(r)?;
@@ -109,7 +129,8 @@ pub async fn create(s: &AppState, me: &CurrentUser, input: ProjectInput) -> ApiR
     let id = uuid::Uuid::new_v4().to_string();
     let t = now();
     sqlx::query(
-        "INSERT INTO projects (id, owner, name, repo_url, git_ref, root, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'analyzing', ?, ?)",
+        "INSERT INTO projects (id, owner, name, repo_url, git_ref, root, status, installation_id, repo_full_name, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'analyzing', ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&me.0.account)
@@ -117,6 +138,8 @@ pub async fn create(s: &AppState, me: &CurrentUser, input: ProjectInput) -> ApiR
     .bind(&url)
     .bind(&git_ref)
     .bind(&root)
+    .bind(installation_id)
+    .bind(&full_name)
     .bind(t)
     .bind(t)
     .execute(&s.db)
@@ -275,7 +298,7 @@ pub async fn delete(s: &AppState, me: &CurrentUser, id: &str) -> ApiResult<()> {
 }
 
 /// 背景：取得儲存庫 → 解析 → 寫入一筆 analyses
-fn spawn_analysis(s: AppState, p: Project) {
+pub(crate) fn spawn_analysis(s: AppState, p: Project) {
     tokio::spawn(async move {
         let out = run_analysis(&s, &p).await;
         let t = now();
@@ -309,13 +332,22 @@ fn spawn_analysis(s: AppState, p: Project) {
 /// 失敗時回傳給用戶看的訊息（NFR-SEC-03：不含主機路徑等內部細節）
 async fn run_analysis(s: &AppState, p: &Project) -> Result<(), String> {
     let dir = src_dir(s, &p.id).join("src");
-    let fetched = caloud_orchestrator::git::fetch_repo(&s.runner.git_bin, &dir, &p.repo_url, p.git_ref.as_deref())
-        .await
-        .map_err(|e| {
-            let msg = e.to_string();
-            let msg = msg.replace(&dir.display().to_string(), "…");
-            format!("無法取得儲存庫：{}", msg.lines().next().unwrap_or_default())
-        })?;
+    let fetched = match p.installation_id {
+        // ADR 0017：私有儲存庫以 installation token 取得，權杖只經 git 環境變數傳入
+        Some(inst) => {
+            let token = crate::github::app::installation_token(s, inst)
+                .await
+                .map_err(|e| format!("無法取得 GitHub 授權：{e}"))?;
+            let auth = crate::github::app::git_auth_header(&token);
+            caloud_orchestrator::git::fetch_repo_with_auth(&s.runner.git_bin, &dir, &p.repo_url, p.git_ref.as_deref(), &auth).await
+        }
+        None => caloud_orchestrator::git::fetch_repo(&s.runner.git_bin, &dir, &p.repo_url, p.git_ref.as_deref()).await,
+    }
+    .map_err(|e| {
+        let msg = e.to_string();
+        let msg = msg.replace(&dir.display().to_string(), "…");
+        format!("無法取得儲存庫：{}", msg.lines().next().unwrap_or_default())
+    })?;
     let root = p.root.clone();
     let d = dir.clone();
     let analysis = tokio::task::spawn_blocking(move || caloud_analyzer::analyze(&d, &caloud_analyzer::Options { root }))

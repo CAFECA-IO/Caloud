@@ -91,6 +91,50 @@ async fn spawn_mock() -> (String, MockState) {
                 Json(json!({ "success": true, "errors": [], "result": result }))
             }),
         )
+        // 替身 GitHub（ADR 0017）：App 5826601、安裝 42 屬於使用者 octo
+        .route(
+            "/gh/app",
+            get(|h: axum::http::HeaderMap| async move {
+                let auth = h.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or_default();
+                if auth.starts_with("Bearer ") && auth.matches('.').count() == 2 {
+                    (StatusCode::OK, Json(json!({ "id": 5826601, "slug": "caloud-test" })))
+                } else {
+                    (StatusCode::UNAUTHORIZED, Json(json!({ "message": "A JSON web token could not be decoded" })))
+                }
+            }),
+        )
+        .route(
+            "/ghweb/login/oauth/access_token",
+            post(|axum::extract::Form(f): axum::extract::Form<HashMap<String, String>>| async move {
+                if f.get("code").map(String::as_str) == Some("good-code") && f.get("client_secret").map(String::as_str) == Some("cs-secret") {
+                    Json(json!({ "access_token": "user-tok", "token_type": "bearer" }))
+                } else {
+                    Json(json!({ "error": "bad_verification_code", "error_description": "The code passed is incorrect or expired." }))
+                }
+            }),
+        )
+        .route(
+            "/gh/user/installations",
+            get(|h: axum::http::HeaderMap| async move {
+                assert_eq!(h.get("authorization").unwrap(), "Bearer user-tok");
+                Json(json!({ "total_count": 1, "installations": [ { "id": 42, "account": { "login": "CAFECA-IO", "type": "Organization" } } ] }))
+            }),
+        )
+        .route(
+            "/gh/app/installations/{id}/access_tokens",
+            post(|axum::extract::Path(id): axum::extract::Path<i64>| async move {
+                Json(json!({ "token": format!("inst-tok-{id}"), "expires_at": "2099-01-01T00:00:00Z" }))
+            }),
+        )
+        .route(
+            "/gh/installation/repositories",
+            get(|h: axum::http::HeaderMap| async move {
+                assert_eq!(h.get("authorization").unwrap(), "Bearer inst-tok-42");
+                Json(json!({ "total_count": 2, "repositories": [
+                    { "full_name": "CAFECA-IO/secret-app", "private": true, "default_branch": "main" },
+                    { "full_name": "CAFECA-IO/docs", "private": false, "default_branch": "trunk" } ] }))
+            }),
+        )
         // TXT 寫入替身 DoH（同名多筆以換行分隔）
         .route(
             "/cf/zones/{zone}/dns_records",
@@ -193,7 +237,7 @@ impl Env {
         std::fs::write(
             &git,
             format!(
-                "#!/bin/sh\necho \"$*\" >> '{log}'\nsrc=$2\ncase \"$*\" in *missing*) echo 'repository not found' >&2; exit 128;; *' checkout '*) cp -R '{repo}/.' \"$src\";; \
+                "#!/bin/sh\necho \"$* [auth=${{GIT_CONFIG_VALUE_0:-none}}]\" >> '{log}'\nsrc=$2\ncase \"$*\" in *missing*) echo 'repository not found' >&2; exit 128;; *' checkout '*) cp -R '{repo}/.' \"$src\";; \
                  *' rev-parse '*) echo 98b705d0123456789abcdef0123456789abcdef0;; *' ls-remote '*) printf 'ref: refs/heads/main\\tHEAD\\n';; esac\nexit 0\n",
                 log = dir.join("git.log").display(),
                 repo = dir.join("gitrepo").display()
@@ -230,6 +274,8 @@ impl Env {
             doh_url: format!("{mock_base}/dns-query"),
             git_bin: git.display().to_string(),
             cloudflare_api: format!("{mock_base}/cf"),
+            github_api: format!("{mock_base}/gh"),
+            github_web: format!("{mock_base}/ghweb"),
         };
         let db = caloud_core::db::connect(&cfg.data_dir).await.unwrap();
         let routes = RouteTable::default();
@@ -250,6 +296,8 @@ impl Env {
             tunnels: tunnels.clone(),
             certs: Default::default(),
             master_key: master_key.then(|| Arc::new(caloud_core::secret::MasterKey::from_bytes(&[9u8; 32]).unwrap())),
+            github: Default::default(),
+            limiter: Default::default(),
         };
         let app = caloud_api::router(state.clone());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -2497,4 +2545,279 @@ async fn acme_issues_certificates_with_pebble() {
     let before = env.state.certs.resolve("abc.caloud.test").unwrap().not_after;
     caloud_api::certs::scan(&env.state).await.unwrap();
     assert_eq!(env.state.certs.resolve("abc.caloud.test").unwrap().not_after, before);
+}
+
+// ───────────────────────── GitHub App 與主控台防護（ADR 0017） ─────────────────────────
+
+fn gh_sig(secret: &str, body: &str) -> String {
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
+    format!("sha256={}", hex::encode(ring::hmac::sign(&key, body.as_bytes()).as_ref()))
+}
+
+impl Env {
+    async fn webhook(&self, event: &str, delivery: &str, body: &Value, secret: &str) -> StatusCode {
+        let b = body.to_string();
+        self.http
+            .post(self.url("/api/github/webhook"))
+            .header("x-github-event", event)
+            .header("x-github-delivery", delivery)
+            .header("x-hub-signature-256", gh_sig(secret, &b))
+            .header("content-type", "application/json")
+            .body(b)
+            .send()
+            .await
+            .unwrap()
+            .status()
+    }
+}
+
+// FR-GH-05、FR-GH-01、FR-GH-02
+#[tokio::test]
+async fn github_app_install_private_import_and_webhook() {
+    let env = Env::new().await;
+    let (admin, member) = admin_and_member(&env).await;
+    let pem = include_str!("fixtures/github-app-test.pem");
+    let wh = "whsec-0123456789abcdef";
+
+    // 未設定時無法安裝
+    let (st, _) = env.call("GET", "/api/github/install", &member, None).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    // 後台設定：member 不行；首次缺機密 → 400；私鑰錯誤 → 400；成功只回提示
+    let body =
+        json!({ "app_id": 5826601, "client_id": "Iv23liTest", "client_secret": "cs-secret", "private_key": pem, "webhook_secret": wh });
+    assert_eq!(
+        env.call("PUT", "/api/admin/github-app", &member, Some(body.clone())).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (st, _) = env
+        .call(
+            "PUT",
+            "/api/admin/github-app",
+            &admin,
+            Some(json!({ "app_id": 5826601, "client_id": "Iv23liTest" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let mut wrong = body.clone();
+    wrong["app_id"] = json!(999);
+    let (st, v) = env.call("PUT", "/api/admin/github-app", &admin, Some(wrong)).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    let (st, info) = env.call("PUT", "/api/admin/github-app", &admin, Some(body)).await;
+    assert_eq!(st, StatusCode::OK, "{info}");
+    assert_eq!(info["slug"], "caloud-test");
+    assert_eq!(info["webhook_secret_hint"], "…cdef");
+    assert!(!info.to_string().contains("cs-secret") && !info.to_string().contains("PRIVATE KEY"));
+    let enc: String = sqlx::query_scalar("SELECT private_key_enc FROM github_app")
+        .fetch_one(&env.db)
+        .await
+        .unwrap();
+    assert!(enc.starts_with("v1:") && !enc.contains("PRIVATE"));
+    // 更新時省略機密：維持原值
+    let (st, _) = env
+        .call(
+            "PUT",
+            "/api/admin/github-app",
+            &admin,
+            Some(json!({ "app_id": 5826601, "client_id": "Iv23liTest" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK);
+
+    // 安裝：state 一次性且綁定帳號
+    let (_, v) = env.call("GET", "/api/github/install", &member, None).await;
+    let url = v["url"].as_str().unwrap();
+    assert!(url.contains("/ghweb/apps/caloud-test/installations/new?state="), "{url}");
+    let state = url.split("state=").nth(1).unwrap().to_string();
+    // 回呼只轉回主控台，不綁定
+    let res = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
+        .get(env.url(&format!(
+            "/api/github/callback?code=good-code&installation_id=42&state={state}&setup_action=install"
+        )))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.headers()["location"],
+        format!("/#github-complete/code=good-code&installation_id=42&state={state}&setup_action=install").as_str()
+    );
+    // 別人不能用這個 state；用錯 code 失敗且 state 作廢
+    let done = |code: &str, st: &str| json!({ "code": code, "installation_id": 42, "state": st });
+    assert_eq!(
+        env.call("POST", "/api/github/complete", &admin, Some(done("good-code", &state)))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        env.call("POST", "/api/github/complete", &member, Some(done("good-code", &state)))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST,
+        "state 已作廢"
+    );
+    let (_, v) = env.call("GET", "/api/github/install", &member, None).await;
+    let state = v["url"].as_str().unwrap().split("state=").nth(1).unwrap().to_string();
+    let (st, v) = env
+        .call("POST", "/api/github/complete", &member, Some(done("bad-code", &state)))
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    // 安裝不屬於該 GitHub 使用者 → 403
+    let (_, v) = env.call("GET", "/api/github/install", &member, None).await;
+    let state = v["url"].as_str().unwrap().split("state=").nth(1).unwrap().to_string();
+    let (st, _) = env
+        .call(
+            "POST",
+            "/api/github/complete",
+            &member,
+            Some(json!({ "code": "good-code", "installation_id": 77, "state": state })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    // 成功
+    let (_, v) = env.call("GET", "/api/github/install", &member, None).await;
+    let state = v["url"].as_str().unwrap().split("state=").nth(1).unwrap().to_string();
+    let (st, inst) = env
+        .call("POST", "/api/github/complete", &member, Some(done("good-code", &state)))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{inst}");
+    assert_eq!(inst["account_login"], "CAFECA-IO");
+    let (_, list) = env.call("GET", "/api/github/installations", &member, None).await;
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    // 已綁定他人的安裝 → 409
+    let (_, v) = env.call("GET", "/api/github/install", &admin, None).await;
+    let state = v["url"].as_str().unwrap().split("state=").nth(1).unwrap().to_string();
+    assert_eq!(
+        env.call("POST", "/api/github/complete", &admin, Some(done("good-code", &state)))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+
+    // 儲存庫列表
+    let (st, repos) = env.call("GET", "/api/github/installations/42/repositories", &member, None).await;
+    assert_eq!(st, StatusCode::OK, "{repos}");
+    assert_eq!(repos[0]["full_name"], "CAFECA-IO/docs");
+    assert_eq!(repos[1]["private"], true);
+
+    // 以安裝匯入私有儲存庫：權杖只經環境變數給 git
+    std::fs::write(env.dir.join("gitrepo/index.html"), "<h1>hi</h1>").unwrap();
+    let (st, p) = env
+        .call(
+            "POST",
+            "/api/projects",
+            &member,
+            Some(json!({ "installation_id": 42, "repo_full_name": "CAFECA-IO/secret-app" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{p}");
+    assert_eq!(p["repo_full_name"], "CAFECA-IO/secret-app");
+    assert_eq!(p["name"], "secret-app");
+    let pid = p["id"].as_str().unwrap().to_string();
+    wait_project(&env, &member, &pid).await;
+    let log = std::fs::read_to_string(env.dir.join("git.log")).unwrap();
+    let fetch = log.lines().find(|l| l.contains(" fetch ") && l.contains("secret-app")).unwrap();
+    assert!(
+        fetch.ends_with("[auth=Authorization: Basic eC1hY2Nlc3MtdG9rZW46aW5zdC10b2stNDI=]"),
+        "{fetch}"
+    );
+    assert!(
+        !log.lines().any(|l| l.split(" [auth=").next().unwrap().contains("inst-tok")),
+        "權杖不在參數中"
+    );
+    // 別人的安裝不能匯入
+    let (st, _) = env
+        .call(
+            "POST",
+            "/api/projects",
+            &admin,
+            Some(json!({ "installation_id": 999, "repo_full_name": "a/b" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+
+    // webhook：簽章錯誤 → 401；push 到預設分支 → 重新解析；重送不重複
+    let push = json!({ "ref": "refs/heads/main", "installation": { "id": 42 },
+        "repository": { "full_name": "CAFECA-IO/secret-app", "default_branch": "main" } });
+    assert_eq!(
+        env.webhook("push", "d-1", &push, "wrong-secret-0000").await,
+        StatusCode::UNAUTHORIZED
+    );
+    let before = log.lines().filter(|l| l.contains(" fetch ")).count();
+    assert_eq!(env.webhook("push", "d-1", &push, wh).await, StatusCode::OK);
+    wait_project(&env, &member, &pid).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_project(&env, &member, &pid).await;
+    assert_eq!(env.webhook("push", "d-1", &push, wh).await, StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let log = std::fs::read_to_string(env.dir.join("git.log")).unwrap();
+    assert_eq!(log.lines().filter(|l| l.contains(" fetch ")).count(), before + 1, "重送不重複解析");
+    // 其他分支的 push 不觸發
+    let mut other = push.clone();
+    other["ref"] = json!("refs/heads/feature");
+    assert_eq!(env.webhook("push", "d-2", &other, wh).await, StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let log = std::fs::read_to_string(env.dir.join("git.log")).unwrap();
+    assert_eq!(log.lines().filter(|l| l.contains(" fetch ")).count(), before + 1);
+    // 移除安裝
+    let del = json!({ "action": "deleted", "installation": { "id": 42 } });
+    assert_eq!(env.webhook("installation", "d-3", &del, wh).await, StatusCode::OK);
+    let (_, list) = env.call("GET", "/api/github/installations", &member, None).await;
+    assert!(list.as_array().unwrap().is_empty());
+}
+
+// M2-07（NFR-SEC-01）：Origin、速率限制、安全標頭
+#[tokio::test]
+async fn public_console_guard() {
+    let env = Env::new().await;
+    let (admin, _) = env.login(acct(0xa1)).await;
+    // 跨站 Origin 的寫入 → 403；同源 → 正常
+    let post = |origin: &str| {
+        env.http
+            .post(env.url("/api/tokens"))
+            .header("cookie", &admin)
+            .header("origin", origin)
+            .json(&json!({ "name": "x" }))
+            .send()
+    };
+    assert_eq!(post("https://evil.example").await.unwrap().status(), StatusCode::FORBIDDEN);
+    assert_eq!(post(&env.origin).await.unwrap().status(), StatusCode::CREATED);
+    // 速率限制：經 Edge（X-Forwarded-For）的登入 nonce 每分鐘 20 次
+    let mut last = StatusCode::OK;
+    for _ in 0..21 {
+        last = env
+            .http
+            .post(env.url("/api/auth/nonce"))
+            .header("x-forwarded-for", "203.0.113.50")
+            .send()
+            .await
+            .unwrap()
+            .status();
+    }
+    assert_eq!(last, StatusCode::TOO_MANY_REQUESTS);
+    // 其他 IP 不受影響；本機直接連線不限速
+    let ok = env
+        .http
+        .post(env.url("/api/auth/nonce"))
+        .header("x-forwarded-for", "203.0.113.51")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+    // 安全標頭
+    let res = env.http.get(env.url("/")).send().await.unwrap();
+    let h = res.headers();
+    assert_eq!(h["x-frame-options"], "DENY");
+    assert_eq!(h["x-content-type-options"], "nosniff");
+    let csp = h["content-security-policy"].to_str().unwrap();
+    assert!(
+        csp.contains("default-src 'self'") && csp.contains("frame-ancestors 'none'"),
+        "{csp}"
+    );
+    let res = env.http.get(env.url("/api/me")).header("cookie", &admin).send().await.unwrap();
+    assert!(res.headers().get("content-security-policy").is_none());
+    assert_eq!(res.headers()["x-content-type-options"], "nosniff");
 }

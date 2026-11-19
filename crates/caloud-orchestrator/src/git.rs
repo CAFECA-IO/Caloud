@@ -75,7 +75,31 @@ fn dir_size(dir: &Path, limit: u64) -> Option<u64> {
 
 /// 清空 `dir` 後淺層取得 `url` 的 `git_ref`（None 為預設分支）並 checkout
 pub async fn fetch_repo(git_bin: &str, dir: &Path, url: &str, git_ref: Option<&str>) -> anyhow::Result<FetchedRepo> {
-    fetch_repo_limited(git_bin, dir, url, git_ref, MAX_REPO_BYTES).await
+    fetch_repo_limited(git_bin, dir, url, git_ref, None, MAX_REPO_BYTES).await
+}
+
+/// 同 [`fetch_repo`]，以 HTTP 標頭帶入權杖（私有儲存庫，ADR 0017）。
+///
+/// 標頭經 `GIT_CONFIG_COUNT`／`GIT_CONFIG_KEY_0`／`GIT_CONFIG_VALUE_0` 環境變數傳給 git：
+/// 不出現在網址、命令列參數或 `.git/config`。
+pub async fn fetch_repo_with_auth(
+    git_bin: &str,
+    dir: &Path,
+    url: &str,
+    git_ref: Option<&str>,
+    auth_header: &str,
+) -> anyhow::Result<FetchedRepo> {
+    fetch_repo_limited(git_bin, dir, url, git_ref, Some(auth_header), MAX_REPO_BYTES).await
+}
+
+/// 只對需要網路的指令加上授權標頭
+fn with_auth(mut cmd: Command, auth: Option<&str>) -> Command {
+    if let Some(h) = auth {
+        cmd.env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+            .env("GIT_CONFIG_VALUE_0", h);
+    }
+    cmd
 }
 
 pub(crate) async fn fetch_repo_limited(
@@ -83,6 +107,7 @@ pub(crate) async fn fetch_repo_limited(
     dir: &Path,
     url: &str,
     git_ref: Option<&str>,
+    auth: Option<&str>,
     max_bytes: u64,
 ) -> anyhow::Result<FetchedRepo> {
     let job = async {
@@ -92,9 +117,12 @@ pub(crate) async fn fetch_repo_limited(
         tokio::fs::create_dir_all(dir).await?;
         run(git(git_bin, dir, &["init", "-q"])).await?;
         let r = git_ref.unwrap_or("HEAD");
-        run(git(git_bin, dir, &["fetch", "-q", "--depth", "1", "--no-tags", url, r]))
-            .await
-            .map_err(|e| anyhow::anyhow!("無法取得 {url} 的 {r}：{e}"))?;
+        run(with_auth(
+            git(git_bin, dir, &["fetch", "-q", "--depth", "1", "--no-tags", url, r]),
+            auth,
+        ))
+        .await
+        .map_err(|e| anyhow::anyhow!("無法取得 {url} 的 {r}：{e}"))?;
         run(git(git_bin, dir, &["checkout", "-q", "FETCH_HEAD"])).await?;
         let commit = run(git(git_bin, dir, &["rev-parse", "HEAD"]))
             .await
@@ -102,7 +130,7 @@ pub(crate) async fn fetch_repo_limited(
             .unwrap_or_default();
         let branch = match git_ref {
             Some(_) => None,
-            None => run(git(git_bin, dir, &["ls-remote", "--symref", url, "HEAD"]))
+            None => run(with_auth(git(git_bin, dir, &["ls-remote", "--symref", url, "HEAD"]), auth))
                 .await
                 .ok()
                 .and_then(|out| parse_symref(&out)),
@@ -152,7 +180,7 @@ mod tests {
         std::fs::write(
             &fake,
             format!(
-                "#!/bin/sh\necho \"$*\" >> '{log}'\ncase \"$*\" in *' checkout '*) head -c 2048 /dev/zero > \"$2/blob\";; \
+                "#!/bin/sh\necho \"$* [auth=${{GIT_CONFIG_VALUE_0:-none}}]\" >> '{log}'\ncase \"$*\" in *' checkout '*) head -c 2048 /dev/zero > \"$2/blob\";; \
                  *' rev-parse '*) echo 0123456789abcdef0123456789abcdef01234567;; *' ls-remote '*) printf 'ref: refs/heads/trunk\\tHEAD\\n';; esac\nexit 0\n",
                 log = log.display()
             ),
@@ -172,11 +200,24 @@ mod tests {
         let r = fetch_repo(&git_bin, &dir, "https://github.com/x/y", Some("v1")).await.unwrap();
         assert_eq!(r.branch, None);
 
-        let err = fetch_repo_limited(&git_bin, &dir, "https://github.com/x/y", Some("v1"), 1024)
+        let err = fetch_repo_limited(&git_bin, &dir, "https://github.com/x/y", Some("v1"), None, 1024)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("上限"), "{err}");
         assert!(!dir.exists(), "超過上限時刪除");
+
+        // ADR 0017：權杖只經環境變數給需要網路的指令，不在網址與參數中
+        std::fs::write(&log, "").unwrap();
+        fetch_repo_with_auth(&git_bin, &dir, "https://github.com/x/y", None, "Authorization: Basic dG9r")
+            .await
+            .unwrap();
+        let calls = std::fs::read_to_string(&log).unwrap();
+        for l in calls.lines() {
+            let (args, auth) = l.split_once(" [auth=").unwrap();
+            assert!(!args.contains("dG9r"), "{l}");
+            let net = args.contains(" fetch ") || args.contains(" ls-remote ");
+            assert_eq!(auth.starts_with("Authorization: Basic dG9r"), net, "{l}");
+        }
         let _ = std::fs::remove_dir_all(&base);
     }
 }

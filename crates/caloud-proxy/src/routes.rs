@@ -21,6 +21,8 @@ pub struct RouteTable {
     /// ACME HTTP-01：token → key authorization
     acme: Arc<ArcSwap<HashMap<String, String>>>,
     changed: Arc<tokio::sync::Notify>,
+    /// 系統路由（例：管理介面網域，ADR 0017）：每次 `replace` 都一併載入
+    fixed: Arc<ArcSwap<Vec<Route>>>,
 }
 
 impl RouteTable {
@@ -42,7 +44,13 @@ impl RouteTable {
         self.passthrough.load().get(&normalize(sni)).cloned()
     }
 
-    pub fn replace(&self, routes: Vec<Route>) {
+    /// 設定系統路由；之後的 `replace`／`reload` 都會包含
+    pub fn set_fixed(&self, routes: Vec<Route>) {
+        self.fixed.store(Arc::new(routes));
+    }
+
+    pub fn replace(&self, mut routes: Vec<Route>) {
+        routes.extend(self.fixed.load().iter().cloned());
         let pass: HashMap<_, _> = routes
             .iter()
             .filter_map(|r| {
@@ -126,5 +134,26 @@ mod tests {
         assert!(t.lookup("other.example.com").is_none());
         assert_eq!(t.lookup_passthrough("APP.example.com").as_deref(), Some("relay:443"));
         assert_eq!(t.lookup_route("app.example.com").unwrap().node.as_deref(), Some("n1"));
+    }
+
+    // ADR 0017：系統路由（管理介面網域）在每次重新載入後都保留
+    #[test]
+    fn fixed_routes_survive_reload() {
+        let t = RouteTable::default();
+        t.set_fixed(vec![Route {
+            hostname: "caloud.cafeca.io".into(),
+            upstream: "http://127.0.0.1:8080".into(),
+            passthrough: None,
+            node: None,
+        }]);
+        t.replace(vec![]);
+        assert_eq!(t.lookup("caloud.cafeca.io").as_deref(), Some("http://127.0.0.1:8080"));
+        t.replace(vec![Route {
+            hostname: "a.example.com".into(),
+            upstream: "http://a:80".into(),
+            passthrough: None,
+            node: None,
+        }]);
+        assert!(t.lookup("caloud.cafeca.io").is_some() && t.lookup("a.example.com").is_some());
     }
 }

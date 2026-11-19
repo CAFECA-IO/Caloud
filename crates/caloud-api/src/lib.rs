@@ -9,6 +9,8 @@ pub mod certs;
 mod cloudflare;
 mod domains;
 mod error;
+pub mod github;
+pub mod guard;
 mod mcp;
 mod projects;
 pub mod service;
@@ -44,6 +46,10 @@ pub struct AppState {
     pub certs: caloud_proxy::CertStore,
     /// 祕密加密主金鑰（FR-OPS-14）；未設定時拒絕設定祕密
     pub master_key: Option<Arc<caloud_core::secret::MasterKey>>,
+    /// GitHub App 的記憶體狀態：安裝 state、installation token（ADR 0017）
+    pub github: Arc<github::Runtime>,
+    /// 速率限制（M2-07）
+    pub limiter: Arc<guard::Limiter>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -98,9 +104,22 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/environments", get(admin::list_envs).post(admin::create_env))
         .route("/api/admin/environments/{subdomain}", delete(admin::delete_env))
         .route("/api/admin/certificates", get(admin::list_certs))
+        .route("/api/admin/github-app", get(github::admin_get).put(github::admin_put))
+        // GitHub App（docs/06 §3.8，ADR 0017）
+        .route("/api/github/install", get(github::install_url))
+        .route("/api/github/callback", get(github::callback))
+        .route("/api/github/complete", post(github::complete))
+        .route("/api/github/installations", get(github::installations))
+        .route("/api/github/installations/{id}/repositories", get(github::repositories))
+        .route(
+            "/api/github/webhook",
+            post(github::webhook).layer(axum::extract::DefaultBodyLimit::max(github::webhook::MAX_BODY)),
+        )
         // Runner agent（ADR 0011）
         .route(caloud_core::agent::CONNECT_PATH, get(agent::connect))
         .route(caloud_core::tunnel::TUNNEL_PATH, get(agent::tunnel))
+        // M2-07：Origin、速率限制、安全標頭
+        .layer(axum::middleware::from_fn_with_state(state.clone(), guard::guard))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state)
 }

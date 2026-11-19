@@ -103,6 +103,16 @@ pub async fn wanted(s: &AppState) -> anyhow::Result<Vec<Want>> {
             kind: Kind::Dns01,
         });
     }
+    // ADR 0017：管理介面網域（系統路由）以 HTTP-01 申請
+    if let Some(host) = s.cfg.public_host() {
+        if !out.iter().any(|w| covers(&w.names, &host)) {
+            out.push(Want {
+                name: host.clone(),
+                kind: Kind::Http01,
+                names: vec![host],
+            });
+        }
+    }
     let domains: Vec<(String,)> = sqlx::query_as(
         "SELECT d.hostname FROM domains d JOIN apps a ON a.id = d.app_id
          WHERE d.verified = 1 AND d.tls_mode = 'none' AND a.status = 'running' AND d.service IS NOT NULL ORDER BY d.hostname",
@@ -110,7 +120,7 @@ pub async fn wanted(s: &AppState) -> anyhow::Result<Vec<Want>> {
     .fetch_all(&s.db)
     .await?;
     for (host,) in domains {
-        // 已由網域池 wildcard 涵蓋的不另外申請
+        // 已由網域池 wildcard 或其他項目涵蓋的不另外申請
         if out.iter().any(|w| covers(&w.names, &host)) {
             continue;
         }
