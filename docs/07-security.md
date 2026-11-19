@@ -34,6 +34,7 @@
 | hosts 預覽 | 預覽影響其他用戶或被當作正式站 | 只有改 hosts 的那台電腦會連到 Caloud；遷移環境的寫入會在最後同步時被舊站資料覆蓋，驗收清單提示不要在預覽中做正式交易 | FR-MIG-07 |
 | 執行用戶程式碼 | 容器逃逸、打內網或 metadata | 控制面與 Runner 分機；gVisor（runsc）；每個環境獨立 `cld<索引>` bridge 與固定網段；防火牆 `CALOUD-ENV-FWD` 丟棄往 10/8、172.16/12、192.168/16、169.254/16、100.64/10 與 TCP 25 的轉送，`CALOUD-ENV-IN` 丟棄環境連往 Runner 主機本身的封包（[ADR 0015](adr/0015-runner-sandbox.md)）；agent 收到的 compose 再以平臺政策檢查一次，且 M4 不接受 `build` | FR-OPS-11 |
 | Runner 自我檢查 | 未設定隔離的主機接到用戶環境 | 啟動時檢查 runsc、防火牆 chain、磁碟，並以兩個探測環境實際驗證；未通過的節點不被調度平臺環境 | FR-OPS-12 |
+| 建置用戶程式碼 | Dockerfile 的 RUN 步驟打主機、內網或其他用戶的建置 | 每次建置一個 gVisor 臨時容器，不共用 daemon；`cldbuild` 網路套用環境防火牆；快取以環境分開；資源上限（ADR 0018） | FR-ENV-12、FR-OPS-11 |
 | Runner 主機設定 | 設定腳本破壞主機上其他服務 | `runner-setup.sh` 只新增 Caloud 自己的 chain、檔案與 daemon.json 的 `runtimes.runsc`，預設 runtime 不變，以 reload 生效不重啟容器；`uninstall` 完整移除 | FR-OPS-11 |
 | Edge TLS 與憑證（[ADR 0016](adr/0016-edge-tls.md)） | 替他人網域簽發憑證；終結錯誤網域的流量 | HTTP-01 只對 TXT 驗證通過、非直通且綁定運作中 App 的網域申請；DNS-01 只對設有權杖的網域池根網域；SNI 沒有直通設定也沒有憑證即關閉連線；wildcard 只配對一層 | FR-DOM-05、FR-OPS-10 |
 | GitHub webhook（[ADR 0017](adr/0017-github-app-public-console.md)） | 偽造事件觸發大量解析；重放 | HMAC-SHA256 驗簽（常數時間比較）、delivery 去重、本體 5 MB 上限、每 IP 速率限制 | FR-GH-02 |
@@ -168,7 +169,7 @@
 | `deploy.resources.reservations.devices`（GPU） | 禁止 | 禁止（GPU 只考慮未來的信任設備） | 禁止 |
 | 資源上限 | 1g、512 pids | 依方案（FR-CI-06 另計建置資源） | 不設 |
 
-建置在 Runner 上以 rootless BuildKit 執行，不使用主機 Docker 的建置；建置可連外網但封鎖雲端 metadata 與平臺內網。
+建置在 Runner 上以 rootless BuildKit 執行，不使用主機 Docker 的建置；建置可連外網但封鎖雲端 metadata 與平臺內網。實作（[ADR 0018](adr/0018-minimal-deploy.md)）：每次建置一個 gVisor（runsc）臨時容器（`buildctl-daemonless.sh`），接在介面名稱 `cldbuild` 的網路上而受 ADR 0015 防火牆規則管控；限 4 CPU、8 GB、4096 pids；快取只在同一環境的 volume 內共用。
 
 ## 4. 機密處理
 
@@ -187,6 +188,7 @@
 | 加密的祕密 | `caloud_core::secret`：ChaCha20-Poly1305、隨機 nonce，格式 `v1:<base64(nonce‖密文)>`，AAD 為「用途:主鍵」 |
 | Cloudflare 權杖 | 加密存於 `domain_pools.cloudflare_token_enc`；只在簽發時解開，用完即丟；稽核只記錄「已設定／已清除」 |
 | GitHub App 機密 | client secret、私鑰、webhook secret 以主金鑰加密存於 `github_app`（AAD `github_app:<欄位>`）；API 只回末 4 碼；稽核只記錄「已更新」（FR-GH-05） |
+| 部署訊息中的權杖 | 私有儲存庫的 installation token 在 `deploy` 訊息中送給 agent | 只經已驗證的節點連線傳送；agent 只放在記憶體並以 `GIT_CONFIG_*` 帶給 git；Debug 輸出遮蔽；1 小時到期（ADR 0018） |
 | GitHub 權杖 | user token 只在安裝回呼時使用一次；installation token 只在記憶體快取至過期前 5 分鐘；git 以 `http.extraHeader` 帶入，不進網址、`.git/config` 與 log（FR-GH-01） |
 | ACME 帳號金鑰與憑證私鑰 | `<data_dir>/acme/`、`<data_dir>/certs/` 下的檔案權限 0600；不經 API 輸出 |
 

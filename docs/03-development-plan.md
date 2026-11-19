@@ -96,6 +96,7 @@
 | M4-08 | Edge TLS 終結（rustls SNI，與直通共用 `:443`）；網域池 wildcard 憑證（Cloudflare DNS-01）、已驗證網域 HTTP-01；`:80` 轉 HTTPS；主金鑰加密 Cloudflare 權杖；後台「HTTPS 憑證」頁（[ADR 0016](adr/0016-edge-tls.md)） | FR-OPS-03、FR-OPS-10、FR-OPS-14、FR-DOM-05、FR-DOM-08 | ✅ |
 | M4-09 | 用戶容器以 gVisor 執行、環境網路隔離、封鎖 metadata；Runner 主機設定腳本與自我檢查 | FR-OPS-11、FR-OPS-12 | ✅ |
 | M4-10 | Admin API 開出環境：environments 資料表、agent 部署與回報、路由經通道 | FR-OPS-13 | ✅ |
+| M4-11 | 後台「Runner 節點」頁：節點列表、加入權杖、排空與啟用；`caloud-agent` systemd 服務（原 M8-03 的節點部分提前） | FR-OPS-04、FR-OPS-06 | 🚧 |
 
 ### M5 GitHub 與解析
 
@@ -142,6 +143,7 @@
 | M7-13 | 盤點、演練環境、資料比對 | FR-MIG-04～06 | ⬜ |
 | M7-14 | 帳號驗收：逐筆比對、hosts 預覽、驗收清單 | FR-MIG-07 | ⬜ |
 | M7-15 | 寫入凍結、最後同步、切換、監控、回退、遷移報告與畫面 | FR-MIG-08～10 | ⬜ |
+| M7-16 | 最小部署流程：確認後建置（gVisor BuildKit）、啟動、健康檢查、開出 production 網址；push 自動重新部署（[ADR 0018](adr/0018-minimal-deploy.md)） | FR-ENV-12 | 🚧 |
 
 ### M8 訂閱與上線
 

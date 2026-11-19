@@ -301,6 +301,7 @@
 | PATCH | `/api/projects/{id}` | 擁有者 | FR-AN-06 |
 | DELETE | `/api/projects/{id}` | 擁有者 | FR-AN-10 |
 | POST | `/api/projects/{id}/analysis` | 擁有者 | FR-AN-10 |
+| POST | `/api/projects/{id}/deploy` | 擁有者 | FR-ENV-12 |
 | PUT | `/api/projects/{id}/analysis` | 擁有者 | FR-AN-03、FR-AN-04 |
 
 **Project**
@@ -344,6 +345,16 @@
 - `compose`：用戶編輯版，以平臺政策（[07 §3.6](07-security.md#36-平臺-app-政策)）檢查，`ports`、`env_file` 也不接受；不送時使用 `result.compose`，若為 null（解析有阻擋項）則必須送。
 - `public_service`：必須是 compose 中的服務。
 - 解析中或沒有解析結果回 `409`。
+
+**POST /api/projects/{id}/deploy** → `202 Deployment`（FR-ENV-12，ADR 0018）：專案必須已確認（否則 `409`）；第一次部署時配置 production 環境（8 字元子網域，之後固定）；部署中再呼叫回 `409`；沒有可用節點回 `409`。`GET /api/projects/{id}` 另回 `deployment`（未部署為 null）：
+
+```json
+{ "subdomain": "q7v2m4kx", "url": "https://q7v2m4kx.caloud.tw", "status": "deploying", "stage": "build",
+  "commit": "98b705d…", "error": null, "node": "uuid", "updated_at": 0,
+  "logs": [ { "stage": "build", "line": "#5 [2/4] RUN npm ci", "at": 0 } ] }
+```
+
+- `status`：`deploying` → `running` | `failed`；`stage`：`fetch`、`build`、`start`、`health`。`logs` 為最近 300 行。
 
 ### 3.8 GitHub（ADR 0017）
 
@@ -452,7 +463,8 @@
 | --- | --- | --- |
 | `register` | `join_token` 或 `node_token`（擇一）、`name`、`specs`（同 Node.specs） | 必須是第一則，10 秒內未收到即關閉。首次以加入權杖註冊；之後以節點權杖重連 |
 | `heartbeat` | `used`（`cpu_millis`、`memory_bytes`，主機目前用量） | 每 `heartbeat_secs` 秒一次；第一則在 `ack` 後立即送出 |
-| `env_status` | `env_id`、`status`（`running`／`failed`／`destroyed`）、`error`?、`services`（`[{name, ip}]`） | 部署或刪除的結果 |
+| `env_status` | `env_id`、`status`（`deploying`／`running`／`failed`／`destroyed`）、`stage`?（`fetch`／`build`／`start`）、`error`?、`services`（`[{name, ip}]`） | 部署進度與結果；`deploying` 只用於回報目前階段（ADR 0018） |
+| `env_log` | `env_id`、`stage`、`line` | 部署過程的輸出，逐行；每行最多 500 字、每階段最多 2000 行 |
 
 **控制面 → Agent**
 
@@ -460,7 +472,7 @@
 | --- | --- | --- |
 | `ack` | `node_id`、`node_token`（只在以加入權杖註冊時出現）、`status`、`heartbeat_secs` | 註冊成功 |
 | `status` | `status` | 維運者排空或恢復節點時通知 |
-| `deploy` | `env`（`id`、`kind`、`compose`、`subnet_index`、`public_service`） | 部署或重新部署環境（FR-OPS-13）；agent 以平臺政策再檢查 compose |
+| `deploy` | `env`（`id`、`kind`、`compose`、`subnet_index`、`public_service`、`source`?） | 部署或重新部署環境（FR-OPS-13）；agent 以平臺政策再檢查 compose。`source`（ADR 0018）：`repo_url`、`commit`、`git_ref`?、`compose_dir`、`auth_header`?；有 source 時 compose 可含 `build`（只限儲存庫內路徑與 `dockerfile_inline`），agent 先取得原始碼、在 gVisor BuildKit 建置後改寫為 image |
 | `destroy` | `env_id` | 停止並刪除環境與其 volume |
 | `error` | `message` | 隨即關閉連線（權杖無效、已使用、已過期、格式錯誤、節點被移除）；agent 收到後不再重連 |
 

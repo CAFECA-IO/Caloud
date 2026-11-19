@@ -180,7 +180,8 @@ MCP 用戶端 ──POST /mcp (Bearer cld_…)──► mcp.rs ──► service
 | `github_installations` | `id`（GitHub installation id） | 擁有者（Caloud 帳號）、GitHub 帳號名稱與類型、是否暫停 | FR-GH-01 |
 | `github_deliveries` | `delivery_id` | webhook 去重：事件類型、收到時間（保留 7 天） | FR-GH-02 |
 | `analyses` | `id`（UUID） | 專案、ref、commit、解析結果（`caloud_analyzer::Analysis` JSON）、用戶編輯的 compose、對外服務、已確認的低信心項目、確認者與時間 | FR-AN-03、FR-AN-04、FR-AN-10 |
-| `environments` | `subdomain` | 環境：主機名稱、用途（production／staging／verify）、所在節點、節點內網段索引、compose、對外服務與 port、狀態（deploying／running／failed／destroying）、錯誤、服務 IP、建立者 | FR-OPS-13 |
+| `environments` | `subdomain` | 環境：所屬專案、部署的 commit 與階段、主機名稱、用途（production／staging／verify）、所在節點、節點內網段索引、compose、對外服務與 port、狀態（deploying／running／failed／destroying）、錯誤、服務 IP、建立者 | FR-OPS-13 |
+| `deploy_logs` | 自增 `id` | 部署 log：環境、階段、內容、時間；每個環境保留最近 2000 行（ADR 0018） | FR-ENV-12 |
 | `migrations`（M7） | `id`（UUID） | 專案、自訂網域、狀態（盤點／演練／凍結／已切換／已回退）、遷移權杖雜湊、快照位置、時間線 | FR-MIG-01～10 |
 | `migration_checks`（M7） | 自增 `id` | 遷移、類型（資料表／檔案／帳號／驗收清單）、對象、來源值、目標值、結果、簽核者 | FR-MIG-06、FR-MIG-07 |
 
@@ -240,7 +241,7 @@ Runner 的 caloud-agent ──WebSocket（主動連出）──► 控制面 /ag
 舊主機的 caloud-agent --migrate ──（主動連出，一次性）──► 控制面（快照、雜湊、最後同步，ADR 0013）
 ```
 
-Runner 主機以 `scripts/runner-setup.sh install` 準備：安裝 gVisor、在 daemon.json 註冊 `runsc`、建立 `CALOUD-ENV-*` 防火牆 chain 與開機還原服務；`uninstall` 完整移除（[ADR 0015](adr/0015-runner-sandbox.md)）。環境容器以 gVisor 執行，每個環境一個 `cld<索引>` bridge 與固定網段，Edge 經通道連到對外服務的固定 IP。
+Runner 主機以 `scripts/runner-setup.sh install` 準備：安裝 gVisor、在 daemon.json 註冊 `runsc`、建立 `CALOUD-ENV-*` 防火牆 chain 與開機還原服務、建立 `caloud-build` 建置網路並拉取 BuildKit 映像、安裝 `caloud-agent.service`（ADR 0018）；`uninstall` 完整移除（[ADR 0015](adr/0015-runner-sandbox.md)）。環境容器以 gVisor 執行，每個環境一個 `cld<索引>` bridge 與固定網段，Edge 經通道連到對外服務的固定 IP。
 
 | 網域 | 用途 |
 | --- | --- |
@@ -271,3 +272,4 @@ Runner 主機以 `scripts/runner-setup.sh install` 準備：安裝 gVisor、在 
 | [0015](adr/0015-runner-sandbox.md) | Runner 環境沙箱：gVisor、固定網段＋extra_hosts 名稱解析、`cld+` 防火牆、自我檢查 |
 | [0016](adr/0016-edge-tls.md) | Edge TLS 終結：`:443` SNI 分流、wildcard（DNS-01）與已驗證網域（HTTP-01）憑證、主金鑰加密 Cloudflare 權杖 |
 | [0017](adr/0017-github-app-public-console.md) | GitHub App：安裝時確認安裝者、installation token 只在記憶體、webhook 驗簽；主控台經 Edge 對外與基本防護 |
+| [0018](adr/0018-minimal-deploy.md) | 最小部署流程：確認後建置（每次建置一個 gVisor BuildKit 臨時容器）、啟動、健康檢查、production 網址 |
