@@ -152,10 +152,11 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 
 | 編號 | 需求 | 優先 | 里程碑 |
 | --- | --- | --- | --- |
-| FR-GH-01 | 透過 GitHub App 授權儲存庫，只申請 contents:read、metadata:read、checks:write、pull_requests:write；使用 1 小時 installation token，不存長期憑證 | P0 | M5 |
-| FR-GH-02 | 接收 push、create（branch）、pull_request 事件（HMAC 驗簽）並觸發驗證 | P0 | M5 |
+| FR-GH-01 | 透過 GitHub App 授權儲存庫，只申請 contents:read、metadata:read、checks:write、pull_requests:write；使用 1 小時 installation token，不存長期憑證；安裝時以一次性使用者授權確認安裝者，再綁定到 Caloud 帳號（[ADR 0017](adr/0017-github-app-public-console.md)） | P0 | M5 |
+| FR-GH-02 | 接收 push、create（branch）、pull_request 事件（HMAC 驗簽、delivery 去重）並觸發驗證；驗證（M6）完成前先觸發重新解析 | P0 | M5 |
 | FR-GH-03 | 驗證狀態與摘要回寫 GitHub Checks；PR 留言附報告連結 | P1 | M6 |
 | FR-GH-04 | 公開儲存庫可直接以網址匯入（無事件，手動觸發） | P2 | M5 |
+| FR-GH-05 | 維運者在後台設定 GitHub App 憑證（App ID、Client ID、client secret、私鑰、webhook secret），機密以主金鑰加密保存、只顯示末 4 碼；設定時以 GitHub API 確認私鑰與 App 相符 | P0 | M5 |
 
 ### 2.10 平臺：服務自動解析 AN
 

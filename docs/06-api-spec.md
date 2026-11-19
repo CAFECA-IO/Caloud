@@ -210,6 +210,8 @@
 | POST | `/api/admin/environments` | admin+ | FR-OPS-13 |
 | DELETE | `/api/admin/environments/{subdomain}` | admin+ | FR-OPS-13 |
 | GET | `/api/admin/certificates` | admin+ | FR-OPS-10、FR-DOM-05 |
+| GET | `/api/admin/github-app` | admin+ | FR-GH-05 |
+| PUT | `/api/admin/github-app` | admin+ | FR-GH-05 |
 
 **DomainPool**
 
@@ -343,6 +345,33 @@
 - `public_service`：必須是 compose 中的服務。
 - 解析中或沒有解析結果回 `409`。
 
+### 3.8 GitHub（ADR 0017）
+
+| Method | Path | 權限 | 需求 |
+| --- | --- | --- | --- |
+| GET | `/api/github/install` | member+ | FR-GH-01 |
+| GET | `/api/github/callback` | member+（session） | FR-GH-01 |
+| GET | `/api/github/installations` | member+ | FR-GH-01 |
+| GET | `/api/github/installations/{id}/repositories` | 安裝擁有者 | FR-GH-01 |
+| POST | `/api/github/webhook` | GitHub（HMAC） | FR-GH-02 |
+
+**GitHubApp**（`GET／PUT /api/admin/github-app`；未設定時 GET 回 `{ "configured": false }`）
+
+```json
+{ "configured": true, "app_id": 5826601, "slug": "caloud", "client_id": "Iv23li…",
+  "client_secret_hint": "…a1b2", "private_key_hint": "…MII=", "webhook_secret_hint": "…00ca", "updated_at": 0 }
+```
+
+- **PUT** `{ "app_id", "client_id", "client_secret"?, "private_key"?, "webhook_secret"? }`：省略的機密維持原值；首次設定三者都必須提供。以私鑰簽 JWT 呼叫 GitHub `GET /app` 確認 App ID 相符並取得 slug，失敗回 `400`；未設定 `CALOUD_MASTER_KEY` 回 `400`。
+- **GET /api/github/install** → `200 { "url": "https://github.com/apps/<slug>/installations/new?state=…" }`；state 一次性、綁定 session、10 分鐘有效。App 未設定回 `409`。
+- **GET /api/github/callback** `?code&installation_id&state&setup_action`：驗證 state、交換 user token、確認安裝屬於該 GitHub 使用者後綁定，`302` 回 `/#projects`（失敗時 `/#projects?github_error=<訊息>`）。安裝已綁定到其他帳號為錯誤。
+- **Installation** `{ "id": 1234, "account_login": "CAFECA-IO", "account_type": "Organization", "suspended": false, "created_at": 0 }`；`GET /api/github/installations` 列出自己的（admin+ 看全部）。
+- **GET /api/github/installations/{id}/repositories** → `200 [ { "full_name": "CAFECA-IO/iSunFA", "private": true, "default_branch": "main" } ]`。
+- **POST /api/github/webhook**：`X-Hub-Signature-256` 錯誤或缺少回 `401`；本體超過 5 MB 回 `413`；同一 `X-GitHub-Delivery` 重送回 `200` 但不重複處理。push、create（branch）、pull_request（opened／synchronize／reopened）使相符專案重新解析；installation deleted 刪除安裝、suspend／unsuspend 更新狀態。
+- **POST /api/projects** 另可帶 `{ "installation_id", "repo_full_name" }` 以安裝匯入私有儲存庫（取代 `repo_url`；安裝必須屬於自己）。Project 回應增加 `installation_id`、`repo_full_name`。
+
+**對外防護（M2-07）**：`/api/**` 寫入請求的 `Origin` 不等於 public origin 時回 `403`；超過速率限制回 `429`（附 `Retry-After`）：`/api/auth/nonce`、`/api/auth/login` 每 IP 每分鐘 20 次、webhook 300 次、其他寫入 120 次。
+
 ## 4. 非 API 路徑
 
 | Path | 說明 |
@@ -355,7 +384,7 @@
 | `GET /assets/{*path}` | Design System 靜態檔，只提供 `caloud-api::assets::FILES` 白名單：`ds/tokens.css`、`ds/components.css`、`ds/theme.css`、`ds/ui.js`、`ds/logo.svg`（品牌標誌，04 §4.1）；其餘回 404 |
 | 代理 `:80` `/.well-known/acme-challenge/{token}` | ACME HTTP-01 回應（M2） |
 | 代理 `:80` 其他路徑 | 依 Host 轉發至容器（FR-DOM-04、FR-DOM-07）；路由帶節點時經該節點通道（FR-OPS-09）；WebSocket／Upgrade 雙向轉接（FR-DOM-06） |
-| 代理 `:443` | 依 TLS SNI：直通網域轉發整條 TCP 連線到 `tls_port`（FR-DOM-09）；其他網域在 Caloud HTTPS 完成（M2-01）前關閉連線 |
+| 代理 `:443` | 依 TLS SNI：直通網域轉發整條 TCP 連線到 `tls_port`（FR-DOM-09）；有 Edge 憑證的網域終結 TLS 後依 Host 轉發（ADR 0016）；`CALOUD_PUBLIC_ORIGIN` 的 host 轉到管理介面本身（ADR 0017）；其他關閉 |
 
 ## 5. MCP 介面
 

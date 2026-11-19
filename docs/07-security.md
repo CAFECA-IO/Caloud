@@ -36,6 +36,9 @@
 | Runner 自我檢查 | 未設定隔離的主機接到用戶環境 | 啟動時檢查 runsc、防火牆 chain、磁碟，並以兩個探測環境實際驗證；未通過的節點不被調度平臺環境 | FR-OPS-12 |
 | Runner 主機設定 | 設定腳本破壞主機上其他服務 | `runner-setup.sh` 只新增 Caloud 自己的 chain、檔案與 daemon.json 的 `runtimes.runsc`，預設 runtime 不變，以 reload 生效不重啟容器；`uninstall` 完整移除 | FR-OPS-11 |
 | Edge TLS 與憑證（[ADR 0016](adr/0016-edge-tls.md)） | 替他人網域簽發憑證；終結錯誤網域的流量 | HTTP-01 只對 TXT 驗證通過、非直通且綁定運作中 App 的網域申請；DNS-01 只對設有權杖的網域池根網域；SNI 沒有直通設定也沒有憑證即關閉連線；wildcard 只配對一層 | FR-DOM-05、FR-OPS-10 |
+| GitHub webhook（[ADR 0017](adr/0017-github-app-public-console.md)） | 偽造事件觸發大量解析；重放 | HMAC-SHA256 驗簽（常數時間比較）、delivery 去重、本體 5 MB 上限、每 IP 速率限制 | FR-GH-02 |
+| GitHub 安裝綁定 | 以他人的 `installation_id` 冒領安裝，讀取他人私有儲存庫 | 安裝時一次性 OAuth，確認安裝屬於該 GitHub 使用者；state 一次性、綁 session、10 分鐘；已綁定他人的安裝回錯誤 | FR-GH-01 |
+| 主控台對外 | 跨站請求偽造、點擊劫持、暴力嘗試 | session cookie `SameSite=Strict`；寫入 API 檢查 `Origin`；CSP、`X-Frame-Options: DENY`、HSTS；登入與寫入 API 速率限制；`X-Forwarded-For` 只信任來自 Edge 的請求 | NFR-SEC-01 |
 | Cloudflare 權杖 | 資料庫或備份外洩後被用來改 DNS | 以主金鑰加密保存（AAD 綁定網域池），只回傳末 4 碼；設定時先經 Cloudflare 驗證；建議權杖只給該 zone 的 DNS 編輯並限制來源 IP | FR-OPS-03、FR-OPS-14 |
 
 ## 2. 權限矩陣
@@ -183,6 +186,8 @@
 | 主金鑰 `CALOUD_MASTER_KEY` | 32 bytes 的 base64，只從環境變數讀取；不寫入資料庫、日誌、API 回應或 `Config` 的 Debug 輸出；正式機另存一份離線備份，遺失時已加密的祕密需重新設定（FR-OPS-14） |
 | 加密的祕密 | `caloud_core::secret`：ChaCha20-Poly1305、隨機 nonce，格式 `v1:<base64(nonce‖密文)>`，AAD 為「用途:主鍵」 |
 | Cloudflare 權杖 | 加密存於 `domain_pools.cloudflare_token_enc`；只在簽發時解開，用完即丟；稽核只記錄「已設定／已清除」 |
+| GitHub App 機密 | client secret、私鑰、webhook secret 以主金鑰加密存於 `github_app`（AAD `github_app:<欄位>`）；API 只回末 4 碼；稽核只記錄「已更新」（FR-GH-05） |
+| GitHub 權杖 | user token 只在安裝回呼時使用一次；installation token 只在記憶體快取至過期前 5 分鐘；git 以 `http.extraHeader` 帶入，不進網址、`.git/config` 與 log（FR-GH-01） |
 | ACME 帳號金鑰與憑證私鑰 | `<data_dir>/acme/`、`<data_dir>/certs/` 下的檔案權限 0600；不經 API 輸出 |
 
 ## 5. 安全相關變更的審查要求
@@ -194,5 +199,6 @@
 - `caloud-api::auth`、`service.rs`、`tokens.rs`、`mcp.rs`、`admin.rs`、`agent.rs` 中的權限與驗證
 - `caloud-runner` 的權杖保存與連線
 - `caloud-core::secret`、`caloud-proxy::tls`、`caloud-api::certs`
+- `caloud-api::github`、`caloud-api::guard`
 - `deploy/`、`Dockerfile`
 - 本文件

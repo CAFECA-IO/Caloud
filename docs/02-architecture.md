@@ -175,7 +175,10 @@ MCP 用戶端 ──POST /mcp (Bearer cld_…)──► mcp.rs ──► service
 | `blocked_hosts` | `hostname` | 封鎖的主機名稱、理由、操作者 | FR-OPS-03 |
 | `nodes` | `id`（UUID） | 名稱、擁有者（空值＝平臺節點）、偵測規格、可配置量、已配置量、狀態（active／draining／offline）、節點權杖雜湊、最後心跳 | FR-OPS-04、FR-OPS-06 |
 | `node_join_tokens` | `token_hash` | 一次性加入權杖、擁有者、到期、使用時間 | FR-OPS-04 |
-| `projects` | `id`（UUID） | 平臺專案：擁有者、名稱、儲存庫網址、ref、預設分支、根目錄、狀態（analyzing／needs_review／confirmed／error）、錯誤、已確認的解析 | FR-GH-04、FR-AN-06、FR-AN-10 |
+| `projects` | `id`（UUID） | 平臺專案：擁有者、名稱、儲存庫網址、ref、預設分支、根目錄、狀態（analyzing／needs_review／confirmed／error）、錯誤、已確認的解析、GitHub 安裝與儲存庫全名（私有儲存庫） | FR-GH-01、FR-GH-04、FR-AN-06、FR-AN-10 |
+| `github_app` | `id`（固定 1） | GitHub App：App ID、slug、Client ID；client secret、私鑰、webhook secret 的密文與提示 | FR-GH-05 |
+| `github_installations` | `id`（GitHub installation id） | 擁有者（Caloud 帳號）、GitHub 帳號名稱與類型、是否暫停 | FR-GH-01 |
+| `github_deliveries` | `delivery_id` | webhook 去重：事件類型、收到時間（保留 7 天） | FR-GH-02 |
 | `analyses` | `id`（UUID） | 專案、ref、commit、解析結果（`caloud_analyzer::Analysis` JSON）、用戶編輯的 compose、對外服務、已確認的低信心項目、確認者與時間 | FR-AN-03、FR-AN-04、FR-AN-10 |
 | `environments` | `subdomain` | 環境：主機名稱、用途（production／staging／verify）、所在節點、節點內網段索引、compose、對外服務與 port、狀態（deploying／running／failed／destroying）、錯誤、服務 IP、建立者 | FR-OPS-13 |
 | `migrations`（M7） | `id`（UUID） | 專案、自訂網域、狀態（盤點／演練／凍結／已切換／已回退）、遷移權杖雜湊、快照位置、時間線 | FR-MIG-01～10 |
@@ -220,7 +223,7 @@ created(verified=0) ──verify 成功──► verified(verified=1) ──bind
 Internet ──:80/:443──► [caloud 容器] ──docker.sock──► Docker Engine（主機）
                           │  data volume: /data (caloud.db, apps/, certs/)
                           └── caloud-edge 網路 ──► caloud-<id>-<svc> 容器們
-管理者 ──► https://<CALOUD_PUBLIC_ORIGIN>（M1 為 :8080，M2 起經 :443）
+管理者 ──► https://<CALOUD_PUBLIC_ORIGIN>（M1 為 :8080；M2-03 起經 Edge 的 :443，ADR 0017）
 ```
 
 - Caloud 本體以 `deploy/docker-compose.yml` 部署；它是唯一允許使用 `ports` 與 docker.sock 的 compose 專案（不經 Caloud 管理）。
@@ -267,3 +270,4 @@ Runner 主機以 `scripts/runner-setup.sh install` 準備：安裝 gVisor、在 
 | [0014](adr/0014-analyzer-crate.md) | 新增 `caloud-analyzer` crate；範本以 `dockerfile_inline` 帶入；附加服務 compose 與範本合併 |
 | [0015](adr/0015-runner-sandbox.md) | Runner 環境沙箱：gVisor、固定網段＋extra_hosts 名稱解析、`cld+` 防火牆、自我檢查 |
 | [0016](adr/0016-edge-tls.md) | Edge TLS 終結：`:443` SNI 分流、wildcard（DNS-01）與已驗證網域（HTTP-01）憑證、主金鑰加密 Cloudflare 權杖 |
+| [0017](adr/0017-github-app-public-console.md) | GitHub App：安裝時確認安裝者、installation token 只在記憶體、webhook 驗簽；主控台經 Edge 對外與基本防護 |

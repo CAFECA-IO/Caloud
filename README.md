@@ -236,6 +236,7 @@ volumes:
 | `MASTER_KEY` | — | 祕密加密主金鑰（32 bytes base64，`openssl rand -base64 32`）；設定 Cloudflare 權杖前必須設定，遺失後需重新設定權杖 |
 | `CLOUDFLARE_API` | `https://api.cloudflare.com/client/v4` | Cloudflare API 端點（測試用） |
 | `ACME_DIRECTORY` / `ACME_CA_FILE` | — | 覆寫 ACME directory 與其 CA（測試用 Pebble 等） |
+| `GITHUB_API` / `GITHUB_WEB` | `https://api.github.com` / `https://github.com` | GitHub API 與網站網址（測試用替身）；GitHub App 憑證在後台設定（ADR 0017） |
 | `DOCKER_BIN` | `docker` | docker CLI 路徑 |
 | `DOH_URL` | `https://cloudflare-dns.com/dns-query` | 網域 TXT 驗證使用的 DNS-over-HTTPS 端點（JSON API） |
 | `GIT_BIN` | `git` | git CLI 路徑（Git 來源 App） |
