@@ -39,7 +39,7 @@
 | --- | --- | --- | --- |
 | Icon | `c-icon` | 24×24 線條圖示（§A.5） | — |
 | AppShell | `c-shell`、`c-shell__main` | 側欄＋內容的頁面骨架 | FR-UI-11 |
-| Sidebar | `c-sidebar`、`c-sidebar__brand`、`c-sidebar__mark`、`c-sidebar__nav`、`c-sidebar__item`、`c-sidebar__count`、`c-sidebar__footer` | 主導覽；`__count` 顯示待處理數 | FR-UI-11 |
+| Sidebar | `c-sidebar`、`c-sidebar__brand`、`c-sidebar__mark`、`c-sidebar__nav`、`c-sidebar__item`、`c-sidebar__count`、`c-sidebar__footer` | 主導覽；`__count` 顯示待處理數；`__mark` 為品牌標誌圖（04 §4.1） | FR-UI-11 |
 | Account | `c-account`、`c-account__avatar`、`c-account__text`、`c-account__name`、`c-account__role` | 側欄中的登入者 | — |
 | Page | `c-page` | 內容容器 | — |
 | PageHeader | `c-page-header`、`c-page-header__text`、`c-page-header__title`、`c-page-header__desc`、`c-page-header__actions` | 頁面標題、說明、主要操作 | FR-UI-01 |
@@ -66,7 +66,7 @@
 | Drawer | `c-drawer`、`c-drawer__header`、`c-drawer__heading`、`c-drawer__title`、`c-drawer__body`、`c-drawer__footer` | 右側面板，檢視／編輯單一資源 | FR-UI-10 |
 | ConfirmDialog | `c-dialog`、`c-dialog__body`、`c-dialog__title`、`c-dialog__actions` | 破壞性操作確認 | FR-UI-03 |
 | Toast | `c-toast-region`、`c-toast`、`c-toast--success`、`c-toast--danger` | 操作結果短暫回饋 | FR-UI-05 |
-| Login | `c-login`、`c-login__panel`、`c-login__mark`、`c-login__title`、`c-login__desc` | 登入與等待核准畫面 | FR-AUTH-01、FR-USER-04 |
+| Login | `c-login`、`c-login__panel`、`c-login__mark`、`c-login__title`、`c-login__desc` | 登入與等待核准畫面；`__mark` 為品牌標誌圖（04 §4.1） | FR-AUTH-01、FR-USER-04 |
 | Layout | `l-stack`、`l-row`、`l-grid`、`l-spacer` | 垂直堆疊／水平排列／自動欄格／撐開空間 | — |
 | Utilities | `u-muted`、`u-small`、`u-mono`、`u-nowrap`、`u-truncate`、`u-hidden`、`u-sr-only` | 次要色／小字／等寬／不換行／截斷／隱藏／僅報讀器 | — |
 | States | `is-active`、`is-current`、`is-done`、`is-clickable`、`is-loading` | 由 JS 切換 | — |
