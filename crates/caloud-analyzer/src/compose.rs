@@ -1,5 +1,6 @@
 //! 依序找出解析來源並組出 compose（設計稿 §6、ADR 0014）。
 use crate::deps;
+use crate::runtime;
 use crate::templates::{self, Detected};
 use crate::{Confidence, Ctx, Source};
 use serde_yaml::{Mapping, Value};
@@ -237,8 +238,34 @@ fn add_app(cx: &mut Ctx, doc: &mut Value, det: Detected, context: &str) -> Vec<S
     let mut build = Mapping::new();
     build.insert("context".into(), context.into());
     build.insert("dockerfile_inline".into(), det.dockerfile.as_str().into());
+    // FR-AN-09：建置時變數由平臺在建置前提供
+    if !det.build_args.is_empty() {
+        let args: Mapping = det
+            .build_args
+            .iter()
+            .map(|a| (Value::from(a.as_str()), Value::from(format!("${{{a}}}"))))
+            .collect();
+        build.insert("args".into(), Value::Mapping(args));
+    }
     let mut svc = Mapping::new();
     svc.insert("build".into(), Value::Mapping(build));
+    // FR-AN-07：持久化目錄掛具名 volume
+    let mut new_vols = Vec::new();
+    if !det.persist.is_empty() {
+        let mut mounts = Vec::new();
+        for p in &det.persist {
+            let vol = runtime::volume_name(&name, &p.dir);
+            mounts.push(Value::from(format!("{vol}:/app/{}", p.dir)));
+            cx.note(
+                "persistent_dir",
+                p.confidence,
+                format!("`{}/` 需要保留（{}）：以具名 volume `{vol}` 掛載。", p.dir, p.why.join("、")),
+                p.evidence.clone(),
+            );
+            new_vols.push(vol);
+        }
+        svc.insert("volumes".into(), Value::Sequence(mounts));
+    }
     let mut env = Mapping::new();
     for (k, v) in &det.env {
         env.insert(k.as_str().into(), v.as_str().into());
@@ -247,6 +274,16 @@ fn add_app(cx: &mut Ctx, doc: &mut Value, det: Detected, context: &str) -> Vec<S
         svc.insert("environment".into(), Value::Mapping(env));
     }
     services.insert(name.as_str().into(), Value::Mapping(svc));
+    if !new_vols.is_empty() {
+        if let Some(top) = doc.as_mapping_mut() {
+            let vols = top.entry("volumes".into()).or_insert_with(|| Value::Mapping(Mapping::new()));
+            if let Some(vm) = vols.as_mapping_mut() {
+                for v in new_vols {
+                    vm.entry(v.into()).or_insert_with(|| Value::Mapping(Mapping::new()));
+                }
+            }
+        }
+    }
     let mut provided: Vec<String> = det.env.iter().map(|(k, _)| k.clone()).collect();
     provided.extend(deps::add_databases(cx, doc, &name, &det.databases));
     provided

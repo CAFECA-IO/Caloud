@@ -441,3 +441,207 @@ fn analysis_round_trips_as_json() {
     let back: Analysis = serde_json::from_value(j).unwrap();
     assert_eq!(back.source, Source::Static);
 }
+
+fn finding<'a>(a: &'a Analysis, key: &str, contains: &str) -> &'a Finding {
+    a.findings
+        .iter()
+        .find(|f| f.key == key && f.message.contains(contains))
+        .unwrap_or_else(|| panic!("finding {key} ~ {contains}: {:#?}", a.findings))
+}
+
+// FR-AN-08：Node 原生模組與系統套件由範本加裝；預編譯者不加裝
+#[test]
+fn node_system_packages_are_installed() {
+    let pkg = r#"{"scripts":{"start":"node server.js"},"dependencies":{"express":"4","canvas":"2","bcrypt":"5","playwright":"1","sharp":"0.33","fluent-ffmpeg":"2"}}"#;
+    let r = Repo::new("node-sys", &[("package.json", pkg), ("package-lock.json", "{}")]);
+    let a = r.analyze("");
+    let c = a.compose.clone().unwrap();
+    assert!(c.contains("apt-get install -y --no-install-recommends"), "{c}");
+    for p in ["libcairo2-dev", "build-essential", "ffmpeg", "python3", "make", "g++"] {
+        assert!(c.contains(p), "{p}\n{c}");
+    }
+    // apt 在安裝依賴之前；Playwright 在安裝依賴之後
+    let apt = c.find("apt-get install").unwrap();
+    let npm = c.find("RUN npm ci").unwrap();
+    let pw = c.find("npx playwright install --with-deps chromium").unwrap();
+    assert!(apt < npm && npm < pw, "{c}");
+    let f = finding(&a, "system_package", "`canvas`");
+    assert_eq!(f.confidence, Confidence::High);
+    assert_eq!(f.evidence[0].file, "package.json");
+    assert_eq!(finding(&a, "native_module", "`bcrypt`").confidence, Confidence::High);
+    assert_eq!(finding(&a, "native_module", "`sharp`").confidence, Confidence::High);
+    assert!(!c.contains("libvips"));
+}
+
+// FR-AN-08：Python、Go、Rust 與 Aptfile
+#[test]
+fn other_language_system_packages() {
+    let py = Repo::new(
+        "py-sys",
+        &[
+            ("requirements.txt", "fastapi\nopencv-python==4.9\npsycopg2\nplaywright\n"),
+            ("main.py", "from fastapi import FastAPI\napp = FastAPI()\n"),
+            ("Aptfile", "# extra\nimagemagick\nhttps://example.com/x.deb\nfoo; rm -rf /\n"),
+        ],
+    );
+    let a = py.analyze("");
+    let c = a.compose.clone().unwrap();
+    for p in ["libgl1", "libglib2.0-0", "libpq-dev", "gcc", "imagemagick"] {
+        assert!(c.contains(p), "{p}\n{c}");
+    }
+    assert!(!c.contains("example.com") && !c.contains("foo;"), "Aptfile 只接受套件名稱\n{c}");
+    assert!(c.contains("RUN playwright install --with-deps chromium"));
+    assert_eq!(finding(&a, "system_package", "Aptfile").confidence, Confidence::Medium);
+    assert_eq!(finding(&a, "system_package", "不是套件名稱").confidence, Confidence::Medium);
+
+    let go = Repo::new(
+        "go-sys",
+        &[
+            ("go.mod", "module x\n\ngo 1.23\n\nrequire github.com/mattn/go-sqlite3 v1.14.0\n"),
+            ("main.go", "package main\nfunc main() {}\n"),
+        ],
+    );
+    let a = go.analyze("");
+    let c = a.compose.clone().unwrap();
+    assert!(c.contains("CGO_ENABLED=1") && c.contains("FROM debian:bookworm-slim"), "{c}");
+    assert!(!c.contains("distroless"));
+    finding(&a, "native_module", "cgo");
+
+    let rust = Repo::new(
+        "rust-sys",
+        &[
+            ("Cargo.toml", "[package]\nname = \"svc\"\n"),
+            ("Cargo.lock", "[[package]]\nname = \"openssl-sys\"\nversion = \"0.9\"\n"),
+        ],
+    );
+    let a = rust.analyze("");
+    let c = a.compose.clone().unwrap();
+    assert!(c.contains("ca-certificates libssl3"), "{c}");
+    assert_eq!(finding(&a, "system_package", "openssl-sys").evidence[0].file, "Cargo.lock");
+}
+
+// FR-AN-07：寫入的目錄掛具名 volume；暫存、建置產物與含原始碼的目錄不掛
+#[test]
+fn persistent_dirs_get_named_volumes() {
+    let pkg = r#"{"scripts":{"start":"node server.js"},"dependencies":{"express":"4","multer":"1"}}"#;
+    let server = "const upload = multer({ dest: 'uploads/' });\n\
+                  fs.writeFileSync('/tmp/x.txt', 'a');\n\
+                  fs.mkdirSync('./dist/cache', { recursive: true });\n\
+                  const dir = process.env.DATA_DIR || './data';\n\
+                  fs.writeFileSync(`./reports/${id}.json`, 'a');\n\
+                  fs.writeFileSync('src/gen.js', 'x');\n\
+                  fs.writeFileSync('state.json', '{}');\n";
+    let r = Repo::new(
+        "persist",
+        &[
+            ("package.json", pkg),
+            ("package-lock.json", "{}"),
+            ("server.js", server),
+            ("src/index.js", "module.exports = 1;\n"),
+            ("media/.gitkeep", ""),
+        ],
+    );
+    let a = r.analyze("");
+    let c = a.compose.clone().unwrap();
+    assert!(c.contains("web-uploads:/app/uploads"), "{c}");
+    assert!(c.contains("web-data:/app/data"), "{c}");
+    assert!(c.contains("web-media:/app/media"), "{c}");
+    for no in ["/app/tmp", "/app/dist", "/app/src", "reports"] {
+        assert!(!c.contains(no), "{no}\n{c}");
+    }
+    // 頂層宣告具名 volume
+    let doc: serde_yaml::Value = serde_yaml::from_str(&c).unwrap();
+    assert!(doc["volumes"].get("web-uploads").is_some());
+    let up = finding(&a, "persistent_dir", "`uploads/`");
+    assert_eq!(up.confidence, Confidence::High);
+    assert_eq!(
+        up.evidence[0],
+        Evidence {
+            file: "server.js".into(),
+            line: Some(1)
+        }
+    );
+    assert_eq!(finding(&a, "persistent_dir", "`data/`").confidence, Confidence::Medium);
+    assert_eq!(finding(&a, "persistent_dir", "`src/`").confidence, Confidence::Medium);
+    assert_eq!(finding(&a, "persistent_dir", "`state.json`").confidence, Confidence::Medium);
+}
+
+// FR-AN-07：Prisma SQLite 改指向 volume
+#[test]
+fn prisma_sqlite_moves_to_volume() {
+    let pkg = r#"{"scripts":{"build":"next build"},"dependencies":{"next":"15","@prisma/client":"6"}}"#;
+    let schema = "datasource db {\n  provider = \"sqlite\"\n  url = env(\"DATABASE_URL\")\n}\n";
+    let r = Repo::new(
+        "sqlite",
+        &[("package.json", pkg), ("package-lock.json", "{}"), ("prisma/schema.prisma", schema)],
+    );
+    let a = r.analyze("");
+    let c = a.compose.clone().unwrap();
+    assert!(c.contains("DATABASE_URL: file:/app/data/app.db"), "{c}");
+    assert!(c.contains("web-data:/app/data"), "{c}");
+    assert_eq!(env(&a, "DATABASE_URL"), Provider::Platform);
+    finding(&a, "persistent_dir", "Prisma 使用 SQLite");
+}
+
+// FR-AN-09：建置時變數以 build args 傳入，並標示隨環境不同者
+#[test]
+fn build_time_variables() {
+    let pkg = r#"{"scripts":{"build":"next build"},"dependencies":{"next":"15"}}"#;
+    let src =
+        "const api = process.env.NEXT_PUBLIC_API_URL;\nconst ga = process.env.NEXT_PUBLIC_GA_ID;\nconst s = process.env.SECRET_KEY;\n";
+    let r = Repo::new(
+        "buildenv",
+        &[("package.json", pkg), ("package-lock.json", "{}"), ("app/page.tsx", src)],
+    );
+    let a = r.analyze("");
+    let c = a.compose.clone().unwrap();
+    let arg = c.find("ARG NEXT_PUBLIC_API_URL").expect(&c);
+    assert!(arg < c.find("RUN npm run build").unwrap(), "{c}");
+    let doc: serde_yaml::Value = serde_yaml::from_str(&c).unwrap();
+    assert_eq!(doc["services"]["web"]["build"]["args"]["NEXT_PUBLIC_GA_ID"], "${NEXT_PUBLIC_GA_ID}");
+    assert!(!c.contains("ARG SECRET_KEY"));
+    let get = |n: &str| a.env.iter().find(|e| e.name == n).unwrap();
+    assert!(get("NEXT_PUBLIC_API_URL").build_time && get("NEXT_PUBLIC_API_URL").varies_by_env);
+    assert!(get("NEXT_PUBLIC_GA_ID").build_time && !get("NEXT_PUBLIC_GA_ID").varies_by_env);
+    assert!(!get("SECRET_KEY").build_time);
+    assert_eq!(finding(&a, "build_env", "2 個建置時變數").confidence, Confidence::High);
+    let v = finding(&a, "build_env", "staging 與 production");
+    assert_eq!(v.confidence, Confidence::Medium);
+    assert!(v.message.contains("NEXT_PUBLIC_API_URL") && !v.message.contains("GA_ID"));
+    // 舊紀錄沒有新欄位仍可讀取
+    let old: EnvVar = serde_json::from_str(r#"{"name":"X","provider":"user","evidence":[]}"#).unwrap();
+    assert!(!old.build_time && !old.varies_by_env);
+}
+
+// FR-AN-07、FR-AN-08：用戶自己的 Dockerfile／compose 只檢查不修改
+#[test]
+fn existing_dockerfile_is_checked_not_modified() {
+    let pkg = r#"{"dependencies":{"express":"4","fluent-ffmpeg":"2","bcrypt":"5"}}"#;
+    let df = "FROM node:22-slim\nWORKDIR /srv\nRUN apt-get update && apt-get install -y build-essential\nCOPY . .\nEXPOSE 3000\n";
+    let server = "fs.mkdirSync('uploads', { recursive: true });\nfs.writeFileSync('cache/x', 'a');\n";
+    let compose = "services:\n  api:\n    build: .\n    volumes:\n      - cache-data:/srv/cache\nvolumes:\n  cache-data: {}\n";
+    let r = Repo::new(
+        "existing",
+        &[
+            ("package.json", pkg),
+            ("Dockerfile", df),
+            ("server.js", server),
+            ("compose.yml", compose),
+        ],
+    );
+    let a = r.analyze("");
+    let c = a.compose.clone().unwrap();
+    assert!(!c.contains("ffmpeg") && !c.contains("uploads"), "不修改用戶設定\n{c}");
+    let f = finding(&a, "system_package", "`fluent-ffmpeg`");
+    assert_eq!(f.confidence, Confidence::Medium);
+    assert!(f.message.contains("`api`") && f.message.contains("Dockerfile"));
+    assert!(!a.findings.iter().any(|f| f.message.contains("`bcrypt`")), "已安裝編譯工具");
+    let p = finding(&a, "persistent_dir", "`uploads/`");
+    assert!(p.message.contains("/srv/uploads"), "{}", p.message);
+    assert!(
+        !a.findings
+            .iter()
+            .any(|f| f.key == "persistent_dir" && f.message.contains("`cache/`")),
+        "已掛 volume"
+    );
+}

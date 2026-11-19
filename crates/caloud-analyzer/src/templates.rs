@@ -1,6 +1,7 @@
 //! 語言範本（設計稿 §6「語言範本」）：以標記檔判斷框架，產生 `dockerfile_inline`。
 use crate::deps::{Db, DbNeed};
-use crate::fs::line_of;
+use crate::fs::{line_of, RepoFs};
+use crate::runtime::{self, apt_run, Lang, Persist};
 use crate::{Confidence, Ctx, Evidence, Finding};
 
 pub(crate) struct Detected {
@@ -11,12 +12,19 @@ pub(crate) struct Detected {
     pub env: Vec<(String, String)>,
     pub databases: Vec<DbNeed>,
     pub findings: Vec<Finding>,
+    /// 要掛具名 volume 的目錄（FR-AN-07）
+    pub persist: Vec<Persist>,
+    /// 以 build args 傳入的建置時變數（FR-AN-09）
+    pub build_args: Vec<String>,
 }
 
 struct Out<'a, 'b> {
     cx: &'a Ctx<'b>,
     findings: Vec<Finding>,
     databases: Vec<DbNeed>,
+    /// Prisma SQLite 的連線變數（範本改指向 volume）
+    sqlite_env: Option<(String, Evidence)>,
+    build_args: Vec<String>,
 }
 
 impl Out<'_, '_> {
@@ -40,8 +48,33 @@ impl Out<'_, '_> {
             });
         }
     }
-    fn done(self, kind: &str, dockerfile: String, env: Vec<(String, String)>) -> Detected {
+    fn done(self, kind: &str, dockerfile: String, mut env: Vec<(String, String)>) -> Detected {
         let mut findings = self.findings;
+        // FR-AN-07：靜態網站不寫入資料
+        let mut persist = Vec::new();
+        if kind != "static" {
+            let (ok, blocked) = runtime::persistent(self.cx);
+            persist = ok;
+            findings.extend(blocked);
+            if let Some((var, ev)) = self.sqlite_env {
+                env.push((var.clone(), "file:/app/data/app.db".into()));
+                findings.push(Finding {
+                    key: "persistent_dir".into(),
+                    message: format!("Prisma 使用 SQLite：範本把 `{var}` 設為 `file:/app/data/app.db` 並以具名 volume 保存 `data/`。"),
+                    confidence: Confidence::Medium,
+                    evidence: vec![ev.clone()],
+                });
+                match persist.iter_mut().find(|p| p.dir == "data") {
+                    Some(p) => p.why.push("Prisma SQLite".into()),
+                    None => persist.push(Persist {
+                        dir: "data".into(),
+                        confidence: Confidence::Medium,
+                        evidence: vec![ev],
+                        why: vec!["Prisma SQLite".into()],
+                    }),
+                }
+            }
+        }
         findings.insert(
             0,
             Finding {
@@ -57,6 +90,8 @@ impl Out<'_, '_> {
             env,
             databases: self.databases,
             findings,
+            persist,
+            build_args: self.build_args,
         }
     }
 }
@@ -76,6 +111,8 @@ pub(crate) fn detect(cx: &Ctx) -> Option<Detected> {
         cx,
         findings: vec![],
         databases: vec![],
+        sqlite_env: None,
+        build_args: vec![],
     };
     if let Some(t) = cx.fs.read("package.json") {
         return node(&mut o, &t).map(|(k, d, e)| o.done(&k, d, e));
@@ -236,10 +273,31 @@ fn node(o: &mut Out, text: &str) -> Option<Tpl> {
             o.db(kind, kind.default_env(), ev);
         }
     }
-    native_signals(o, &deps, "package.json", text);
+    // FR-AN-08：系統套件與原生模組
+    let needs = runtime::system_needs(o.cx, Lang::Node, &runtime::node_deps(o.cx, &pkg, text));
+    let inst = runtime::plan_install(&needs, &mut o.findings);
+    let mut apt = inst.apt.clone();
+    if inst.build_tools {
+        for t in ["python3", "make", "g++"] {
+            if !apt.iter().any(|a| a == t) {
+                apt.push(t.into());
+            }
+        }
+    }
 
     // Dockerfile
-    let mut df = format!("FROM node:{node_v}-bookworm-slim\nWORKDIR /app\n{setup}COPY . .\nRUN {install}\n");
+    let mut df = format!(
+        "FROM node:{node_v}-bookworm-slim\nWORKDIR /app\n{}{setup}COPY . .\nRUN {install}\n",
+        apt_run(&apt)
+    );
+    if inst.playwright {
+        df.push_str("RUN npx playwright install --with-deps chromium\n");
+    }
+    // FR-AN-09：建置時變數以 build args 傳入
+    o.build_args = runtime::build_env_names(o.cx);
+    for a in &o.build_args {
+        df.push_str(&format!("ARG {a}\n"));
+    }
     if prisma && !build.as_deref().unwrap_or_default().contains("prisma generate") {
         df.push_str("RUN npx prisma generate\n");
     }
@@ -308,40 +366,13 @@ fn prisma_db(o: &mut Out) {
         "postgresql" | "postgres" | "cockroachdb" => o.db(Db::Postgres, &env, ev),
         "mysql" => o.db(Db::Mysql, &env, ev),
         "mongodb" => o.db(Db::Mongo, &env, ev),
-        "sqlite" => o.note(
-            "database",
-            Confidence::Medium,
-            "Prisma 使用 SQLite：資料檔需要具名 volume 才能保留。",
-            vec![ev],
-        ),
+        "sqlite" => o.sqlite_env = Some((env, ev)),
         other => o.note(
             "database",
             Confidence::Low,
             format!("無法判斷 Prisma provider `{other}`，請確認需要的資料庫。"),
             vec![ev],
         ),
-    }
-}
-
-/// 需要系統套件的依賴（FR-AN-08 的初步訊號，完整處理見 M5-08）
-fn native_signals(o: &mut Out, deps: &[String], file: &str, text: &str) {
-    for (d, what) in [
-        ("playwright", "Chromium"),
-        ("puppeteer", "Chromium"),
-        ("fluent-ffmpeg", "ffmpeg"),
-        ("onnxruntime-node", "onnxruntime"),
-        ("onnxruntime", "onnxruntime"),
-        ("canvas", "cairo"),
-    ] {
-        if deps.iter().any(|x| x == d) {
-            let ev = o.ev(file, text, d);
-            o.note(
-                "system_package",
-                Confidence::Medium,
-                format!("依賴 `{d}` 需要 {what}，範本未安裝；請確認或改用自備 Dockerfile。"),
-                vec![ev],
-            );
-        }
     }
 }
 
@@ -424,10 +455,16 @@ fn rust(o: &mut Out, text: &str) -> Option<Tpl> {
         "假設程式讀取 PORT（設為 8080）；若固定其他 port 請修改。",
         vec![ev],
     );
+    // FR-AN-08：rust 建置映像已含 libssl-dev／pkg-config；runtime 補上執行時函式庫
+    let needs = runtime::system_needs(o.cx, Lang::Rust, &runtime::rust_deps(o.cx, text));
+    let inst = runtime::plan_install(&needs, &mut o.findings);
+    let mut apt = vec!["ca-certificates".to_string()];
+    apt.extend(inst.apt);
     let df = format!(
         "FROM rust:1-bookworm AS build\nWORKDIR /src\nCOPY . .\nRUN cargo build --release --bin {bin}\n\
-         FROM debian:bookworm-slim\nRUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*\n\
-         COPY --from=build /src/target/release/{bin} /usr/local/bin/app\nENV PORT=8080\nEXPOSE 8080\nCMD [\"app\"]\n"
+         FROM debian:bookworm-slim\n{}WORKDIR /app\n\
+         COPY --from=build /src/target/release/{bin} /usr/local/bin/app\nENV PORT=8080\nEXPOSE 8080\nCMD [\"app\"]\n",
+        apt_run(&apt)
     );
     Some(("rust".into(), df, vec![("PORT".into(), "8080".into())]))
 }
@@ -499,16 +536,29 @@ fn go(o: &mut Out, text: &str) -> Option<Tpl> {
         "假設程式讀取 PORT（設為 8080）；若固定其他 port 請修改。",
         vec![ev],
     );
-    let df = format!(
-        "FROM golang:{version} AS build\nWORKDIR /src\nCOPY . .\nRUN CGO_ENABLED=0 go build -o /out/app {pkg}\n\
-         FROM gcr.io/distroless/static-debian12\nCOPY --from=build /out/app /app\nENV PORT=8080\nEXPOSE 8080\nENTRYPOINT [\"/app\"]\n"
-    );
+    // FR-AN-08：cgo 依賴或需要 apt 套件時改用 debian runtime
+    let needs = runtime::system_needs(o.cx, Lang::Go, &runtime::go_deps(o.cx, text));
+    let inst = runtime::plan_install(&needs, &mut o.findings);
+    let df = if inst.cgo || !inst.apt.is_empty() {
+        let mut apt = vec!["ca-certificates".to_string()];
+        apt.extend(inst.apt);
+        format!(
+            "FROM golang:{version}-bookworm AS build\nWORKDIR /src\nCOPY . .\nRUN CGO_ENABLED={} go build -o /out/app {pkg}\n\
+             FROM debian:bookworm-slim\n{}WORKDIR /app\nCOPY --from=build /out/app /usr/local/bin/app\nENV PORT=8080\nEXPOSE 8080\nENTRYPOINT [\"app\"]\n",
+            if inst.cgo { 1 } else { 0 },
+            apt_run(&apt)
+        )
+    } else {
+        format!(
+            "FROM golang:{version} AS build\nWORKDIR /src\nCOPY . .\nRUN CGO_ENABLED=0 go build -o /out/app {pkg}\n\
+             FROM gcr.io/distroless/static-debian12\nWORKDIR /app\nCOPY --from=build /out/app /usr/local/bin/app\nENV PORT=8080\nEXPOSE 8080\nENTRYPOINT [\"/usr/local/bin/app\"]\n"
+        )
+    };
     Some(("go".into(), df, vec![("PORT".into(), "8080".into())]))
 }
 
 /// requirements.txt 或 pyproject.toml 的套件名稱（小寫）與所在檔案
-fn python_deps(o: &Out) -> Vec<(String, String)> {
-    let fs = o.cx.fs;
+pub(crate) fn python_deps(fs: &RepoFs) -> Vec<(String, String)> {
     let mut out = Vec::new();
     if let Some(t) = fs.read("requirements.txt") {
         for l in t.lines() {
@@ -614,7 +664,7 @@ fn declared_command(o: &Out) -> Option<(String, Evidence, Confidence)> {
 
 fn python(o: &mut Out) -> Option<Tpl> {
     let fs = o.cx.fs;
-    let deps = python_deps(o);
+    let deps = python_deps(fs);
     let has = |d: &str| deps.iter().find(|(n, _)| n == d).map(|(_, f)| f.clone());
     let install = if fs.is_file("requirements.txt") {
         "pip install --no-cache-dir -r requirements.txt"
@@ -755,14 +805,18 @@ fn python(o: &mut Out) -> Option<Tpl> {
             o.db(k, k.default_env(), ev);
         }
     }
-    let names: Vec<String> = deps.iter().map(|(n, _)| n.clone()).collect();
-    if let Some((_, f)) = deps.first() {
-        let t = fs.read(f).unwrap_or_default();
-        native_signals(o, &names, f, &t);
-    }
-    let mut df = format!("FROM python:3.12-slim\nWORKDIR /app\nCOPY . .\nRUN {install}\n");
+    // FR-AN-08
+    let needs = runtime::system_needs(o.cx, Lang::Python, &runtime::python_dep_evidence(o.cx));
+    let inst = runtime::plan_install(&needs, &mut o.findings);
+    let mut df = format!(
+        "FROM python:3.12-slim\nWORKDIR /app\n{}COPY . .\nRUN {install}\n",
+        apt_run(&inst.apt)
+    );
     if !extra.is_empty() {
         df.push_str(&format!("RUN pip install --no-cache-dir {}\n", extra.join(" ")));
+    }
+    if inst.playwright {
+        df.push_str("RUN playwright install --with-deps chromium\n");
     }
     df.push_str(&format!("ENV PORT=8000\nEXPOSE 8000\nCMD {cmd}\n"));
     if framework != "declared" {

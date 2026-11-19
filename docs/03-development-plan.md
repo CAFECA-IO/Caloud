@@ -108,7 +108,7 @@
 | M5-05 | 匯入與解析確認畫面；解析紀錄與確認 | FR-AN-04、FR-AN-10 | ✅ |
 | M5-06 | 平臺 App compose 政策（repo 內 build、`env_file` 轉換） | FR-AN-05 | ✅ |
 | M5-07 | 子目錄（monorepo）根目錄 | FR-AN-06 | ✅ |
-| M5-08 | 偵測持久化目錄、系統套件與原生模組、建置時變數（[ADR 0014](adr/0014-analyzer-crate.md) 增補） | FR-AN-07、FR-AN-08、FR-AN-09 | 🚧 |
+| M5-08 | 偵測持久化目錄、系統套件與原生模組、建置時變數（[ADR 0014](adr/0014-analyzer-crate.md) 增補） | FR-AN-07、FR-AN-08、FR-AN-09 | ✅ |
 
 ### M6 驗證與報告
 

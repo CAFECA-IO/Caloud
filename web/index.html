@@ -480,7 +480,7 @@ async function renderProject(id) {
         <td>${fmtMsg(f.message)}</td>
         <td>${f.evidence.map((ev) => evidenceLink(p, a.commit, ev)).join("<br>") || '<span class="u-muted">—</span>'}</td>
         <td>${f.confidence === "low" ? `<label class="c-check"><input type="checkbox" data-ack="${i}" ${acked.has(i) ? "checked" : ""}><span>我已確認</span></label>` : ""}</td></tr>`).join("");
-    const envRows = r.env.map((e) => `<tr><td class="c-table__primary u-mono">${esc(e.name)}</td><td class="u-small ${e.provider === "user" ? "" : "u-muted"}">${esc(PROVIDER_LABEL[e.provider])}</td>
+    const envRows = r.env.map((e) => `<tr><td><span class="c-table__primary u-mono">${esc(e.name)}</span>${e.build_time ? ' <span class="c-badge" title="值在建置時寫入前端">建置時</span>' : ""}${e.varies_by_env ? ' <span class="c-badge c-badge--warning" title="staging 與 production 需各自建置">隨環境不同</span>' : ""}</td><td class="u-small ${e.provider === "user" ? "" : "u-muted"}">${esc(PROVIDER_LABEL[e.provider])}</td>
         <td>${e.evidence.map((ev) => evidenceLink(p, a.commit, ev)).join("<br>") || '<span class="u-muted">—</span>'}</td></tr>`).join("");
     const userVars = r.env.filter((e) => e.provider === "user").length;
     const composeText = editedCompose ?? r.compose;

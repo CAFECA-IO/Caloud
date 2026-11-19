@@ -7,6 +7,7 @@
 mod compose;
 mod deps;
 pub mod fs;
+mod runtime;
 mod templates;
 
 use fs::RepoFs;
@@ -92,6 +93,12 @@ pub struct EnvVar {
     pub name: String,
     pub provider: Provider,
     pub evidence: Vec<Evidence>,
+    /// 建置時寫入前端（FR-AN-09）
+    #[serde(default)]
+    pub build_time: bool,
+    /// 值隨環境不同（網址、origin 類）：staging 與 production 需各自建置
+    #[serde(default)]
+    pub varies_by_env: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,9 +124,15 @@ pub(crate) struct Ctx<'a> {
     pub fs: &'a RepoFs,
     pub findings: Vec<Finding>,
     pub errors: Vec<String>,
+    /// 程式碼只掃一次（環境變數、持久化共用）
+    code: std::cell::OnceCell<runtime::CodeScan>,
 }
 
 impl Ctx<'_> {
+    pub fn code(&self) -> &runtime::CodeScan {
+        self.code.get_or_init(|| runtime::scan_code(self.fs))
+    }
+
     pub fn ev(&self, rel: &str, line: Option<u32>) -> Evidence {
         Evidence {
             file: self.fs.display(rel),
@@ -172,10 +185,17 @@ pub fn analyze(repo: &Path, opts: &Options) -> Analysis {
         fs: &fs,
         findings: vec![],
         errors: vec![],
+        code: Default::default(),
     };
 
     let plan = compose::plan(&mut cx);
     let (source, compose_dir, doc, app_env) = (plan.source, plan.compose_dir, plan.doc, plan.app_env);
+    // M5-08：用戶自己的 Dockerfile 與 compose 只檢查、不修改
+    if let Some(doc) = &doc {
+        if matches!(source, Source::Compose { .. } | Source::Dockerfile { .. } | Source::Override { .. }) {
+            check_existing(&mut cx, doc, &compose_dir);
+        }
+    }
 
     // 平臺政策（07 §3.6）：ports、env_file 轉換後檢查
     let depth = compose_dir.split('/').filter(|s| !s.is_empty()).count();
@@ -227,6 +247,7 @@ pub fn analyze(repo: &Path, opts: &Options) -> Analysis {
     if let Some(g) = compose_out.as_deref().and_then(deps::generated) {
         env.push(g);
     }
+    note_build_env(&mut cx, &env, matches!(source, Source::Template { .. }));
 
     let needs_confirmation = !cx.errors.is_empty() || cx.findings.iter().any(|f| f.confidence == Confidence::Low);
     Analysis {
@@ -240,6 +261,139 @@ pub fn analyze(repo: &Path, opts: &Options) -> Analysis {
         errors: cx.errors,
         needs_confirmation,
     }
+}
+
+/// FR-AN-09：建置時變數與隨環境不同者
+fn note_build_env(cx: &mut Ctx, env: &[EnvVar], template: bool) {
+    let build: Vec<&EnvVar> = env.iter().filter(|e| e.build_time).collect();
+    if build.is_empty() {
+        return;
+    }
+    let names: Vec<String> = build.iter().map(|e| format!("`{}`", e.name)).collect();
+    let how = if template {
+        "範本以 build args 傳入，需在建置前設定"
+    } else {
+        "請確認 Dockerfile 以 ARG 接收，並在建置前設定"
+    };
+    cx.note(
+        "build_env",
+        Confidence::High,
+        format!(
+            "{} 個建置時變數（{}）的值會在建置時寫入前端；{how}。",
+            build.len(),
+            names.join("、")
+        ),
+        build.iter().filter_map(|e| e.evidence.first().cloned()).take(3).collect(),
+    );
+    let varies: Vec<&&EnvVar> = build.iter().filter(|e| e.varies_by_env).collect();
+    if !varies.is_empty() {
+        let names: Vec<String> = varies.iter().map(|e| format!("`{}`", e.name)).collect();
+        cx.note(
+            "build_env",
+            Confidence::Medium,
+            format!("{} 的值隨環境不同（網址類），staging 與 production 需各自建置。", names.join("、")),
+            varies.iter().filter_map(|e| e.evidence.first().cloned()).take(3).collect(),
+        );
+    }
+}
+
+/// compose／Dockerfile 來源（M5-08）：build 服務的 Dockerfile 是否安裝所需系統套件、是否掛載持久化目錄
+fn check_existing(cx: &mut Ctx, doc: &Value, compose_dir: &str) {
+    let Some(svcs) = doc.get("services").and_then(Value::as_mapping) else {
+        return;
+    };
+    // 範本產生的服務（dockerfile_inline）已在範本處理
+    let builds: Vec<(String, Mapping)> = svcs
+        .iter()
+        .filter_map(|(n, s)| {
+            let s = s.as_mapping()?;
+            let b = s.get("build")?;
+            (b.get("dockerfile_inline").is_none()).then(|| (n.as_str().unwrap_or_default().to_string(), s.clone()))
+        })
+        .collect();
+    if builds.is_empty() {
+        return;
+    }
+    let needs = runtime::repo_deps(cx)
+        .map(|(lang, deps)| runtime::system_needs(cx, lang, &deps))
+        .unwrap_or_default();
+    let (dirs, blocked) = runtime::persistent(cx);
+    let mut findings = Vec::new();
+    for (name, svc) in &builds {
+        let df = build_dockerfile(cx, svc, compose_dir);
+        if let Some((file, text)) = &df {
+            runtime::check_dockerfile(&mut findings, name, file, text, &needs);
+        }
+        // 單一 build 服務才能確定資料屬於誰
+        if builds.len() != 1 {
+            continue;
+        }
+        let workdir = df
+            .as_ref()
+            .and_then(|(_, t)| {
+                t.lines().rev().find_map(|l| {
+                    l.trim()
+                        .strip_prefix("WORKDIR ")
+                        .map(|w| w.trim().trim_end_matches('/').to_string())
+                })
+            })
+            .filter(|w| w.starts_with('/'));
+        let mounts: Vec<String> = svc
+            .get("volumes")
+            .and_then(Value::as_sequence)
+            .map(|v| {
+                v.iter()
+                    .filter_map(|m| match m {
+                        Value::String(s) => s.split(':').nth(1).map(|t| t.trim_end_matches('/').to_string()),
+                        Value::Mapping(m) => m.get("target").and_then(Value::as_str).map(str::to_string),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for p in &dirs {
+            let target = workdir.as_ref().map(|w| format!("{w}/{}", p.dir));
+            let covered = target
+                .as_ref()
+                .is_some_and(|t| mounts.iter().any(|m| t == m || t.starts_with(&format!("{m}/"))));
+            if covered {
+                continue;
+            }
+            let at = target.map(|t| format!("（容器內 `{t}`）")).unwrap_or_default();
+            findings.push(Finding {
+                key: "persistent_dir".into(),
+                message: format!(
+                    "`{name}` 寫入 `{}/`{at}（{}），但沒有掛 volume，重建後資料會遺失；請加上具名 volume。",
+                    p.dir,
+                    p.why.join("、")
+                ),
+                confidence: Confidence::Medium,
+                evidence: p.evidence.clone(),
+            });
+        }
+    }
+    if builds.len() == 1 {
+        findings.extend(blocked);
+    }
+    cx.findings.extend(findings);
+}
+
+/// build 服務在儲存庫內的 Dockerfile（路徑、內容）
+fn build_dockerfile(cx: &Ctx, svc: &Mapping, compose_dir: &str) -> Option<(String, String)> {
+    let build = svc.get("build")?;
+    let (context, dockerfile) = match build {
+        Value::String(c) => (c.as_str(), "Dockerfile"),
+        Value::Mapping(m) => (
+            m.get("context").and_then(Value::as_str).unwrap_or("."),
+            m.get("dockerfile").and_then(Value::as_str).unwrap_or("Dockerfile"),
+        ),
+        _ => return None,
+    };
+    let root = cx.fs.root();
+    let base = compose_dir.strip_prefix(root).unwrap_or(compose_dir).trim_start_matches('/');
+    let rel = normalize_join(&[base, context, dockerfile])?;
+    let text = cx.fs.read(&rel)?;
+    Some((cx.fs.display(&rel), text))
 }
 
 /// 儲存庫中 compose 原文（找依據行號用）
