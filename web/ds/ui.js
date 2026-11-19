@@ -17,8 +17,10 @@ const UI = (() => {
     } catch {
       throw new Error("無法連線到伺服器，請檢查網路後再試。");
     }
-    if (r.status === 204 || r.status === 202) return null;
+    if (r.status === 204) return null;
     const ct = r.headers.get("content-type") || "";
+    // 202 可能沒有本體（例如 App 部署），也可能帶回資源（例如匯入專案、部署專案）
+    if (r.status === 202 && !ct.includes("json")) return null;
     const data = ct.includes("json") ? await r.json() : await r.text();
     if (!r.ok) {
       const e = new Error((data && data.error) || (typeof data === "string" && data) || "伺服器錯誤，請稍後再試。");

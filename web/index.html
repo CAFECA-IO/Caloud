@@ -460,7 +460,8 @@ async function openImport() {
     try {
       const p = await busy(e.currentTarget, api("/api/projects", { method: "POST", body }));
       dr.close();
-      location.hash = p ? `projects/${p.id}` : "projects";
+      if (p) location.hash = `projects/${p.id}`;
+      else loadProjects();
     } catch (err) { showMsg($("#ip-err", dr.el), err); }
   });
 }
