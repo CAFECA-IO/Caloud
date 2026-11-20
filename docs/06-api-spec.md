@@ -532,12 +532,13 @@
 | --- | --- | --- |
 | `register` | `join_token` 或 `node_token`（擇一）、`name`、`specs`（同 Node.specs） | 必須是第一則，10 秒內未收到即關閉。首次以加入權杖註冊；之後以節點權杖重連 |
 | `heartbeat` | `used`（`cpu_millis`、`memory_bytes`，主機目前用量） | 每 `heartbeat_secs` 秒一次；第一則在 `ack` 後立即送出 |
-| `env_status` | `env_id`、`status`（`deploying`／`running`／`failed`／`destroyed`）、`stage`?（`fetch`／`build`／`release`／`start`；`failed` 時為失敗的階段）、`build_secs`?（建置與沙箱累計秒數，ADR 0021）、`error`?、`services`（`[{name, ip}]`） | 部署進度與結果；`deploying` 只用於回報目前階段（ADR 0018） |
+| `env_status` | `env_id`、`status`（`deploying`／`running`／`failed`／`destroyed`）、`stage`?（`fetch`／`build`／`release`／`start`；`failed` 時為失敗的階段）、`error`?、`services`（`[{name, ip}]`） | 部署進度與結果；`deploying` 只用於回報目前階段（ADR 0018） |
 | `env_log` | `env_id`、`stage`、`line` | 部署過程的輸出，逐行；每行最多 500 字、每階段最多 2000 行 |
 | `verify_stage` | `id`、`stage`、`status`（`running`／`passed`／`failed`／`skipped`） | 驗證階段（ADR 0020） |
 | `verify_issue` | `id`、`issue`（`severity`、`stage`、`rule`、`title`、`detail`、`file`?、`line`?） | 驗證發現的問題；值已遮蔽 |
 | `verify_log` | `id`、`stage`、`line` | 驗證過程的輸出；上限同 `env_log` |
-| `verify_done` | `id`、`error`?、`kept`、`build_secs`? | 驗證結束；`kept` 表示環境保留未銷毀 |
+| `verify_done` | `id`、`error`?、`kept` | 驗證結束；`kept` 表示環境保留未銷毀 |
+| `build_usage` | `kind`（`deploy`／`verify`）、`id`（環境或驗證 ID）、`secs` | 建置與沙箱累計秒數（ADR 0021）；在部署切換前與驗證結束時送出 |
 
 **控制面 → Agent**
 

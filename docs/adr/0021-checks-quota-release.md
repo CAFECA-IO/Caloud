@@ -43,7 +43,7 @@ M6 核心（ADR 0020）上線後還缺三件事：
 - `build_settings`（單列）：`cpus` 1～16（預設 4）、`memory_mb` 1024～32768（預設 8192）、`minutes_monthly`（0 表示不限）。API 為 `GET`／`PUT /api/admin/build-settings`（admin+，寫入稽核）。
 - 建置資源以 `EnvSpec.build` 帶給 agent，用在 BuildKit 建置，以及測試、lint、漏洞掃描沙箱；執行期的資源上限不變。
 - 用量：
-  - agent 在 `env_status`（`running` 或 `failed`）與 `verify_done` 回報 `build_secs`，即上述沙箱的累計秒數；
+  - agent 以 `build_usage { kind, id, secs }` 訊息回報上述建置與沙箱的累計秒數：部署在切換前（或失敗時）送出，驗證在結束時送出；
   - 寫入 `build_usage`，記在專案擁有者名下；
   - 每月從 UTC 月初起算。
 - 本月用量達上限時，`verify` 與 `deploy` 回 `409`；進行中的執行不中斷。
@@ -81,6 +81,6 @@ release:
 
 ## 影響
 
-- 協定：`env.build`、`env.release`；`env_status` 與 `verify_done` 的 `build_secs`；部署階段新增 `release`。
+- 協定：`env.build`、`env.release`；新訊息 `build_usage`；部署階段新增 `release`。
 - 資料表：`build_settings`、`build_usage`、`github_pr_comments`；`verifications` 新增 `check_run_id`、`pr_number`、`build_secs`。
 - GitHub App 權限：新增 Checks、Pull requests。
