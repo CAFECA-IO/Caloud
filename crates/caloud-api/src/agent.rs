@@ -146,6 +146,26 @@ async fn session(s: AppState, mut sock: WebSocket) {
                             tracing::warn!(error = %e, "environment status failed");
                         }
                     }
+                    Ok(AgentMsg::VerifyStage { id, stage, status }) => {
+                        if let Err(e) = crate::service::verify::on_stage(&s, &node.id, &id, &stage, &status).await {
+                            tracing::warn!(error = %e, "verify stage failed");
+                        }
+                    }
+                    Ok(AgentMsg::VerifyIssue { id, issue }) => {
+                        if let Err(e) = crate::service::verify::on_issue(&s, &node.id, &id, issue).await {
+                            tracing::warn!(error = %e, "verify issue failed");
+                        }
+                    }
+                    Ok(AgentMsg::VerifyLog { id, stage, line }) => {
+                        if let Err(e) = crate::service::verify::on_log(&s, &node.id, &id, &stage, &line).await {
+                            tracing::warn!(error = %e, "verify log failed");
+                        }
+                    }
+                    Ok(AgentMsg::VerifyDone { id, error, kept }) => {
+                        if let Err(e) = crate::service::verify::on_done(&s, &node.id, &id, error, kept).await {
+                            tracing::warn!(error = %e, "verify done failed");
+                        }
+                    }
                     Ok(AgentMsg::EnvLog { env_id, stage, line }) => {
                         if let Err(e) = crate::service::environments::add_log(&s, Some(&node.id), &env_id, &stage, &line).await {
                             tracing::warn!(error = %e, "deploy log failed");

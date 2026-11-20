@@ -36,6 +36,8 @@ pub struct Log<'a> {
     count: usize,
     /// 要遮蔽的秘密變數值（ADR 0019）
     secrets: Vec<String>,
+    /// 驗證的 log（ADR 0020）：送 `VerifyLog`，`env_id` 為驗證 ID
+    verify: bool,
     /// 最後幾行，失敗時當作錯誤訊息
     pub tail: Vec<String>,
 }
@@ -48,8 +50,18 @@ impl<'a> Log<'a> {
             stage,
             count: 0,
             secrets: Vec::new(),
+            verify: false,
             tail: Vec::new(),
         }
+    }
+
+    /// 改送 `VerifyLog { id }`
+    pub fn for_verify(mut self, id: Option<&'a str>) -> Self {
+        if let Some(id) = id {
+            self.env_id = id;
+            self.verify = true;
+        }
+        self
     }
 
     /// 送出前遮蔽這些值
@@ -74,11 +86,20 @@ impl<'a> Log<'a> {
             _ => return,
         };
         if let Some(tx) = self.tx {
-            let _ = tx.send(AgentMsg::EnvLog {
-                env_id: self.env_id.to_string(),
-                stage: self.stage.to_string(),
-                line,
-            });
+            let msg = if self.verify {
+                AgentMsg::VerifyLog {
+                    id: self.env_id.to_string(),
+                    stage: self.stage.to_string(),
+                    line,
+                }
+            } else {
+                AgentMsg::EnvLog {
+                    env_id: self.env_id.to_string(),
+                    stage: self.stage.to_string(),
+                    line,
+                }
+            };
+            let _ = tx.send(msg);
         }
     }
 }

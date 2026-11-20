@@ -109,11 +109,8 @@ pub async fn me(user: CurrentUser) -> Json<User> {
 pub struct CurrentUser(pub User, pub String);
 
 impl CurrentUser {
-    /// FR-MCP-07：稽核細節附上來源；網頁操作維持原樣
+    /// FR-MCP-07、FR-OPS-01：稽核細節一律附上來源（`via=web`、`via=mcp:<權杖名稱>`；GitHub 觸發者為 `via=github`）
     pub fn audit_detail(&self, extra: Option<&str>) -> Option<String> {
-        if self.1 == "web" {
-            return extra.map(str::to_string);
-        }
         Some(match extra {
             Some(x) => format!("via={}; {x}", self.1),
             None => format!("via={}", self.1),

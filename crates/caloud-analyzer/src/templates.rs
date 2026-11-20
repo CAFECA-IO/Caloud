@@ -139,7 +139,7 @@ pub(crate) fn detect(cx: &Ctx) -> Option<Detected> {
 type Tpl = (String, String, Vec<(String, String)>);
 
 /// `engines.node`、`.nvmrc` 的主版本
-fn major(s: &str) -> Option<u32> {
+pub(crate) fn major(s: &str) -> Option<u32> {
     let digits: String = s
         .trim_start_matches(|c: char| !c.is_ascii_digit())
         .chars()

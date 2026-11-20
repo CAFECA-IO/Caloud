@@ -64,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
     };
     caloud_api::spawn_offline_sweeper(state.clone());
     caloud_api::certs::spawn(state.clone());
+    caloud_api::service::verify::spawn_sweeper(state.clone());
 
     let api = tokio::net::TcpListener::bind(&cfg.api_listen).await?;
     tracing::info!(addr = %cfg.api_listen, "api listening");

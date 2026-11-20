@@ -28,7 +28,13 @@ pub struct EnvRunner {
     pub git_bin: String,
     /// 建置用的 BuildKit 映像
     pub buildkit_image: String,
+    /// 漏洞掃描映像（ADR 0020）
+    pub osv_image: String,
+    /// 測試用：覆寫煙霧測試的目標（`host:port`）
+    pub smoke_target: Option<String>,
     locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// 進行中的驗證：ID → 取消訊號
+    pub(crate) runs: Arc<Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>>,
 }
 
 impl Default for EnvRunner {
@@ -63,7 +69,7 @@ fn failed_at(env_id: &str, stage: Option<&str>, error: String) -> AgentMsg {
 }
 
 /// 錯誤訊息只取最後幾行，避免過長
-fn short(err: &str) -> String {
+pub(crate) fn short(err: &str) -> String {
     let lines: Vec<&str> = err.lines().filter(|l| !l.trim().is_empty()).collect();
     let tail = lines[lines.len().saturating_sub(5)..].join("\n");
     tail.chars().take(1000).collect()
@@ -77,15 +83,18 @@ impl EnvRunner {
             dns,
             git_bin: "git".into(),
             buildkit_image: build::BUILDKIT_IMAGE.into(),
+            osv_image: crate::verify::OSV_IMAGE.into(),
+            smoke_target: None,
             locks: Default::default(),
+            runs: Default::default(),
         }
     }
 
-    fn builds_dir(&self, env_id: &str) -> PathBuf {
+    pub(crate) fn builds_dir(&self, env_id: &str) -> PathBuf {
         self.dir.with_file_name("builds").join(env_id)
     }
 
-    fn lock(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    pub(crate) fn lock(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
         self.locks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -119,7 +128,7 @@ impl EnvRunner {
         self.compose_env(env_id, args, timeout, &[]).await
     }
 
-    async fn compose_env(&self, env_id: &str, args: &[&str], timeout: Duration, vars: &[EnvValue]) -> anyhow::Result<String> {
+    pub(crate) async fn compose_env(&self, env_id: &str, args: &[&str], timeout: Duration, vars: &[EnvValue]) -> anyhow::Result<String> {
         let dir = self.dir.join(env_id);
         let project = sandbox::project(env_id);
         let d = dir.display().to_string();
@@ -215,11 +224,23 @@ impl EnvRunner {
         tx: Option<&UnboundedSender<AgentMsg>>,
         stage: &(dyn Fn(&str) + Send + Sync),
     ) -> Result<(String, Vec<String>), (&'static str, anyhow::Error)> {
+        self.build_source_with(env, src, tx, stage, None).await
+    }
+
+    /// `verify`：驗證 ID；log 改送 `VerifyLog`，原始碼保留給之後的階段（ADR 0020）
+    pub(crate) async fn build_source_with(
+        &self,
+        env: &EnvSpec,
+        src: &EnvSource,
+        tx: Option<&UnboundedSender<AgentMsg>>,
+        stage: &(dyn Fn(&str) + Send + Sync),
+        verify: Option<&str>,
+    ) -> Result<(String, Vec<String>), (&'static str, anyhow::Error)> {
         let work = self.builds_dir(&env.id);
         let repo = work.join("src");
         stage("fetch");
         let secrets: Vec<String> = env.vars.iter().map(|v| v.value.clone()).collect();
-        let mut log = Log::new(tx, &env.id, "fetch").masking(&secrets);
+        let mut log = Log::new(tx, &env.id, "fetch").for_verify(verify).masking(&secrets);
         log.line(&format!(
             "取得 {} @ {}",
             src.repo_url,
@@ -230,7 +251,7 @@ impl EnvRunner {
 
         stage("build");
         let (mut jobs, compose) = build::plan(&env.compose, &repo, src, &env.id).map_err(|e| ("build", e))?;
-        let mut log = Log::new(tx, &env.id, "build").masking(&secrets);
+        let mut log = Log::new(tx, &env.id, "build").for_verify(verify).masking(&secrets);
         // ADR 0019：build args 的 `${NAME}` 以秘密變數內插
         let values: std::collections::HashMap<String, String> = env.vars.iter().map(|v| (v.name.clone(), v.value.clone())).collect();
         for j in &mut jobs {
@@ -286,7 +307,12 @@ impl EnvRunner {
                     .await;
             }
         }
-        let _ = tokio::fs::remove_dir_all(&work).await;
+        if verify.is_none() {
+            let _ = tokio::fs::remove_dir_all(&work).await;
+        } else {
+            let _ = tokio::fs::remove_dir_all(work.join("out")).await;
+            let _ = tokio::fs::remove_dir_all(work.join("inline")).await;
+        }
         match res {
             Err(_) => Err(("build", anyhow::anyhow!("建置超過 20 分鐘，已中止。"))),
             Ok(Err(e)) => Err(("build", e)),
@@ -299,7 +325,7 @@ impl EnvRunner {
         }
     }
 
-    async fn fetch(&self, src: &EnvSource, repo: &std::path::Path) -> anyhow::Result<()> {
+    pub(crate) async fn fetch(&self, src: &EnvSource, repo: &std::path::Path) -> anyhow::Result<()> {
         use caloud_orchestrator::git::{fetch_repo, fetch_repo_with_auth};
         let get = |r: Option<String>| {
             let r = r.clone();
@@ -352,7 +378,12 @@ impl EnvRunner {
         }
     }
 
-    async fn try_deploy(&self, env: &EnvSpec, compose_yaml: &str, inject: &[(String, Vec<String>)]) -> anyhow::Result<Vec<EnvService>> {
+    pub(crate) async fn try_deploy(
+        &self,
+        env: &EnvSpec,
+        compose_yaml: &str,
+        inject: &[(String, Vec<String>)],
+    ) -> anyhow::Result<Vec<EnvService>> {
         // 控制面已檢查過；agent 再以同一份平臺政策檢查一次（docs/07）
         let compose = validate_with(compose_yaml, Policy::platform(0)).map_err(|e| anyhow::anyhow!("{e}"))?;
         if !compose.services.contains(&env.public_service) {

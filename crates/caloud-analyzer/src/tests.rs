@@ -723,3 +723,72 @@ fn configurable_loopback_is_filled() {
     // ipfs 服務不被改動
     assert!(doc["services"]["ipfs_bootstrap"].get("environment").is_none());
 }
+
+// ADR 0020：依語言偵測測試與 lint 指令；npm 預設 placeholder 不算
+#[test]
+fn verify_plan_detection() {
+    let r = Repo::new(
+        "vp-node",
+        &[
+            (
+                "package.json",
+                "{\"scripts\":{\"start\":\"node a.js\",\"test\":\"vitest run\",\"lint\":\"eslint .\"},\"engines\":{\"node\":\">=20\"},\"dependencies\":{\"express\":\"4\"}}",
+            ),
+            ("pnpm-lock.yaml", ""),
+        ],
+    );
+    let v = r.analyze("").verify;
+    let t = v.test.unwrap();
+    assert_eq!(t.image, "node:20-bookworm");
+    assert_eq!(t.setup, "corepack enable && pnpm install --frozen-lockfile");
+    assert_eq!(t.command, "pnpm test");
+    assert_eq!(v.lint.unwrap().command, "pnpm lint");
+    assert_eq!(v.smoke, ["/"]);
+
+    let r = Repo::new(
+        "vp-placeholder",
+        &[(
+            "package.json",
+            "{\"scripts\":{\"start\":\"node a.js\",\"test\":\"echo \\\"Error: no test specified\\\" && exit 1\"}}",
+        )],
+    );
+    assert!(r.analyze("").verify.test.is_none());
+
+    let r = Repo::new(
+        "vp-go",
+        &[("go.mod", "module x\n\ngo 1.23.1\n"), ("main.go", "package main\nfunc main(){}\n")],
+    );
+    let t = r.analyze("").verify.test.unwrap();
+    assert_eq!((t.image.as_str(), t.command.as_str()), ("golang:1.23-bookworm", "go test ./..."));
+}
+
+// ADR 0020：`.caloud/verify.yml` 覆寫；lint 沿用 test 的 image 與 setup；不合法的路徑與映像忽略
+#[test]
+fn verify_file_overrides() {
+    let r = Repo::new(
+        "vp-file",
+        &[
+            ("package.json", "{\"scripts\":{\"start\":\"node a.js\",\"test\":\"jest\"}}"),
+            ("package-lock.json", "{}"),
+            (
+                ".caloud/verify.yml",
+                "test:\n  command: npm run test:ci\nlint:\n  command: npm run lint\nsmoke: [/, /api/health, 'http://evil/x', '/a b']\n",
+            ),
+        ],
+    );
+    let a = r.analyze("");
+    let v = a.verify;
+    assert!(v.custom);
+    let t = v.test.unwrap();
+    assert_eq!((t.setup.as_str(), t.command.as_str()), ("npm ci", "npm run test:ci"));
+    assert_eq!(v.lint.unwrap().image, t.image);
+    assert_eq!(v.smoke, ["/", "/api/health"]);
+    assert!(a
+        .findings
+        .iter()
+        .any(|f| f.key == "verify_file" && f.confidence == Confidence::High));
+
+    let r = Repo::new("vp-bad", &[("package.json", "{}"), (".caloud/verify.yml", "test: [\n")]);
+    let a = r.analyze("");
+    assert!(a.findings.iter().any(|f| f.key == "verify_file" && f.confidence == Confidence::Low));
+}

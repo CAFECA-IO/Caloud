@@ -144,6 +144,17 @@ pub async fn run_once(opts: &Options) -> anyhow::Result<Outcome> {
                             let _ = tx.send(msg);
                         });
                     }
+                    Ok(ServerMsg::Verify { run }) => {
+                        let (runner, tx, isolated) = (opts.envs.clone(), results_tx.clone(), opts.check.isolation);
+                        tokio::spawn(async move {
+                            if isolated {
+                                runner.verify(&run, &tx).await;
+                            } else {
+                                let _ = tx.send(AgentMsg::VerifyDone { id: run.id.clone(), error: Some("節點未通過自我檢查，不接驗證。".into()), kept: false });
+                            }
+                        });
+                    }
+                    Ok(ServerMsg::CancelVerify { id }) => opts.envs.cancel_verify(&id),
                     Ok(ServerMsg::Destroy { env_id }) => {
                         let (runner, tx) = (opts.envs.clone(), results_tx.clone());
                         tokio::spawn(async move {

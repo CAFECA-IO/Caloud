@@ -51,6 +51,8 @@ const appName = (id) => state.apps.find((a) => a.id === id)?.name ?? "（已刪�
 const roleLabel = (r) => ({ super_admin: "Super Admin", admin: "Admin", member: "Member", pending: "待核准", disabled: "已停用" }[r] || r);
 const currentPage = () => (location.hash.slice(1) || "overview").split("/")[0];
 const pageArg = () => decodeURIComponent(location.hash.slice(1).split("/")[1] || "");
+/** `#projects/<id>/verifications/<vid>` 的 vid */
+const pageSub = () => (location.hash.slice(1).split("/")[2] === "verifications" ? decodeURIComponent(location.hash.slice(1).split("/")[3] || "") : "");
 
 // ─────────────── 登入 FR-AUTH-01 ───────────────
 async function loadSdk() {
@@ -151,7 +153,10 @@ async function renderOverview() {
     stat("轉發中的網域", live, state.domains.length, unverified.length ? `${statusPill("domain", false)} ${unverified.length} 個` : "全部已驗證", "#domains") +
     stat("待處理", todoCount, null, todoCount ? "見下方清單" : "目前沒有", "#overview") +
     (isAdmin() ? stat("使用者", state.users.length, null, pending.length ? `${statusPill("role", "pending")} ${pending.length} 位` : "沒有待核准", "#users") : "");
+  const projects = await api("/api/projects").catch(() => []);
+  const badVerify = projects.filter((p) => ["failed", "error"].includes(p.verify_status));
   const items = [
+    ...badVerify.map((p) => ({ tone: "danger", icon: "alert", title: `${p.name} 驗證未通過`, body: "查看驗證報告中的 Blocker 與 High 問題。", href: `#projects/${p.id}`, action: "查看" })),
     ...failed.map((a) => ({ tone: "danger", icon: "alert", title: `${a.name} 部署失敗`, body: a.last_error || "請查看 log 了解原因。", href: "#apps", action: "查看" })),
     ...unverified.map((d) => ({ tone: "warning", icon: "globe", title: `${d.hostname} 尚未驗證`, body: "設定 DNS TXT 紀錄後按「驗證」。", href: "#domains", action: "前往設定" })),
     ...unbound.map((d) => ({ tone: "", icon: "link", title: `${d.hostname} 尚未綁定 App`, body: "選擇要轉發的 App 與 port。", href: "#domains", action: "綁定" })),
@@ -371,6 +376,7 @@ const repoShort = (url) => url.replace(/^https:\/\/(www\.)?github\.com\//, "").r
 
 async function renderProjects() {
   clearTimeout(pollTimer);
+  if (pageArg() && pageSub()) return renderReport(pageArg(), pageSub());
   if (pageArg()) return renderProject(pageArg());
   $("#page").innerHTML = pageHeader("專案", "從 GitHub 匯入儲存庫（含私有），Caloud 會自動解析服務、port 與需要的環境變數；確認後才開始驗證。",
     `<button class="c-btn c-btn--primary" id="new-project">${icon("plus")}<span>匯入專案</span></button>`) +
@@ -388,7 +394,7 @@ async function loadProjects() {
   tbody.innerHTML = list.length ? list.map((p) => `<tr class="is-clickable" data-id="${esc(p.id)}" tabindex="0">
       <td><div class="c-table__primary">${esc(p.name)}</div>${p.root ? `<div class="c-table__secondary u-mono">${esc(p.root)}/</div>` : ""}</td>
       <td><span class="u-mono u-small">${esc(repoShort(p.repo_url))}</span><div class="c-table__secondary u-mono">${esc(p.git_ref || p.branch || "預設分支")}</div></td>
-      <td>${statusPill("project", p.status)}${p.error ? `<div class="c-table__secondary u-truncate" title="${esc(p.error)}">${esc(p.error)}</div>` : ""}</td>
+      <td>${statusPill("project", p.status)}${p.verify_status ? ` ${statusPill("verify", p.verify_status)}` : ""}${p.error ? `<div class="c-table__secondary u-truncate" title="${esc(p.error)}">${esc(p.error)}</div>` : ""}</td>
       <td class="u-muted u-small u-nowrap">${relTime(p.updated_at)}</td></tr>`).join("")
     : `<tr><td colspan="4">${empty({ iconName: "branch", title: "還沒有專案", body: "從 GitHub 匯入一個儲存庫，Caloud 會解析它需要的服務。", action: `<button class="c-btn c-btn--primary" data-act="import">${icon("plus")}<span>匯入專案</span></button>` })}</td></tr>`;
   if (list.some((p) => p.status === "analyzing") && currentPage() === "projects" && !pageArg()) pollTimer = setTimeout(loadProjects, 2000);
@@ -492,7 +498,7 @@ async function renderProject(id) {
   let data;
   try { data = await api(`/api/projects/${encodeURIComponent(id)}`); }
   catch (err) { return ($("#page").innerHTML = pageHeader("專案", "") + `<p class="c-msg c-msg--danger" role="alert">${esc(err.message)}</p><p><a href="#projects">回到專案列表</a></p>`); }
-  if (currentPage() !== "projects" || pageArg() !== id) return;
+  if (currentPage() !== "projects" || pageArg() !== id || pageSub()) return;
   const { project: p, analysis: a, confirmed: c } = data;
   const r = a?.result;
   document.title = `${p.name} · 專案 · Caloud`;
@@ -512,8 +518,10 @@ async function renderProject(id) {
     `<a class="c-btn" href="#projects">專案列表</a><button class="c-btn" id="pj-reanalyze" ${analyzing ? "disabled" : ""}>${icon("refresh")}<span>重新解析</span></button><button class="c-btn c-btn--danger" id="pj-delete">${icon("trash")}<span>刪除</span></button>`) +
     `<div class="l-row" role="list" aria-label="匯入步驟">${step(1, "選擇儲存庫", "done")}${step(2, "解析", analyzing ? "current" : r ? "done" : "")}${step(3, "確認設定", reviewState)}${step(4, "部署", data.deployment?.stage === "done" && data.deployment.status === "running" ? "done" : data.deployment ? "current" : "")}</div>
     <div id="pj-banners" class="l-stack"></div>
+    <div id="pj-verify"></div>
     <div id="pj-deploy"></div>
     <div id="pj-body" class="l-stack"></div>`;
+  drawVerify(id, data);
   drawDeploy(id, data);
 
   const banners = [];
@@ -615,7 +623,7 @@ async function renderProject(id) {
     try { await api(`/api/projects/${id}`, { method: "DELETE" }); toast(`已刪除 ${p.name}`); location.hash = "projects"; }
     catch (err) { toast(err.message, "danger"); }
   });
-  if (analyzing) pollTimer = setTimeout(() => currentPage() === "projects" && pageArg() === id && renderProject(id), 2000);
+  if (analyzing) pollTimer = setTimeout(() => currentPage() === "projects" && pageArg() === id && !pageSub() && renderProject(id), 2000);
 }
 
 /** FR-ENV-12（ADR 0018）：部署卡片；部署中每 3 秒只更新這張卡片 */
@@ -626,6 +634,8 @@ function drawDeploy(id, data) {
   clearTimeout(deployTimer);
   const { confirmed: c, deployment: d } = data;
   if (!c) return (box.innerHTML = "");
+  const verified = !!data.verification?.verified;
+  const verifying = ["queued", "running"].includes(data.verification?.latest?.status);
   const at = d ? DEPLOY_STAGES.findIndex(([k]) => k === d.stage) : -1;
   const doneAll = d?.stage === "done";
   const stageBadge = ([k, label], i) => {
@@ -642,7 +652,8 @@ function drawDeploy(id, data) {
   const logs = d?.logs?.length ? d.logs.map((l) => `[${l.stage}] ${l.line}`).join("\n") : "";
   box.innerHTML = `<section class="c-card"><div class="c-card__header"><h2 class="c-card__title">部署</h2>${head}<span class="l-spacer"></span>
       ${live ? `<a class="c-btn c-btn--sm" href="${esc(d.url)}" target="_blank" rel="noopener">${icon("link")}<span>開啟網站</span></a>` : ""}
-      <button class="c-btn c-btn--primary c-btn--sm" id="pj-deploy-btn" ${d?.in_progress ? "disabled" : ""}>${icon("upload")}<span>${d ? "重新部署" : "部署"}</span></button></div>
+      ${!verified && isAdmin() ? `<button class="c-btn c-btn--ghost c-btn--sm" id="pj-force-btn" ${d?.in_progress ? "disabled" : ""}>${icon("alert")}<span>強制部署</span></button>` : ""}
+      <button class="c-btn c-btn--primary c-btn--sm" id="pj-deploy-btn" ${d?.in_progress || verifying ? "disabled" : ""}>${icon("upload")}<span>${!verified ? "驗證並部署" : d ? "重新部署" : "部署"}</span></button></div>
     <div class="c-card__body l-stack">
       ${d ? `<p class="u-small">網址 <a class="u-mono" href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.hostname)}</a>${d.commit ? ` · 版本 <span class="u-mono">${esc(d.commit.slice(0, 7))}</span>` : ""} · ${relTime(d.updated_at)}更新</p>
         <div class="l-row" role="list" aria-label="部署階段">${DEPLOY_STAGES.map(stageBadge).join("")}</div>`
@@ -651,10 +662,20 @@ function drawDeploy(id, data) {
       ${logs ? `<pre class="c-log" aria-label="部署 log" id="pj-log">${esc(logs)}</pre>` : ""}
       <span class="c-field__error" id="pj-deploy-err" role="alert"></span></div></section>`;
   const log = $("#pj-log"); if (log) log.scrollTop = log.scrollHeight;
-  $("#pj-deploy-btn").addEventListener("click", async (e) => {
+  // ADR 0020：未通過驗證時先驗證，通過後自動部署
+  const go = async (btn, body) => {
     showMsg($("#pj-deploy-err"), null);
-    try { await busy(e.currentTarget, api(`/api/projects/${id}/deploy`, { method: "POST" })); toast("已開始部署"); pollDeploy(id); }
-    catch (err) { showMsg($("#pj-deploy-err"), err); }
+    try {
+      const r = await busy(btn, api(`/api/projects/${id}/deploy`, { method: "POST", body }));
+      toast(r?.verification ? "已開始驗證，通過後自動部署" : "已開始部署");
+      pollDeploy(id);
+    } catch (err) { showMsg($("#pj-deploy-err"), err); }
+  };
+  $("#pj-deploy-btn").addEventListener("click", (e) => go(e.currentTarget));
+  $("#pj-force-btn")?.addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    if (!(await confirmDialog({ title: "略過驗證直接部署？", body: "這個版本尚未通過驗證。強制部署會寫入稽核紀錄。", confirmText: "強制部署" }))) return;
+    go(btn, { force: true });
   });
   if (d?.in_progress) deployTimer = setTimeout(() => pollDeploy(id), 3000);
 }
@@ -712,9 +733,92 @@ async function drawVars(id, result) {
   }));
 }
 async function pollDeploy(id) {
-  if (currentPage() !== "projects" || pageArg() !== id) return;
-  try { drawDeploy(id, await api(`/api/projects/${encodeURIComponent(id)}`)); }
+  if (currentPage() !== "projects" || pageArg() !== id || pageSub()) return;
+  try { const data = await api(`/api/projects/${encodeURIComponent(id)}`); drawVerify(id, data); drawDeploy(id, data); }
   catch (err) { toast(err.message, "danger"); }
+}
+
+/** M6（ADR 0020）：驗證卡片；執行中每 3 秒更新 */
+const VERIFY_STAGES = [["fetch", "取得"], ["analyze", "解析"], ["build", "建置"], ["static", "靜態檢查"], ["start", "啟動"], ["test", "測試"], ["smoke", "煙霧測試"], ["logs", "日誌"], ["report", "彙整"], ["destroy", "銷毀"]];
+const TRIGGER_LABEL = { manual: "手動", push: "push", deploy: "部署前" };
+let verifyTimer = null;
+function stageBadges(stages) {
+  const cls = { passed: "c-badge--success", failed: "c-badge--danger", running: "c-badge--accent c-badge--pulse", skipped: "", pending: "" };
+  return `<div class="l-row" role="list" aria-label="驗證階段">${VERIFY_STAGES.map(([k, label]) => {
+    const st = stages?.[k] || "pending";
+    return `<span role="listitem" class="c-badge ${cls[st] || ""}" title="${esc(st)}"><span class="c-badge__dot" aria-hidden="true"></span>${label}${st === "skipped" ? "（略過）" : ""}</span>`;
+  }).join("")}</div>`;
+}
+function countBadges(c) {
+  return ["blocker", "high", "medium", "low"].map((k) => `${statusPill("severity", k)} <span class="u-mono u-small">${c?.[k] ?? 0}</span>`).join(" ");
+}
+function drawVerify(id, data) {
+  const box = $("#pj-verify"); if (!box) return;
+  clearTimeout(verifyTimer);
+  if (!data.confirmed) return (box.innerHTML = "");
+  const v = data.verification?.latest;
+  const running = v && ["queued", "running"].includes(v.status);
+  box.innerHTML = `<section class="c-card"><div class="c-card__header"><h2 class="c-card__title">驗證</h2>${v ? statusPill("verify", v.status) : '<span class="c-badge">尚未驗證</span>'}<span class="l-spacer"></span>
+      ${running ? `<button class="c-btn c-btn--sm" id="pj-verify-cancel">${icon("stop")}<span>取消</span></button>`
+        : `<label class="c-check"><input type="checkbox" id="pj-verify-keep"><span class="u-small">失敗時保留環境 30 分鐘</span></label><button class="c-btn c-btn--sm" id="pj-verify-btn">${icon("play")}<span>驗證</span></button>`}</div>
+    <div class="c-card__body l-stack">
+      ${v ? `<p class="u-small">版本 <span class="u-mono">${esc(v.commit.slice(0, 7))}</span>（${esc(v.branch)}）· ${esc(TRIGGER_LABEL[v.trigger] || v.trigger)} · ${relTime(v.created_at)}${v.deploy_after ? " · 通過後自動部署" : ""}</p>
+        ${stageBadges(v.stages)}
+        <div class="l-row">${countBadges(v.counts)}<span class="l-spacer"></span><a class="c-btn c-btn--sm" href="#projects/${esc(id)}/verifications/${esc(v.id)}">${icon("search")}<span>查看報告</span></a></div>
+        ${v.error ? `<div class="c-banner ${v.status === "canceled" ? "" : "c-banner--danger"}">${icon("info")}<div class="c-banner__body"><span class="u-small">${esc(v.error)}</span></div></div>` : ""}`
+        : `<p class="u-small u-muted">在隔離的驗證環境中建置、檢查（秘密外洩、相依套件漏洞、lint）、執行專案測試與煙霧測試，結束後銷毀。有 Blocker 或 High 問題即未通過；通過的版本才能部署。</p>`}
+      <span class="c-field__error" id="pj-verify-err" role="alert"></span></div></section>`;
+  $("#pj-verify-btn", box)?.addEventListener("click", async (e) => {
+    showMsg($("#pj-verify-err"), null);
+    try { await busy(e.currentTarget, api(`/api/projects/${encodeURIComponent(id)}/verify`, { method: "POST", body: { keep_on_failure: $("#pj-verify-keep").checked } })); toast("已開始驗證"); pollDeploy(id); }
+    catch (err) { showMsg($("#pj-verify-err"), err); }
+  });
+  $("#pj-verify-cancel", box)?.addEventListener("click", async (e) => {
+    try { await busy(e.currentTarget, api(`/api/verifications/${encodeURIComponent(v.id)}/cancel`, { method: "POST" })); toast("已取消驗證"); pollDeploy(id); }
+    catch (err) { toast(err.message, "danger"); }
+  });
+  if (running) verifyTimer = setTimeout(() => pollDeploy(id), 3000);
+}
+
+/** 驗證報告頁（FR-RPT-01～03） */
+async function renderReport(pid, vid) {
+  clearTimeout(verifyTimer);
+  $("#page").innerHTML = `<span class="c-skeleton"></span><span class="c-skeleton"></span>`;
+  let d, project;
+  try { [d, project] = await Promise.all([api(`/api/verifications/${encodeURIComponent(vid)}`), api(`/api/projects/${encodeURIComponent(pid)}`)]); }
+  catch (err) { return ($("#page").innerHTML = pageHeader("驗證報告", "") + `<p class="c-msg c-msg--danger" role="alert">${esc(err.message)}</p><p><a href="#projects/${esc(pid)}">回到專案</a></p>`); }
+  if (pageSub() !== vid) return;
+  const v = d.verification, p = project.project;
+  document.title = `驗證報告 · ${p.name} · Caloud`;
+  const base = `/api/verifications/${encodeURIComponent(vid)}/report`;
+  $("#page").innerHTML = pageHeader(`驗證報告：${p.name}`, `${v.commit.slice(0, 7)}（${v.branch}）· ${TRIGGER_LABEL[v.trigger] || v.trigger} · ${new Date(v.created_at * 1000).toLocaleString("zh-TW", { hour12: false })}`,
+    `<a class="c-btn" href="#projects/${esc(pid)}">回到專案</a><a class="c-btn" href="${base}?format=md" download>${icon("upload")}<span>匯出 Markdown</span></a><a class="c-btn" href="${base}?format=json" download>${icon("upload")}<span>匯出 JSON</span></a>`) +
+    `<section class="c-card"><div class="c-card__header"><h2 class="c-card__title">摘要</h2>${statusPill("verify", v.status)}</div><div class="c-card__body l-stack">
+       ${stageBadges(v.stages)}<div class="l-row">${countBadges(v.counts)}</div>
+       ${v.error ? `<p class="u-small">${esc(v.error)}</p>` : ""}
+       <p class="u-small u-muted">${d.previous ? `與同分支前次驗證比較：新增 ${d.issues.filter((i) => i.change === "new").length}、仍存在 ${d.issues.filter((i) => i.change === "existing").length}、已修正 ${d.fixed.length}。` : "這是這個分支第一次完成的驗證。"}</p></div></section>
+     <section class="c-card"><div class="c-card__header"><h2 class="c-card__title">問題</h2>
+       <div class="c-segmented" role="group" aria-label="變化篩選" id="rp-filter">${[["all", "全部"], ["new", "新增"], ["existing", "仍存在"], ["fixed", "已修正"]].map(([k, l], i) => `<button class="c-segmented__item ${i ? "" : "is-active"}" data-v="${k}" aria-pressed="${!i}">${l}</button>`).join("")}</div></div>
+       <div class="c-card__body c-card__body--flush"><div class="c-table-wrap"><table class="c-table">
+       <thead><tr><th>等級</th><th>階段</th><th>問題</th><th>位置</th></tr></thead><tbody id="rp-issues"></tbody></table></div></div></section>
+     <section class="c-card"><div class="c-card__header"><h2 class="c-card__title">Log</h2><span class="u-small u-muted">最近 500 行</span></div>
+       <div class="c-card__body">${d.logs.length ? `<pre class="c-log" aria-label="驗證 log">${esc(d.logs.map((l) => `[${l.stage}] ${l.line}`).join("\n"))}</pre>` : '<p class="u-muted u-small">沒有 log。</p>'}</div></section>`;
+  const draw = (f) => {
+    const rows = f === "fixed" ? d.fixed.map((i) => ({ ...i, change: "fixed" })) : d.issues.filter((i) => f === "all" || i.change === f);
+    $("#rp-issues").innerHTML = rows.map((i) => `<tr>
+        <td>${statusPill("severity", i.severity)}${i.change === "new" && d.previous ? ' <span class="c-badge c-badge--accent">新增</span>' : i.change === "fixed" ? ' <span class="c-badge c-badge--success">已修正</span>' : ""}</td>
+        <td class="u-small">${esc(VERIFY_STAGES.find(([k]) => k === i.stage)?.[1] || i.stage)}</td>
+        <td><div class="c-table__primary">${esc(i.title)}</div>${i.detail ? `<div class="c-table__secondary">${esc(i.detail)}</div>` : ""}<div class="c-table__secondary u-mono">${esc(i.rule)}</div></td>
+        <td>${i.file ? evidenceLink(p, v.commit, { file: i.file, line: i.line }) : '<span class="u-muted">—</span>'}</td></tr>`).join("")
+      || `<tr><td colspan="4">${empty({ iconName: "check", title: f === "fixed" ? "沒有已修正的問題" : "沒有問題", body: "" })}</td></tr>`;
+  };
+  $("#rp-filter").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-v]"); if (!b) return;
+    $$("#rp-filter .c-segmented__item").forEach((x) => { x.classList.toggle("is-active", x === b); x.setAttribute("aria-pressed", x === b); });
+    draw(b.dataset.v);
+  });
+  draw("all");
+  if (["queued", "running"].includes(v.status)) verifyTimer = setTimeout(() => pageSub() === vid && renderReport(pid, vid), 3000);
 }
 
 // ─────────────── 網域 FR-DOM-* / FR-UI-06 / FR-UI-07 ───────────────

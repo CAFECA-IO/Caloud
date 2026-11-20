@@ -47,19 +47,23 @@ fn parse(a: &AnalysisRow) -> ApiResult<Analysis> {
     serde_json::from_str(&a.result).map_err(|e| ApiError::Internal(e.into()))
 }
 
-/// 要部署的內容
-struct Target {
-    compose: String,
-    compose_dir: String,
-    public_service: String,
-    public_port: i64,
-    services: usize,
-    commit: String,
+/// 要部署（或驗證）的內容
+pub(crate) struct Target {
+    pub compose: String,
+    pub compose_dir: String,
+    pub public_service: String,
+    pub public_port: i64,
+    pub services: usize,
+    pub commit: String,
     /// 最新解析的設定與確認時不同
-    pending_changes: bool,
+    pub pending_changes: bool,
+    /// 確認的解析 ID（部署關卡比對，ADR 0020）
+    pub analysis: String,
+    /// 驗證計畫（ADR 0020）
+    pub verify: caloud_analyzer::VerifyPlan,
 }
 
-async fn target(s: &AppState, p: &Project) -> ApiResult<Target> {
+pub(crate) async fn target(s: &AppState, p: &Project) -> ApiResult<Target> {
     let cid = p
         .confirmed_analysis
         .as_deref()
@@ -96,6 +100,8 @@ async fn target(s: &AppState, p: &Project) -> ApiResult<Target> {
         _ => (c.commit_sha.clone(), false),
     };
     Ok(Target {
+        analysis: c.id.clone(),
+        verify: ca.verify.clone(),
         compose,
         compose_dir: ca.compose_dir,
         public_service,
@@ -106,7 +112,7 @@ async fn target(s: &AppState, p: &Project) -> ApiResult<Target> {
     })
 }
 
-async fn production(s: &AppState, project: &str) -> ApiResult<Option<Environment>> {
+pub(crate) async fn production(s: &AppState, project: &str) -> ApiResult<Option<Environment>> {
     let sub: Option<String> = sqlx::query_scalar("SELECT subdomain FROM environments WHERE project = ? AND kind = 'production'")
         .bind(project)
         .fetch_optional(&s.db)
@@ -128,28 +134,76 @@ fn in_progress(e: &Environment) -> bool {
         && matches!(e.stage.as_deref(), Some("fetch" | "build" | "start" | "health"))
 }
 
-/// `POST /api/projects/{id}/deploy`
-pub async fn deploy(s: &AppState, me: &CurrentUser, id: &str) -> ApiResult<Value> {
+/// `POST /api/projects/{id}/deploy` 的選項
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct DeployInput {
+    /// admin+：略過驗證（ADR 0020）
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// `POST /api/projects/{id}/deploy`：目標 commit 未通過驗證時先驗證（ADR 0020）
+pub async fn deploy(s: &AppState, me: &CurrentUser, id: &str, input: DeployInput) -> ApiResult<Value> {
     let p = owned(s, me, id).await?;
+    if input.force {
+        me.require_admin()?;
+    } else {
+        let t = target(s, &p).await?;
+        if !super::verify::passed(s, &p.id, &t.commit, &t.analysis).await? {
+            let v = super::verify::start(
+                s,
+                &p,
+                "deploy",
+                true,
+                false,
+                Some(&me.0.account),
+                &me.audit_detail(None).unwrap_or_default(),
+            )
+            .await?;
+            return Ok(json!({ "verification": v }));
+        }
+    }
     let env = start(s, &p).await?;
+    let detail = format!(
+        "{} {}{}",
+        env.hostname,
+        env.commit_sha.as_deref().unwrap_or_default().chars().take(12).collect::<String>(),
+        if input.force { " forced" } else { "" }
+    );
     audit(
         &s.db,
         Some(&me.0.account),
         "project_deploy",
         Some(id),
-        me.audit_detail(Some(&format!(
-            "{} {}",
-            env.hostname,
-            env.commit_sha.as_deref().unwrap_or_default().chars().take(12).collect::<String>()
-        )))
-        .as_deref(),
+        me.audit_detail(Some(&detail)).as_deref(),
     )
     .await;
     Ok(deployment(s, &p).await?.unwrap_or(Value::Null))
 }
 
-/// GitHub push 後自動重新部署（只在已部署且設定未變動時）
-pub(crate) async fn redeploy_after_push(s: &AppState, project: &str) {
+/// 驗證通過後部署（`deploy_after`，ADR 0020）
+pub(crate) async fn deploy_verified(s: &AppState, p: &Project, via: &str) {
+    match start(s, p).await {
+        Ok(env) => {
+            audit(
+                &s.db,
+                None,
+                "project_deploy",
+                Some(&p.id),
+                Some(&format!(
+                    "via={via}; {} {} verified",
+                    env.hostname,
+                    env.commit_sha.as_deref().unwrap_or_default().chars().take(12).collect::<String>()
+                )),
+            )
+            .await
+        }
+        Err(e) => tracing::warn!(project = %p.id, error = %e, "deploy after verification failed"),
+    }
+}
+
+/// GitHub push 後：驗證；已部署且設定未變動時，通過後自動重新部署（ADR 0020）
+pub(crate) async fn verify_after_push(s: &AppState, project: &str) {
     let Ok(p) = sqlx::query_as::<_, Project>("SELECT * FROM projects WHERE id = ?")
         .bind(project)
         .fetch_one(&s.db)
@@ -157,34 +211,17 @@ pub(crate) async fn redeploy_after_push(s: &AppState, project: &str) {
     else {
         return;
     };
-    match production(s, project).await {
-        Ok(Some(_)) => {}
-        _ => return,
+    if p.confirmed_analysis.is_none() {
+        return;
     }
-    match target(s, &p).await {
-        Ok(t) if !t.pending_changes => {}
-        _ => return,
-    }
-    match start(s, &p).await {
-        Ok(env) => {
-            audit(
-                &s.db,
-                None,
-                "project_deploy",
-                Some(project),
-                Some(&format!(
-                    "via=github; {} {}",
-                    env.hostname,
-                    env.commit_sha.as_deref().unwrap_or_default().chars().take(12).collect::<String>()
-                )),
-            )
-            .await
-        }
-        Err(e) => tracing::warn!(%project, error = %e, "auto redeploy skipped"),
+    let deployed = matches!(production(s, project).await, Ok(Some(_)));
+    let unchanged = matches!(target(s, &p).await, Ok(t) if !t.pending_changes);
+    if let Err(e) = super::verify::start(s, &p, "push", deployed && unchanged, false, None, "via=github").await {
+        tracing::warn!(%project, error = %e, "verification after push skipped");
     }
 }
 
-async fn start(s: &AppState, p: &Project) -> ApiResult<Environment> {
+pub(crate) async fn start(s: &AppState, p: &Project) -> ApiResult<Environment> {
     let t = target(s, p).await?;
     // ADR 0019：秘密變數（先讀版本，產生資料庫密碼不算變更）
     let vars_rev = super::vars::rev(s, &p.id).await?;

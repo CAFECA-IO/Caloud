@@ -10,6 +10,8 @@ pub mod fs;
 mod links;
 mod runtime;
 mod templates;
+pub mod verifyplan;
+pub use verifyplan::{VerifyCmd, VerifyPlan};
 
 use fs::RepoFs;
 use serde::{Deserialize, Serialize};
@@ -118,6 +120,9 @@ pub struct Analysis {
     pub errors: Vec<String>,
     /// 有低信心項目，第一次驗證前需用戶確認（FR-AN-04）
     pub needs_confirmation: bool,
+    /// 驗證計畫（ADR 0020）；舊資料沒有這個欄位
+    #[serde(default)]
+    pub verify: VerifyPlan,
 }
 
 /// 解析過程的累積狀態
@@ -180,6 +185,7 @@ pub fn analyze(repo: &Path, opts: &Options) -> Analysis {
             findings: vec![],
             errors: vec![format!("根目錄 `{}` 不存在或不是儲存庫內的目錄。", opts.root)],
             needs_confirmation: true,
+            verify: VerifyPlan::default(),
         };
     };
     let mut cx = Ctx {
@@ -254,6 +260,7 @@ pub fn analyze(repo: &Path, opts: &Options) -> Analysis {
         env.push(g);
     }
     note_build_env(&mut cx, &env, matches!(source, Source::Template { .. }));
+    let verify = verifyplan::plan(&mut cx);
 
     let needs_confirmation = !cx.errors.is_empty() || cx.findings.iter().any(|f| f.confidence == Confidence::Low);
     Analysis {
@@ -266,6 +273,7 @@ pub fn analyze(repo: &Path, opts: &Options) -> Analysis {
         findings: cx.findings,
         errors: cx.errors,
         needs_confirmation,
+        verify,
     }
 }
 

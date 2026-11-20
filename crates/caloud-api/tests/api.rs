@@ -220,9 +220,10 @@ impl Env {
             format!(
                 "#!/bin/sh\necho \"$*\" >> '{log}'\nif [ -f '{fail}' ]; then echo 'image pull failed: not found' >&2; exit 1; fi\n\
                  case \"$*\" in *' ps '*) echo '{{\"Service\":\"web\",\"Name\":\"caloud-x-web-1\",\"State\":\"running\",\"Health\":\"\"}}';; \
-                 *' logs '*) echo 'web-1 | ready';; *' up '*) echo \"UPENV S=${{SESSION_SECRET:-}} D=${{CALOUD_DB_PASSWORD:-}}\" >> '{log}';; esac\nexit 0\n",
+                 *' logs '*) echo 'web-1 | ready';; *caloud-test-*) [ -f '{slow}' ] && sleep 5;; *' up '*) echo \"UPENV P=$3 S=${{SESSION_SECRET:-}} D=${{CALOUD_DB_PASSWORD:-}}\" >> '{log}';; esac\nexit 0\n",
                 log = dir.join("docker.log").display(),
-                fail = dir.join("docker.fail").display()
+                fail = dir.join("docker.fail").display(),
+                slow = dir.join("docker.slow").display()
             ),
         )
         .unwrap();
@@ -2303,6 +2304,21 @@ async fn admin_opens_environment_on_isolated_runner() {
     plain.abort();
 }
 
+/// 驗證的煙霧測試目標（ADR 0020）：回 200
+async fn smoke_server() -> String {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        while let Ok((mut c, _)) = l.accept().await {
+            let mut buf = [0u8; 512];
+            let _ = c.read(&mut buf).await;
+            let _ = c.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok").await;
+        }
+    });
+    addr
+}
+
 async fn wait_deploy(env: &Env, cookie: &str, id: &str, done: impl Fn(&Value) -> bool) -> Value {
     for _ in 0..300 {
         let (_, v) = env.call("GET", &format!("/api/projects/{id}"), cookie, None).await;
@@ -2377,6 +2393,7 @@ async fn project_deploys_to_production_through_runner() {
                 vec!["1.1.1.1".into()],
             );
             runner.git_bin = env_ref.dir.join("fake-git.sh").display().to_string();
+            runner.smoke_target = Some(smoke_server().await);
             let opts = Options {
                 server: env_ref.base.clone(),
                 join_token: Some(jt["token"].as_str().unwrap().to_string()),
@@ -2401,17 +2418,17 @@ async fn project_deploys_to_production_through_runner() {
     assert!(e["error"].as_str().unwrap().contains("建置環境"), "{e}");
     let agent = start("runner-build", true).await;
 
+    // ADR 0020：尚未驗證 → 先驗證，通過後部署
     let (st, d) = deploy().await;
     assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    assert_eq!(d["verification"]["trigger"], "deploy", "{d}");
+    assert_eq!(d["verification"]["deploy_after"], true);
+
+    let d = wait_deploy(&env, &member, &id, |d| d["status"] == "running").await;
     let sub = d["subdomain"].as_str().unwrap().to_string();
     assert_eq!(sub.len(), 8, "production 8 字元");
     assert_eq!(d["url"], format!("https://{sub}.caloud.tw"));
     assert_eq!(d["commit"], "98b705d0123456789abcdef0123456789abcdef0");
-    // 進行中不可重複部署
-    let (st, _) = deploy().await;
-    assert_eq!(st, StatusCode::CONFLICT);
-
-    let d = wait_deploy(&env, &member, &id, |d| d["status"] == "running").await;
     assert_eq!(d["stage"], "done");
     assert!(d["error"].is_null());
     let stages: Vec<&str> = d["logs"].as_array().unwrap().iter().map(|l| l["stage"].as_str().unwrap()).collect();
@@ -2573,6 +2590,7 @@ async fn project_vars_are_encrypted_and_injected() {
         vec!["1.1.1.1".into()],
     );
     runner.git_bin = env.dir.join("fake-git.sh").display().to_string();
+    runner.smoke_target = Some(smoke_server().await);
     let opts = Options {
         server: env.base.clone(),
         join_token: Some(jt["token"].as_str().unwrap().to_string()),
@@ -2591,18 +2609,36 @@ async fn project_vars_are_encrypted_and_injected() {
     let path = format!("/api/projects/{id}/deploy");
     let (st, d) = env.call("POST", &path, &member, None).await;
     assert_eq!(st, StatusCode::ACCEPTED, "{d}");
-    let sub = d["subdomain"].as_str().unwrap().to_string();
+    assert!(d["verification"].is_object(), "先驗證：{d}");
     let d = wait_deploy(&env, &member, &id, |d| d["stage"] == "done").await;
+    let sub = d["subdomain"].as_str().unwrap().to_string();
     assert_eq!(d["vars_pending"], false);
     assert_eq!(d["missing_vars"], json!(["NEXT_PUBLIC_API_URL"]));
-    let upenv = |log: &str| -> Vec<String> { log.lines().filter(|l| l.starts_with("UPENV")).map(str::to_string).collect() };
-    let first = upenv(&env.docker_log());
+    let upenv = |log: &str, project: &str| -> Vec<String> {
+        log.lines()
+            .filter(|l| l.starts_with(&format!("UPENV P=caloud-env-{project} ")))
+            .map(|l| l.replacen(&format!("P=caloud-env-{project} "), "", 1))
+            .collect()
+    };
+    let first = upenv(&env.docker_log(), &sub);
     assert_eq!(first.len(), 1, "{first:?}");
     let db_pw = first[0].split(" D=").nth(1).unwrap().to_string();
     assert!(
         first[0].starts_with("UPENV S=supersecret-value-42 D=") && db_pw.len() == 32,
         "{first:?}"
     );
+    // 驗證環境：同樣的用戶變數、另外產生的資料庫密碼（ADR 0020）
+    let verify_up: Vec<&str> = env
+        .docker_log()
+        .lines()
+        .filter(|l| l.starts_with("UPENV") && !l.contains(&sub))
+        .map(|_| "")
+        .collect();
+    assert_eq!(verify_up.len(), 1);
+    assert!(env
+        .docker_log()
+        .lines()
+        .any(|l| l.starts_with("UPENV") && !l.contains(&sub) && l.contains("S=supersecret-value-42") && !l.contains(&db_pw)));
     // override 只列名稱，只給建置的服務；檔案中沒有值
     let ov = std::fs::read_to_string(env.dir.join(format!("runner-vars/envs/{sub}/caloud.override.yml"))).unwrap();
     assert_eq!(ov.matches("environment:").count(), 1, "只有 web：{ov}");
@@ -2626,7 +2662,7 @@ async fn project_vars_are_encrypted_and_injected() {
     env.call("POST", &path, &member, None).await;
     let d = wait_deploy(&env, &member, &id, |d| d["stage"] == "done" && d["vars_pending"] == false).await;
     assert_eq!(d["vars_pending"], false);
-    let second = upenv(&env.docker_log());
+    let second = upenv(&env.docker_log(), &sub);
     assert_eq!(second.last().unwrap(), &format!("UPENV S=rotated-secret-99 D={db_pw}"));
 
     // 稽核只有名稱
@@ -2637,8 +2673,8 @@ async fn project_vars_are_encrypted_and_injected() {
     assert_eq!(
         details,
         [
-            "production: set SESSION_SECRET,SHORT",
-            "production: set SESSION_SECRET; unset SHORT"
+            "via=web; production: set SESSION_SECRET,SHORT",
+            "via=web; production: set SESSION_SECRET; unset SHORT"
         ]
     );
     // 刪除專案時一併刪除變數
@@ -2677,6 +2713,255 @@ async fn project_vars_require_master_key() {
         .await;
     assert_eq!(st, StatusCode::CONFLICT, "{e}");
     assert!(e["error"].as_str().unwrap().contains("CALOUD_MASTER_KEY"));
+}
+
+async fn wait_verification(env: &Env, cookie: &str, vid: &str) -> Value {
+    for _ in 0..400 {
+        let (_, v) = env.call("GET", &format!("/api/verifications/{vid}"), cookie, None).await;
+        if !["queued", "running"].contains(&v["verification"]["status"].as_str().unwrap_or("running")) {
+            return v;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("verification {vid} never finished");
+}
+
+// FR-CI-01～04、FR-RPT-01～03、FR-ENV-12（ADR 0020）：驗證、報告、與前次比較、取消、部署關卡、稽核來源
+#[tokio::test]
+#[allow(clippy::async_yields_async)]
+async fn verification_reports_gate_and_compare() {
+    use caloud_runner::client::{run_once, Options};
+    use caloud_runner::envs::EnvRunner;
+    use caloud_runner::selfcheck::SelfCheck;
+    let env = Env::new().await;
+    let (admin, member) = admin_and_member(&env).await;
+    env.call(
+        "POST",
+        "/api/admin/domain-pools",
+        &admin,
+        Some(json!({ "root": "caloud.tw", "purposes": ["production", "staging", "verify"] })),
+    )
+    .await;
+    let pkg = "{\n  \"scripts\": { \"build\": \"next build\", \"start\": \"next start\", \"test\": \"jest\" },\n  \"dependencies\": { \"next\": \"15\" }\n}\n";
+    let leaked = format!("const k = 'AKIA{}';\n", "ABCDEFGHIJKLMNOP");
+    set_repo(
+        &env,
+        &[("package.json", pkg), ("package-lock.json", "{}"), ("src/a.ts", leaked.as_str())],
+    );
+    let (_, p) = env
+        .call(
+            "POST",
+            "/api/projects",
+            &member,
+            Some(json!({ "repo_url": "https://github.com/CAFECA-IO/SwarmStorage" })),
+        )
+        .await;
+    let id = p["id"].as_str().unwrap().to_string();
+    let v = wait_project(&env, &member, &id).await;
+    assert_eq!(v["analysis"]["result"]["verify"]["test"]["command"], "npm run test");
+    let verify = format!("/api/projects/{id}/verify");
+    let (st, _) = env.call("POST", &verify, &member, None).await;
+    assert_eq!(st, StatusCode::CONFLICT, "未確認不能驗證");
+    env.call(
+        "PUT",
+        &format!("/api/projects/{id}/analysis"),
+        &member,
+        Some(json!({ "public_service": "web" })),
+    )
+    .await;
+
+    let (_, jt) = env.call("POST", "/api/admin/nodes/join-tokens", &admin, Some(json!({}))).await;
+    let mut runner = EnvRunner::new(
+        env.dir.join("fake-docker.sh").display().to_string(),
+        env.dir.join("runner-v"),
+        vec!["1.1.1.1".into()],
+    );
+    runner.git_bin = env.dir.join("fake-git.sh").display().to_string();
+    runner.smoke_target = Some(smoke_server().await);
+    let opts = Options {
+        server: env.base.clone(),
+        join_token: Some(jt["token"].as_str().unwrap().to_string()),
+        name: "runner-v".into(),
+        state_dir: env.dir.join("runner-v"),
+        envs: runner,
+        check: SelfCheck {
+            gvisor: true,
+            isolation: true,
+            buildkit: true,
+            reason: None,
+        },
+    };
+    let agent = tokio::spawn(async move { run_once(&opts).await });
+    wait_node(&env, &admin, "runner-v", "active").await;
+
+    // 1. 有秘密外洩 → 未通過
+    let (st, v1) = env.call("POST", &verify, &member, None).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v1}");
+    assert_eq!((v1["status"].as_str(), v1["trigger"].as_str()), (Some("running"), Some("manual")));
+    let vid1 = v1["id"].as_str().unwrap().to_string();
+    let d1 = wait_verification(&env, &member, &vid1).await;
+    let r1 = &d1["verification"];
+    assert_eq!(r1["status"], "failed", "{d1}");
+    assert_eq!(r1["counts"]["high"], 1, "{d1}");
+    for st in ["fetch", "analyze", "build", "start", "test", "smoke", "logs", "report", "destroy"] {
+        assert_eq!(r1["stages"][st], "passed", "{st}: {}", r1["stages"]);
+    }
+    assert_eq!(r1["stages"]["static"], "failed");
+    let issue = d1["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["rule"] == "secret/aws-access-key")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (issue["file"].as_str(), issue["line"].as_i64(), issue["change"].as_str()),
+        (Some("src/a.ts"), Some(1), Some("new"))
+    );
+    assert!(!d1.to_string().contains("AKIAABCDEFGHIJKLMNOP"), "值遮蔽");
+    assert!(
+        d1["logs"].as_array().unwrap().iter().any(|l| l["stage"] == "test"),
+        "{}",
+        d1["logs"]
+    );
+    // 測試在 gVisor 沙箱執行；驗證環境已銷毀、紀錄刪除
+    let log = env.docker_log();
+    assert!(
+        log.contains("--runtime runsc --network caloud-build") && log.contains("sh -c npm ci && npm run test"),
+        "{log}"
+    );
+    let envs_left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM environments WHERE kind = 'verify'")
+        .fetch_one(&env.db)
+        .await
+        .unwrap();
+    assert_eq!(envs_left, 0);
+
+    // 報告：JSON、Markdown（附件）
+    let r = env
+        .http
+        .get(env.url(&format!("/api/verifications/{vid1}/report?format=md")))
+        .header("cookie", &member)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert!(r.headers()["content-disposition"].to_str().unwrap().contains(".md"));
+    let md = r.text().await.unwrap();
+    assert!(
+        md.contains("# 驗證報告：SwarmStorage") && md.contains("**failed**") && md.contains("AWS"),
+        "{md}"
+    );
+    let r = env
+        .http
+        .get(env.url(&format!("/api/verifications/{vid1}/report")))
+        .header("cookie", &member)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.headers()["content-disposition"].to_str().unwrap().contains(".json"));
+
+    // 權限
+    let (other, o) = env.login(acct(0xd1)).await;
+    env.call(
+        "PUT",
+        &format!("/api/users/{}", o["account"].as_str().unwrap()),
+        &admin,
+        Some(json!({ "role": "member" })),
+    )
+    .await;
+    let (st, _) = env.call("GET", &format!("/api/verifications/{vid1}"), &other, None).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, _) = env.call("POST", &verify, &other, None).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // 2. 部署關卡：未通過 → 部署改為先驗證；member 不能強制；admin 可強制並留稽核
+    let deploy = format!("/api/projects/{id}/deploy");
+    let (_, g) = env.call("POST", &deploy, &member, None).await;
+    let vid2 = g["verification"]["id"].as_str().unwrap().to_string();
+    assert_eq!(wait_verification(&env, &member, &vid2).await["verification"]["status"], "failed");
+    let (_, v) = env.call("GET", &format!("/api/projects/{id}"), &member, None).await;
+    assert!(v["deployment"].is_null(), "未通過不部署");
+    assert_eq!(v["verification"]["verified"], false);
+    let (st, _) = env.call("POST", &deploy, &member, Some(json!({ "force": true }))).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, d) = env.call("POST", &deploy, &admin, Some(json!({ "force": true }))).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    assert!(d["subdomain"].is_string(), "{d}");
+    wait_deploy(&env, &member, &id, |d| d["stage"] == "done").await;
+
+    // 3. 修正後通過：與前次比較 → 已修正
+    set_repo(
+        &env,
+        &[
+            ("package.json", pkg),
+            ("package-lock.json", "{}"),
+            ("src/a.ts", "export const ok = 1;\n"),
+        ],
+    );
+    let (_, v3) = env.call("POST", &verify, &member, None).await;
+    let d3 = wait_verification(&env, &member, v3["id"].as_str().unwrap()).await;
+    assert_eq!(d3["verification"]["status"], "passed", "{d3}");
+    assert_eq!(d3["previous"], vid2.as_str());
+    assert!(
+        d3["fixed"].as_array().unwrap().iter().any(|i| i["rule"] == "secret/aws-access-key"),
+        "{d3}"
+    );
+    let (_, v) = env.call("GET", &format!("/api/projects/{id}"), &member, None).await;
+    assert_eq!(v["verification"]["verified"], true);
+    let (_, list) = env.call("GET", "/api/projects", &member, None).await;
+    assert_eq!(list[0]["verify_status"], "passed");
+    // 已通過 → 直接部署
+    let (_, d) = env.call("POST", &deploy, &member, None).await;
+    assert!(d["subdomain"].is_string(), "{d}");
+    wait_deploy(&env, &member, &id, |d| d["stage"] == "done").await;
+
+    // 4. 同分支的新驗證取消舊的；手動取消
+    std::fs::write(env.dir.join("docker.slow"), "").unwrap();
+    let (_, a) = env.call("POST", &verify, &member, None).await;
+    let (_, b) = env.call("POST", &verify, &member, None).await;
+    let da = wait_verification(&env, &member, a["id"].as_str().unwrap()).await;
+    assert_eq!(da["verification"]["status"], "canceled");
+    assert_eq!(da["verification"]["error"], "同分支有新的驗證");
+    let bid = b["id"].as_str().unwrap();
+    let (st, _) = env.call("POST", &format!("/api/verifications/{bid}/cancel"), &member, None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    assert_eq!(wait_verification(&env, &member, bid).await["verification"]["status"], "canceled");
+    let (st, _) = env.call("POST", &format!("/api/verifications/{bid}/cancel"), &member, None).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    std::fs::remove_file(env.dir.join("docker.slow")).unwrap();
+    // 取消的環境由 agent 清除
+    for _ in 0..200 {
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM environments WHERE kind = 'verify'")
+            .fetch_one(&env.db)
+            .await
+            .unwrap();
+        if n == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM environments WHERE kind = 'verify'")
+        .fetch_one(&env.db)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+
+    // 稽核來源（FR-OPS-01）
+    let rows: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT action, detail FROM audit_log WHERE action IN ('project_verify', 'project_deploy') ORDER BY id")
+            .fetch_all(&env.db)
+            .await
+            .unwrap();
+    assert!(
+        rows.iter().all(|(_, d)| d.as_deref().unwrap_or_default().starts_with("via=")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|(a, d)| a == "project_deploy" && d.as_deref().unwrap_or_default().ends_with(" forced")),
+        "{rows:?}"
+    );
+    agent.abort();
 }
 
 // ───────────────────────── Edge TLS 與憑證（ADR 0016） ─────────────────────────

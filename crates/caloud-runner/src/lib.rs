@@ -3,7 +3,9 @@
 pub mod build;
 pub mod client;
 pub mod envs;
+pub mod secrets;
 pub mod selfcheck;
 pub mod specs;
 pub mod state;
 pub mod tunnel;
+pub mod verify;

@@ -27,10 +27,12 @@ UNIT=/etc/systemd/system/caloud-firewall.service
 AGENT_UNIT=/etc/systemd/system/caloud-agent.service
 AGENT_ENV=/etc/caloud/agent.env
 AGENT_STATE=/var/lib/caloud-agent
-# 建置沙箱（ADR 0018）：介面名稱符合 cld+，沿用環境防火牆
+# 建置與驗證沙箱（ADR 0018、ADR 0020）：介面名稱符合 cld+，沿用環境防火牆
 BUILD_NET=caloud-build
 BUILD_SUBNET=10.239.0.0/24
 BUILDKIT_IMAGE="moby/buildkit@sha256:5987568f92dafbfb679879de59c1cd8d26597f5f6635c314e166164e2615870c"
+# 驗證的相依套件漏洞掃描（ADR 0020）：osv-scanner v2.3.0
+OSV_IMAGE="ghcr.io/google/osv-scanner@sha256:6421cdd773a54fad5fd991895b4f3840beba55a2f30a8182185919e13979a2c8"
 # 環境網段介面（ADR 0015：bridge 名稱 cld<索引>）
 IFACE="cld+"
 BLOCKED="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10"
@@ -125,6 +127,7 @@ UNIT
   docker network inspect "$BUILD_NET" >/dev/null 2>&1 \
     || docker network create --driver bridge --subnet "$BUILD_SUBNET" -o com.docker.network.bridge.name=cldbuild "$BUILD_NET" >/dev/null
   docker pull -q "$BUILDKIT_IMAGE" >/dev/null
+  docker pull -q "$OSV_IMAGE" >/dev/null
   agent_install
   echo "✓ 完成。用 $PREFIX/bin/caloud-agent --self-check --state-dir $AGENT_STATE 驗證。"
 }
@@ -167,7 +170,7 @@ do_uninstall() {
   systemctl disable --now caloud-agent.service >/dev/null 2>&1 || true
   rm -f "$AGENT_UNIT" "$AGENT_ENV"; rm -rf "$AGENT_STATE"
   docker network rm "$BUILD_NET" >/dev/null 2>&1 || true
-  docker image rm "$BUILDKIT_IMAGE" >/dev/null 2>&1 || true
+  docker image rm "$BUILDKIT_IMAGE" "$OSV_IMAGE" >/dev/null 2>&1 || true
   systemctl disable caloud-firewall.service >/dev/null 2>&1 || true
   rm -f "$UNIT"; systemctl daemon-reload
   firewall_down

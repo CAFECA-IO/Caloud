@@ -303,6 +303,40 @@ pub(crate) async fn for_deploy(s: &AppState, project: &str, env: &str, compose: 
         .collect()
 }
 
+/// 驗證用（ADR 0020）：production 的用戶變數；資料庫密碼每次重新產生，不寫入資料庫
+pub(crate) async fn for_verify(s: &AppState, project: &str, compose: &str) -> ApiResult<Vec<EnvValue>> {
+    let list: Vec<Row> = rows(s, project, "production").await?.into_iter().filter(|r| !r.generated).collect();
+    let mut out = Vec::new();
+    if !list.is_empty() {
+        let key = s
+            .master_key
+            .as_ref()
+            .ok_or_else(|| ApiError::Conflict("伺服器未設定主金鑰 CALOUD_MASTER_KEY，無法使用秘密變數。".into()))?;
+        for r in list {
+            let plain = key
+                .open(PURPOSE, &aad_id(project, "production", &r.name), &r.value_enc)
+                .map_err(|e| ApiError::Conflict(format!("無法解密變數 `{}`：{e}；請重新設定。", r.name)))?;
+            out.push(EnvValue {
+                value: String::from_utf8(plain).map_err(|_| ApiError::Conflict(format!("變數 `{}` 不是有效的文字。", r.name)))?,
+                user: true,
+                name: r.name,
+            });
+        }
+    }
+    if compose.contains(&format!("${{{DB_PASSWORD}}}")) || compose.contains(&format!("${DB_PASSWORD}")) {
+        out.push(EnvValue {
+            name: DB_PASSWORD.into(),
+            value: caloud_auth::new_token()
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .take(32)
+                .collect(),
+            user: false,
+        });
+    }
+    Ok(out)
+}
+
 /// 部署卡片：需要但未設定的用戶變數
 pub(crate) async fn missing(s: &AppState, project: &str, env: &str) -> ApiResult<Vec<String>> {
     Ok(items(s, project, env)

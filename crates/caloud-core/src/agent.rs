@@ -148,6 +148,80 @@ pub enum AgentMsg {
         stage: String,
         line: String,
     },
+    /// 驗證階段（ADR 0020）
+    VerifyStage {
+        id: String,
+        stage: String,
+        status: String,
+    },
+    VerifyIssue {
+        id: String,
+        issue: Issue,
+    },
+    VerifyLog {
+        id: String,
+        stage: String,
+        line: String,
+    },
+    VerifyDone {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        /// 環境保留未銷毀（FR-CI-05）
+        #[serde(default)]
+        kept: bool,
+    },
+}
+
+/// 驗證的十個階段（ADR 0020）
+pub const VERIFY_STAGES: [&str; 10] = [
+    "fetch", "analyze", "build", "static", "start", "test", "smoke", "logs", "report", "destroy",
+];
+
+/// 問題等級（FR-RPT-01）
+pub const SEVERITIES: [&str; 4] = ["blocker", "high", "medium", "low"];
+
+/// 驗證發現的問題
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Issue {
+    /// `blocker` | `high` | `medium` | `low`
+    pub severity: String,
+    pub stage: String,
+    /// 例：`secret/aws-access-key`、`vuln/GHSA-…`、`test/failed`
+    pub rule: String,
+    pub title: String,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+}
+
+/// 在 gVisor 測試沙箱中執行的指令（ADR 0020）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifyCmd {
+    pub image: String,
+    #[serde(default)]
+    pub setup: String,
+    pub command: String,
+}
+
+/// 一次驗證（ADR 0020）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifySpec {
+    pub id: String,
+    /// kind `verify`，帶 source 與 vars
+    pub env: EnvSpec,
+    pub public_port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test: Option<VerifyCmd>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lint: Option<VerifyCmd>,
+    #[serde(default)]
+    pub smoke: Vec<String>,
+    #[serde(default)]
+    pub keep_on_failure: bool,
 }
 
 /// 控制面 → agent
@@ -172,6 +246,12 @@ pub enum ServerMsg {
     },
     Destroy {
         env_id: String,
+    },
+    Verify {
+        run: Box<VerifySpec>,
+    },
+    CancelVerify {
+        id: String,
     },
 }
 

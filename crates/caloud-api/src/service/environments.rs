@@ -286,7 +286,7 @@ pub(crate) async fn destroy(s: &AppState, env: &Environment) -> ApiResult<()> {
     Ok(())
 }
 
-async fn remove(s: &AppState, env: &Environment) -> ApiResult<()> {
+pub(crate) async fn remove(s: &AppState, env: &Environment) -> ApiResult<()> {
     sqlx::query("DELETE FROM deploy_logs WHERE env = ?")
         .bind(&env.subdomain)
         .execute(&s.db)

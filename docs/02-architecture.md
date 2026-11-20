@@ -245,7 +245,7 @@ Runner 的 caloud-agent ──WebSocket（主動連出）──► 控制面 /ag
 舊主機的 caloud-agent --migrate ──（主動連出，一次性）──► 控制面（快照、雜湊、最後同步，ADR 0013）
 ```
 
-Runner 主機以 `scripts/runner-setup.sh install` 準備：安裝 gVisor、在 daemon.json 註冊 `runsc`、建立 `CALOUD-ENV-*` 防火牆 chain 與開機還原服務、建立 `caloud-build` 建置網路並拉取 BuildKit 映像、安裝 `caloud-agent.service`（ADR 0018；`install --agent <執行檔> --server <控制面網址> --join <加入權杖>`，agent 執行檔可由 Caloud 映像的 `/usr/local/bin/caloud-agent` 取出）；`uninstall` 完整移除（[ADR 0015](adr/0015-runner-sandbox.md)）。環境容器以 gVisor 執行，每個環境一個 `cld<索引>` bridge 與固定網段，Edge 經通道連到對外服務的固定 IP。
+Runner 主機以 `scripts/runner-setup.sh install` 準備：安裝 gVisor、在 daemon.json 註冊 `runsc`、建立 `CALOUD-ENV-*` 防火牆 chain 與開機還原服務、建立 `caloud-build` 建置網路並拉取 BuildKit 與 osv-scanner 映像（ADR 0020）、安裝 `caloud-agent.service`（ADR 0018；`install --agent <執行檔> --server <控制面網址> --join <加入權杖>`，agent 執行檔可由 Caloud 映像的 `/usr/local/bin/caloud-agent` 取出）；`uninstall` 完整移除（[ADR 0015](adr/0015-runner-sandbox.md)）。環境容器以 gVisor 執行，每個環境一個 `cld<索引>` bridge 與固定網段，Edge 經通道連到對外服務的固定 IP。
 
 | 網域 | 用途 |
 | --- | --- |

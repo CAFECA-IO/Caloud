@@ -197,11 +197,13 @@ pub async fn get(s: &AppState, me: &CurrentUser, id: &str) -> ApiResult<Value> {
         None => None,
     };
     let deployment = super::deploy::deployment(s, &p).await?;
+    let verification = super::verify::summary(s, &p).await?;
     Ok(json!({
         "project": p,
         "analysis": last.as_ref().map(analysis_json),
         "confirmed": confirmed.as_ref().map(analysis_json),
         "deployment": deployment,
+        "verification": verification,
     }))
 }
 
@@ -339,7 +341,7 @@ pub(crate) fn spawn_analysis(s: AppState, p: Project, deploy_after: bool) {
             tracing::error!(project = %p.id, error = %e, "failed to record analysis");
         }
         if deploy {
-            super::deploy::redeploy_after_push(&s, &p.id).await;
+            super::deploy::verify_after_push(&s, &p.id).await;
         }
     });
 }

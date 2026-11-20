@@ -52,9 +52,11 @@ const UI = (() => {
     project: { analyzing: ["解析中", "warning", true], needs_review: ["待確認", "warning"], confirmed: ["已確認", "success"], error: ["失敗", "danger"] },
     confidence: { high: ["高", "success"], medium: ["中", "warning"], low: ["低", "danger"] },
     deploy: { none: ["尚未部署", ""], deploying: ["部署中", "accent", true], running: ["運作中", "success"], failed: ["失敗", "danger"] },
+    verify: { queued: ["排隊中", ""], running: ["驗證中", "accent", true], passed: ["通過", "success"], failed: ["未通過", "danger"], canceled: ["已取消", ""], error: ["錯誤", "danger"] },
+    severity: { blocker: ["Blocker", "danger"], high: ["High", "danger"], medium: ["Medium", "warning"], low: ["Low", ""] },
     node: { active: ["運作中", "success"], draining: ["排空中", "warning"], offline: ["離線", "danger"] },
   };
-  /** 產生 Badge（StatusPill）HTML；kind 為 app／domain／route／tls／role／project／confidence／deploy／node */
+  /** 產生 Badge（StatusPill）HTML；kind 為 app／domain／route／tls／role／project／confidence／deploy／node／verify／severity */
   function statusPill(kind, value) {
     const [label, tone, pulse] = STATUS[kind][String(value)] || [String(value), ""];
     const cls = ["c-badge", tone && `c-badge--${tone}`, pulse && "c-badge--pulse"].filter(Boolean).join(" ");

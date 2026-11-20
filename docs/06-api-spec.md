@@ -322,6 +322,8 @@
 - `status`：`analyzing` → `needs_review` | `error`；確認後 `confirmed`。重新解析時回到 `analyzing`，完成後若已有確認版本則回 `confirmed`，否則 `needs_review`。
 - `git_ref` 為 null 表示儲存庫的預設分支，`branch` 為解析時取得的分支名稱。
 
+列表（`GET /api/projects`）的每個專案另含 `verify_status`：最近一次驗證的狀態（沒有時為 null；ADR 0020）。
+
 **POST /api/projects** `{ "repo_url", "git_ref"?, "root"?, "name"? }` → `202 Project`（背景解析）。`repo_url` 須為 `https://` 且不含帳密；`git_ref`、`root` 規則同 §3.4 的 `git_ref`、`git_path`；`name` 省略時取儲存庫名稱（1–64 字）。超過 20 個專案回 `409`。
 
 **GET /api/projects/{id}** → `200 { "project": Project, "analysis": Analysis | null, "confirmed": Analysis | null }`，`analysis` 為最新一筆：
