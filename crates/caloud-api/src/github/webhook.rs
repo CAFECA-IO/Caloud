@@ -79,6 +79,8 @@ async fn dispatch(s: &AppState, event: &str, v: &Value) -> anyhow::Result<()> {
                         .await?;
                     s.github.forget_token(id);
                 }
+                // 權杖的權限在簽發時固定：接受新權限後丟掉快取，下次重新簽發
+                "new_permissions_accepted" => s.github.forget_token(id),
                 "suspend" | "unsuspend" => {
                     sqlx::query("UPDATE github_installations SET suspended = ? WHERE id = ?")
                         .bind(action == "suspend")

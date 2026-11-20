@@ -357,11 +357,27 @@ async fn run_analysis(s: &AppState, p: &Project) -> Result<(), String> {
     let fetched = match p.installation_id {
         // ADR 0017：私有儲存庫以 installation token 取得，權杖只經 git 環境變數傳入
         Some(inst) => {
-            let token = crate::github::app::installation_token(s, inst)
-                .await
-                .map_err(|e| format!("無法取得 GitHub 授權：{e}"))?;
-            let auth = crate::github::app::git_auth_header(&token);
-            caloud_orchestrator::git::fetch_repo_with_auth(&s.runner.git_bin, &dir, &p.repo_url, p.git_ref.as_deref(), &auth).await
+            let mut tries = 0;
+            loop {
+                let token = crate::github::app::installation_token(s, inst)
+                    .await
+                    .map_err(|e| format!("無法取得 GitHub 授權：{e}"))?;
+                let auth = crate::github::app::git_auth_header(&token);
+                let r =
+                    caloud_orchestrator::git::fetch_repo_with_auth(&s.runner.git_bin, &dir, &p.repo_url, p.git_ref.as_deref(), &auth).await;
+                // 快取的權杖可能是權限變更前簽發的：丟掉後以新權杖重試一次
+                match r {
+                    Err(e) if tries == 0 && e.to_string().contains("not found") => {
+                        s.github.forget_token(inst);
+                        tries += 1;
+                    }
+                    Err(e) if e.to_string().contains("not found") => break Err(anyhow::anyhow!(
+                        "{}（GitHub App 需要 Contents 讀取權限，且這個儲存庫要在安裝的授權範圍內；變更權限後，組織需在 GitHub 接受新權限）",
+                        e.to_string().lines().next().unwrap_or_default()
+                    )),
+                    r => break r,
+                }
+            }
         }
         None => caloud_orchestrator::git::fetch_repo(&s.runner.git_bin, &dir, &p.repo_url, p.git_ref.as_deref()).await,
     }
