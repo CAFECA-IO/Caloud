@@ -201,6 +201,8 @@
 | POST | `/api/admin/blocked-hosts` | admin+ | FR-OPS-03 |
 | DELETE | `/api/admin/blocked-hosts/{hostname}` | admin+ | FR-OPS-03 |
 | POST | `/api/admin/subdomain-ids` | admin+ | FR-ENV-07 |
+| GET | `/api/admin/build-settings` | admin+ | FR-CI-06 |
+| PUT | `/api/admin/build-settings` | admin+ | FR-CI-06 |
 | GET | `/api/admin/nodes` | admin+ | FR-OPS-04 |
 | POST | `/api/admin/nodes/join-tokens` | admin+ | FR-OPS-04 |
 | POST | `/api/admin/nodes/{id}/drain` | admin+ | FR-OPS-06 |
@@ -403,6 +405,10 @@
 
 **POST /api/verifications/{id}/cancel** → `204`（已結束回 `409`）。
 
+- PR 驗證（ADR 0021）：`trigger` 為 `pr`、`pr_number` 為 PR 編號、`branch` 為 `pr/<n>`；不注入秘密變數、不部署、不算進部署關卡。以 GitHub 安裝匯入的專案會建立並更新 GitHub check run（`Caloud 驗證`），PR 另有一則更新式留言。
+
+**建置資源**（FR-CI-06，ADR 0021）：`GET /api/admin/build-settings` → `200 { "cpus": 4, "memory_mb": 8192, "minutes_monthly": 0, "usage": [ { "account": "0x…", "handle": "…", "minutes": 12 } ] }`；`PUT` `{ "cpus", "memory_mb", "minutes_monthly" }` → `200`（範圍：cpus 1–16、memory_mb 1024–32768、minutes_monthly ≥ 0，0 表示不限）。`GET /api/projects/{id}` 另回 `build_usage: { "minutes": 12, "limit": 0 }`（專案擁有者本月用量）。本月用量達上限時 `verify`、`deploy` 回 `409`。
+
 **GET /api/verifications/{id}/report?format=json|md** → 報告檔（`content-disposition: attachment`）。
 
 **秘密變數**（FR-ENV-05，[ADR 0019](adr/0019-project-vars.md)）：依環境分開（`env`：本輪只有 `production`），只寫不讀。
@@ -526,12 +532,12 @@
 | --- | --- | --- |
 | `register` | `join_token` 或 `node_token`（擇一）、`name`、`specs`（同 Node.specs） | 必須是第一則，10 秒內未收到即關閉。首次以加入權杖註冊；之後以節點權杖重連 |
 | `heartbeat` | `used`（`cpu_millis`、`memory_bytes`，主機目前用量） | 每 `heartbeat_secs` 秒一次；第一則在 `ack` 後立即送出 |
-| `env_status` | `env_id`、`status`（`deploying`／`running`／`failed`／`destroyed`）、`stage`?（`fetch`／`build`／`start`；`failed` 時為失敗的階段）、`error`?、`services`（`[{name, ip}]`） | 部署進度與結果；`deploying` 只用於回報目前階段（ADR 0018） |
+| `env_status` | `env_id`、`status`（`deploying`／`running`／`failed`／`destroyed`）、`stage`?（`fetch`／`build`／`release`／`start`；`failed` 時為失敗的階段）、`build_secs`?（建置與沙箱累計秒數，ADR 0021）、`error`?、`services`（`[{name, ip}]`） | 部署進度與結果；`deploying` 只用於回報目前階段（ADR 0018） |
 | `env_log` | `env_id`、`stage`、`line` | 部署過程的輸出，逐行；每行最多 500 字、每階段最多 2000 行 |
 | `verify_stage` | `id`、`stage`、`status`（`running`／`passed`／`failed`／`skipped`） | 驗證階段（ADR 0020） |
 | `verify_issue` | `id`、`issue`（`severity`、`stage`、`rule`、`title`、`detail`、`file`?、`line`?） | 驗證發現的問題；值已遮蔽 |
 | `verify_log` | `id`、`stage`、`line` | 驗證過程的輸出；上限同 `env_log` |
-| `verify_done` | `id`、`error`?、`kept` | 驗證結束；`kept` 表示環境保留未銷毀 |
+| `verify_done` | `id`、`error`?、`kept`、`build_secs`? | 驗證結束；`kept` 表示環境保留未銷毀 |
 
 **控制面 → Agent**
 
@@ -539,7 +545,7 @@
 | --- | --- | --- |
 | `ack` | `node_id`、`node_token`（只在以加入權杖註冊時出現）、`status`、`heartbeat_secs` | 註冊成功 |
 | `status` | `status` | 維運者排空或恢復節點時通知 |
-| `deploy` | `env`（`id`、`kind`、`compose`、`subnet_index`、`public_service`、`source`?、`vars`?） | 部署或重新部署環境（FR-OPS-13）；agent 以平臺政策再檢查 compose。`source`（ADR 0018）：`repo_url`、`commit`、`git_ref`?、`compose_dir`、`auth_header`?；有 source 時 compose 可含 `build`（只限儲存庫內路徑與 `dockerfile_inline`），agent 先取得原始碼、在 gVisor BuildKit 建置後改寫為 image。`vars`（ADR 0019）：`[{name, value, user}]`，`docker compose up` 時放進行程環境變數；`user: true` 的名稱列入建置服務的 `environment`；build args 的 `${NAME}` 以此內插；log 與錯誤中的值遮蔽為 `***` |
+| `deploy` | `env`（`id`、`kind`、`compose`、`subnet_index`、`public_service`、`source`?、`vars`?、`build`?、`release`?） | 部署或重新部署環境（FR-OPS-13）；agent 以平臺政策再檢查 compose。`source`（ADR 0018）：`repo_url`、`commit`、`git_ref`?、`compose_dir`、`auth_header`?；有 source 時 compose 可含 `build`（只限儲存庫內路徑與 `dockerfile_inline`），agent 先取得原始碼、在 gVisor BuildKit 建置後改寫為 image。`vars`（ADR 0019）：`[{name, value, user}]`，`docker compose up` 時放進行程環境變數；`user: true` 的名稱列入建置服務的 `environment`；build args 的 `${NAME}` 以此內插；log 與錯誤中的值遮蔽為 `***`。`build`（ADR 0021）：`{cpus, memory_mb}` 建置與沙箱資源；`release`：`[{service, command?}]` 發布前任務，以新設定 `docker compose run` 成功後才 `up`，失敗時回報 `stage: release` 並保留舊版 |
 | `destroy` | `env_id` | 停止並刪除環境與其 volume |
 | `verify` | `run`（`id`、`env`（同 `deploy`，kind `verify`）、`public_port`、`test`?、`lint`?（`image`、`setup`、`command`）、`smoke`（路徑）、`keep_on_failure`） | 執行驗證的十個階段中由 agent 負責的部分並逐步回報（ADR 0020） |
 | `cancel_verify` | `id` | 取消驗證；agent 終止子程序並銷毀環境 |

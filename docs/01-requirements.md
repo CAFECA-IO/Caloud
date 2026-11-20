@@ -154,7 +154,7 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | --- | --- | --- | --- |
 | FR-GH-01 | 透過 GitHub App 授權儲存庫，只申請 contents:read、metadata:read、checks:write、pull_requests:write；使用 1 小時 installation token，不存長期憑證；安裝時以一次性使用者授權確認安裝者，再綁定到 Caloud 帳號（[ADR 0017](adr/0017-github-app-public-console.md)） | P0 | M5 |
 | FR-GH-02 | 接收 push、create（branch）、pull_request 事件（HMAC 驗簽、delivery 去重）並觸發驗證；驗證（M6）完成前先觸發重新解析 | P0 | M5 |
-| FR-GH-03 | 驗證狀態與摘要回寫 GitHub Checks；PR 留言附報告連結 | P1 | M6 |
+| FR-GH-03 | 驗證狀態與摘要回寫 GitHub Checks；PR 留言附報告連結：也驗證以專案分支為 base 的 PR（不注入秘密變數、不部署），每個 PR 一則留言並更新（[ADR 0021](adr/0021-checks-quota-release.md)） | P1 | M6 |
 | FR-GH-04 | 公開儲存庫可直接以網址匯入（無事件，手動觸發） | P2 | M5 |
 | FR-GH-05 | 維運者在後台設定 GitHub App 憑證（App ID、Client ID、client secret、私鑰、webhook secret），機密以主金鑰加密保存、只顯示末 4 碼；設定時以 GitHub API 確認私鑰與 App 相符 | P0 | M5 |
 
@@ -184,7 +184,7 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-ENV-04 | 只有沒有 Blocker、High 的發布可上 production；強制發布需二次確認並寫稽核 | P0 | M7 |
 | FR-ENV-05 | 秘密變數依環境分開設定，只寫不讀；日誌與報告自動遮蔽。用戶變數只注入從儲存庫建置的服務；平臺產生的變數（資料庫密碼）第一次部署時自動產生、不可修改；變更後提示重新部署才生效（[ADR 0019](adr/0019-project-vars.md)） | P0 | M7 |
 | FR-ENV-06 | Production 資料 volume 每日備份、可還原 | P1 | M8 |
-| FR-ENV-08 | 發布前任務（資料庫 migration、seed 等）：在切換流量前以一次性容器執行，失敗則中止發布並保留舊版 | P0 | M7 |
+| FR-ENV-08 | 發布前任務（資料庫 migration、seed 等）：在切換流量前以一次性容器執行，失敗則中止發布並保留舊版；任務來自 `.caloud/verify.yml` 的 `release`、帶 profiles 的 migrate／seed 服務或 Prisma migrations，以新設定執行成功後才啟動新版（ADR 0021） | P0 | M7 |
 | FR-ENV-09 | 常駐 worker（無對外 port 的長駐服務）與排程任務（cron 式，呼叫環境內的 HTTP 端點或執行指令）；排程結果與日誌可查 | P0 | M7 |
 | FR-ENV-10 | 部署策略：預設藍綠；有以檔案為資料庫的 volume 或用戶指定時，改為「先停舊版再啟新版」，避免兩版同時寫入 | P1 | M7 |
 | FR-ENV-11 | 建置時變數隨環境不同時，依環境分別建置；發布記錄每個環境的映像 digest，報告註明 | P1 | M7 |
@@ -200,7 +200,7 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-CI-03 | 測試完成即銷毀容器、volume 與子網域，只保留報告；任何階段失敗仍執行彙整與銷毀 | P0 | M6 |
 | FR-CI-04 | 同一 branch 有新 commit 時取消舊的執行 | P1 | M6 |
 | FR-CI-05 | 驗證失敗時可選擇保留環境 30 分鐘以便除錯 | P2 | M6 |
-| FR-CI-06 | 建置資源與執行配額分開：建置可用較大的記憶體與 CPU，上限依方案，計入建置分鐘 | P0 | M6 |
+| FR-CI-06 | 建置資源與執行配額分開：建置可用較大的記憶體與 CPU，上限依方案，計入建置分鐘；方案上線前由後台設定建置 CPU、記憶體與每位用戶每月建置分鐘，超過時拒絕驗證與部署（ADR 0021） | P0 | M6 |
 | FR-CI-07 | 驗證環境也執行發布前任務（FR-ENV-08），失敗列為 Blocker | P0 | M6 |
 | FR-RPT-01 | 問題分 Blocker、High、Medium、Low 四級，有 Blocker 或 High 即驗證失敗；依指紋去重；標示來源階段與位置 | P0 | M6 |
 | FR-RPT-02 | 報告列出相對同 branch 上次驗證的新增、仍存在、已修正 | P1 | M6 |

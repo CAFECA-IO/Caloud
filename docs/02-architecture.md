@@ -183,9 +183,12 @@ MCP 用戶端 ──POST /mcp (Bearer cld_…)──► mcp.rs ──► service
 | `environments` | `subdomain` | 環境：所屬專案、部署的 commit 與階段（fetch／build／start／health／done）、主機名稱、用途（production／staging／verify）、所在節點、節點內網段索引、compose、對外服務與 port、狀態（deploying／running／failed／destroying）、錯誤、服務 IP、建立者 | FR-OPS-13 |
 | `deploy_logs` | 自增 `id` | 部署 log：環境、階段、內容、時間；每個環境保留最近 2000 行（ADR 0018） | FR-ENV-12 |
 | `project_vars` | `(project, env, name)` | 秘密變數：值以主金鑰加密、提示（末 4 碼）、是否平臺產生、更新者與時間；`projects.vars_rev` 每次變更加 1，`environments.vars_rev` 記錄部署時的版本（ADR 0019） | FR-ENV-05、FR-APP-11 |
-| `verifications` | `id`（UUID） | 驗證執行：專案、commit、分支、觸發（push／manual／deploy）、狀態（queued／running／passed／failed／canceled／error）、目前階段、各階段狀態、驗證環境與節點、驗證後部署、保留到期、問題計數、時間（ADR 0020） | FR-CI-01～05、FR-RPT-01 |
+| `verifications` | `id`（UUID） | 驗證執行（另含 GitHub check run ID、PR 編號、建置秒數，ADR 0021）：專案、commit、分支、觸發（push／manual／deploy）、狀態（queued／running／passed／failed／canceled／error）、目前階段、各階段狀態、驗證環境與節點、驗證後部署、保留到期、問題計數、時間（ADR 0020） | FR-CI-01～05、FR-RPT-01 |
 | `verification_issues` | 自增 `id` | 問題：驗證、指紋、等級、階段、規則、標題、說明、檔案與行號；同一執行內指紋唯一 | FR-RPT-01、FR-RPT-02 |
 | `verification_logs` | 自增 `id` | 驗證 log：驗證、階段、內容、時間；每次執行最多 2000 行 | FR-CI-02 |
+| `build_settings` | `id`（固定 1） | 建置資源：CPU、記憶體（MB）、每位用戶每月建置分鐘（0＝不限）（ADR 0021） | FR-CI-06 |
+| `build_usage` | 自增 `id` | 建置用量：帳號（專案擁有者）、專案、類型（verify／deploy）、來源 ID、秒數、時間 | FR-CI-06 |
+| `github_pr_comments` | `(project, pr)` | PR 留言 ID（每個 PR 一則，之後更新） | FR-GH-03 |
 | `migrations`（M7） | `id`（UUID） | 專案、自訂網域、狀態（盤點／演練／凍結／已切換／已回退）、遷移權杖雜湊、快照位置、時間線 | FR-MIG-01～10 |
 | `migration_checks`（M7） | 自增 `id` | 遷移、類型（資料表／檔案／帳號／驗收清單）、對象、來源值、目標值、結果、簽核者 | FR-MIG-06、FR-MIG-07 |
 
@@ -278,4 +281,5 @@ Runner 主機以 `scripts/runner-setup.sh install` 準備：安裝 gVisor、在 
 | [0017](adr/0017-github-app-public-console.md) | GitHub App：安裝時確認安裝者、installation token 只在記憶體、webhook 驗簽；主控台經 Edge 對外與基本防護 |
 | [0018](adr/0018-minimal-deploy.md) | 最小部署流程：確認後建置（每次建置一個 gVisor BuildKit 臨時容器）、啟動、健康檢查、production 網址 |
 | [0020](adr/0020-verification.md) | 驗證流程：agent 執行十個階段並逐步回報、gVisor 測試與掃描沙箱、問題分級與指紋、與前次比較、驗證通過才部署 |
+| [0021](adr/0021-checks-quota-release.md) | GitHub Checks 與 PR 留言、建置資源與建置分鐘、發布前任務（驗證與部署） |
 | [0019](adr/0019-project-vars.md) | 秘密變數：依環境加密保存、只寫不讀；部署時以行程環境變數注入建置的服務；平臺產生資料庫密碼 |
