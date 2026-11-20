@@ -207,6 +207,8 @@ Caloud 是給維運者用的工具。設計目標是**專業、清楚、好上�
 | `project` | analyzing → 解析中（warning，脈動）· needs_review → 待確認（warning）· confirmed → 已確認（success）· error → 失敗（danger） |
 | `confidence` | high → 高（success）· medium → 中（warning）· low → 低（danger） |
 | `deploy` | none → 尚未部署（neutral）· deploying → 部署中（accent，脈動）· running → 運作中（success）· failed → 失敗（danger） |
+| `verify` | queued → 排隊中（neutral）· running → 驗證中（accent，脈動）· passed → 通過（success）· failed → 未通過（danger）· canceled → 已取消（neutral）· error → 錯誤（danger） |
+| `severity` | blocker → Blocker（danger）· high → High（danger）· medium → Medium（warning）· low → Low（neutral） |
 | `node` | active → 運作中（success）· draining → 排空中（warning）· offline → 離線（danger） |
 
 ### 6.4 按鈕文字

@@ -302,6 +302,11 @@
 | DELETE | `/api/projects/{id}` | 擁有者 | FR-AN-10 |
 | POST | `/api/projects/{id}/analysis` | 擁有者 | FR-AN-10 |
 | POST | `/api/projects/{id}/deploy` | 擁有者 | FR-ENV-12 |
+| POST | `/api/projects/{id}/verify` | 擁有者 | FR-CI-01 |
+| GET | `/api/projects/{id}/verifications` | 擁有者 | FR-RPT-02 |
+| GET | `/api/verifications/{id}` | 專案擁有者 | FR-RPT-01 |
+| POST | `/api/verifications/{id}/cancel` | 專案擁有者 | FR-CI-04 |
+| GET | `/api/verifications/{id}/report` | 專案擁有者 | FR-RPT-03 |
 | GET | `/api/projects/{id}/vars` | 擁有者 | FR-ENV-05 |
 | PUT | `/api/projects/{id}/vars` | 擁有者 | FR-ENV-05 |
 | PUT | `/api/projects/{id}/analysis` | 擁有者 | FR-AN-03、FR-AN-04 |
@@ -363,6 +368,40 @@
 - `pending_changes`：最新解析的 compose 與確認版本不同；確認前部署仍使用確認時的 commit。設定相同時部署最新解析的 commit。
 - 需要有通過自我檢查且具備建置環境（`specs.buildkit`）的平臺節點。
 - `vars_pending`：秘密變數在上次部署後有變更，重新部署後生效；`missing_vars`：解析需要（provider `user`）但這個環境尚未設定的變數名稱，不阻擋部署。
+
+**部署關卡**（ADR 0020）：`POST /api/projects/{id}/deploy` 可帶 `{ "force": true }`（admin+，略過驗證，稽核記錄 `forced`；member 帶 `force` 回 `403`）。目標 commit 尚未通過驗證時不部署，改為啟動驗證並在通過後部署，回 `202 { "verification": Verification }`；已通過時回 `202 Deployment`。`deployment` 另有 `verified`（目標 commit 是否已通過驗證）。
+
+**驗證**（FR-CI-01～05、FR-RPT-01～04，[ADR 0020](adr/0020-verification.md)）
+
+**POST /api/projects/{id}/verify** `{ "keep_on_failure"?: false }` → `202 Verification`。專案須已確認（`409`）；同分支進行中的執行會被取消；沒有具備建置環境的節點回 `409`。
+
+**Verification**
+
+```json
+{ "id": "uuid", "project": "uuid", "commit": "98b705d…", "branch": "main", "trigger": "manual", "status": "running",
+  "stage": "test", "stages": { "fetch": "passed", "analyze": "passed", "build": "passed", "static": "passed", "start": "passed",
+  "test": "running", "smoke": "pending", "logs": "pending", "report": "pending", "destroy": "pending" },
+  "counts": { "blocker": 0, "high": 1, "medium": 2, "low": 0 }, "deploy_after": false, "keep_until": null,
+  "created_by": "0x…", "created_at": 0, "started_at": 0, "finished_at": null, "error": null }
+```
+
+- `status`：`queued` → `running` → `passed` | `failed` | `canceled` | `error`；有 Blocker 或 High 即 `failed`。
+- 階段狀態：`pending`、`running`、`passed`、`failed`、`skipped`。
+
+**GET /api/projects/{id}/verifications** → `200 [Verification]`（新到舊，最多 50 筆）。
+
+**GET /api/verifications/{id}** → `200 { "verification": Verification, "issues": [Issue], "fixed": [Issue], "previous": "uuid" | null, "logs": [ { "stage", "line", "at" } ] }`；`Issue`：
+
+```json
+{ "fingerprint": "3fa9c0d1e2b4a5f6", "severity": "high", "stage": "static", "rule": "secret/aws-access-key",
+  "title": "疑似 AWS Access Key", "detail": "AKIA…WXYZ", "file": "src/config.ts", "line": 12, "change": "new" }
+```
+
+- `change`：`new`（前次沒有）、`existing`（前次也有）；`fixed` 列出前次有、這次沒有的問題。
+
+**POST /api/verifications/{id}/cancel** → `204`（已結束回 `409`）。
+
+**GET /api/verifications/{id}/report?format=json|md** → 報告檔（`content-disposition: attachment`）。
 
 **秘密變數**（FR-ENV-05，[ADR 0019](adr/0019-project-vars.md)）：依環境分開（`env`：本輪只有 `production`），只寫不讀。
 
@@ -487,6 +526,10 @@
 | `heartbeat` | `used`（`cpu_millis`、`memory_bytes`，主機目前用量） | 每 `heartbeat_secs` 秒一次；第一則在 `ack` 後立即送出 |
 | `env_status` | `env_id`、`status`（`deploying`／`running`／`failed`／`destroyed`）、`stage`?（`fetch`／`build`／`start`；`failed` 時為失敗的階段）、`error`?、`services`（`[{name, ip}]`） | 部署進度與結果；`deploying` 只用於回報目前階段（ADR 0018） |
 | `env_log` | `env_id`、`stage`、`line` | 部署過程的輸出，逐行；每行最多 500 字、每階段最多 2000 行 |
+| `verify_stage` | `id`、`stage`、`status`（`running`／`passed`／`failed`／`skipped`） | 驗證階段（ADR 0020） |
+| `verify_issue` | `id`、`issue`（`severity`、`stage`、`rule`、`title`、`detail`、`file`?、`line`?） | 驗證發現的問題；值已遮蔽 |
+| `verify_log` | `id`、`stage`、`line` | 驗證過程的輸出；上限同 `env_log` |
+| `verify_done` | `id`、`error`?、`kept` | 驗證結束；`kept` 表示環境保留未銷毀 |
 
 **控制面 → Agent**
 
@@ -496,6 +539,8 @@
 | `status` | `status` | 維運者排空或恢復節點時通知 |
 | `deploy` | `env`（`id`、`kind`、`compose`、`subnet_index`、`public_service`、`source`?、`vars`?） | 部署或重新部署環境（FR-OPS-13）；agent 以平臺政策再檢查 compose。`source`（ADR 0018）：`repo_url`、`commit`、`git_ref`?、`compose_dir`、`auth_header`?；有 source 時 compose 可含 `build`（只限儲存庫內路徑與 `dockerfile_inline`），agent 先取得原始碼、在 gVisor BuildKit 建置後改寫為 image。`vars`（ADR 0019）：`[{name, value, user}]`，`docker compose up` 時放進行程環境變數；`user: true` 的名稱列入建置服務的 `environment`；build args 的 `${NAME}` 以此內插；log 與錯誤中的值遮蔽為 `***` |
 | `destroy` | `env_id` | 停止並刪除環境與其 volume |
+| `verify` | `run`（`id`、`env`（同 `deploy`，kind `verify`）、`public_port`、`test`?、`lint`?（`image`、`setup`、`command`）、`smoke`（路徑）、`keep_on_failure`） | 執行驗證的十個階段中由 agent 負責的部分並逐步回報（ADR 0020） |
+| `cancel_verify` | `id` | 取消驗證；agent 終止子程序並銷毀環境 |
 | `error` | `message` | 隨即關閉連線（權杖無效、已使用、已過期、格式錯誤、節點被移除）；agent 收到後不再重連 |
 
 - 加入權杖 `caloud_join_…`：一次性、最長 1 小時、只存 keccak 雜湊；使用後立即作廢，不論成功與否。
