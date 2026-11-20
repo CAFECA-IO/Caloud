@@ -3,7 +3,7 @@
 //! 每個環境的檔案在 `<state>/envs/<id>/`：`compose.yml`、`caloud.override.yml`、`resolv.conf`；
 //! 以 `docker compose -p caloud-env-<id>` 執行，容器跑在 gVisor 與環境自己的網段。
 use crate::build::{self, Log, BUILD_TIMEOUT};
-use caloud_core::agent::{valid_env_id, AgentMsg, EnvService, EnvSource, EnvSpec};
+use caloud_core::agent::{valid_env_id, AgentMsg, EnvService, EnvSource, EnvSpec, EnvValue};
 use caloud_orchestrator::sandbox::{self, EnvNet, Limits};
 use caloud_orchestrator::{validate_with, Policy};
 use std::collections::HashMap;
@@ -95,8 +95,16 @@ impl EnvRunner {
     }
 
     pub(crate) async fn docker(&self, args: &[&str], timeout: Duration) -> anyhow::Result<String> {
+        self.docker_env(args, timeout, &[]).await
+    }
+
+    /// 帶入行程環境變數（秘密變數，ADR 0019）；值不出現在參數或檔案中
+    async fn docker_env(&self, args: &[&str], timeout: Duration, vars: &[EnvValue]) -> anyhow::Result<String> {
         let mut c = Command::new(&self.docker_bin);
         c.args(args).stdin(Stdio::null()).kill_on_drop(true);
+        for v in vars {
+            c.env(&v.name, &v.value);
+        }
         let out = tokio::time::timeout(timeout, c.output())
             .await
             .map_err(|_| anyhow::anyhow!("docker {} 逾時", args.first().unwrap_or(&"")))??;
@@ -108,6 +116,10 @@ impl EnvRunner {
 
     /// `docker compose -p <project> --project-directory <dir> -f compose.yml -f caloud.override.yml <args>`
     pub(crate) async fn compose(&self, env_id: &str, args: &[&str], timeout: Duration) -> anyhow::Result<String> {
+        self.compose_env(env_id, args, timeout, &[]).await
+    }
+
+    async fn compose_env(&self, env_id: &str, args: &[&str], timeout: Duration, vars: &[EnvValue]) -> anyhow::Result<String> {
         let dir = self.dir.join(env_id);
         let project = sandbox::project(env_id);
         let d = dir.display().to_string();
@@ -125,7 +137,7 @@ impl EnvRunner {
             &override_file,
         ];
         full.extend_from_slice(args);
-        self.docker(&full, timeout).await
+        self.docker_env(&full, timeout, vars).await
     }
 
     /// 由控制面送來的部署；索引不可使用自我檢查保留的範圍
@@ -162,21 +174,25 @@ impl EnvRunner {
                 });
             }
         };
-        let compose = match &env.source {
-            None => env.compose.clone(),
+        let secrets: Vec<String> = env.vars.iter().map(|v| v.value.clone()).collect();
+        let (compose, built) = match &env.source {
+            None => (env.compose.clone(), vec![]),
             Some(src) => match self.build_source(env, src, tx, &stage).await {
                 Ok(c) => c,
                 Err((st, e)) => {
-                    tracing::warn!(env = %env.id, stage = st, error = %e, "build failed");
+                    tracing::warn!(env = %env.id, stage = st, "build failed");
                     let _ = tokio::fs::remove_dir_all(self.builds_dir(&env.id)).await;
-                    return failed_at(&env.id, Some(st), short(&e.to_string()));
+                    return failed_at(&env.id, Some(st), build::mask(&short(&e.to_string()), &secrets));
                 }
             },
         };
         if env.source.is_some() {
             stage("start");
         }
-        match self.try_deploy(env, &compose).await {
+        // ADR 0019：用戶變數只注入從儲存庫建置的服務
+        let names: Vec<String> = env.vars.iter().filter(|v| v.user).map(|v| v.name.clone()).collect();
+        let inject: Vec<(String, Vec<String>)> = built.into_iter().map(|s| (s, names.clone())).collect();
+        match self.try_deploy(env, &compose, &inject).await {
             Ok(services) => {
                 if env.source.is_some() {
                     self.prune_images(&env.id).await;
@@ -184,8 +200,9 @@ impl EnvRunner {
                 status(&env.id, "running", None, services)
             }
             Err(e) => {
-                tracing::warn!(env = %env.id, error = %e, "deploy failed");
-                failed_at(&env.id, env.source.as_ref().map(|_| "start"), short(&e.to_string()))
+                let msg = build::mask(&short(&e.to_string()), &secrets);
+                tracing::warn!(env = %env.id, error = %msg, "deploy failed");
+                failed_at(&env.id, env.source.as_ref().map(|_| "start"), msg)
             }
         }
     }
@@ -197,11 +214,12 @@ impl EnvRunner {
         src: &EnvSource,
         tx: Option<&UnboundedSender<AgentMsg>>,
         stage: &(dyn Fn(&str) + Send + Sync),
-    ) -> Result<String, (&'static str, anyhow::Error)> {
+    ) -> Result<(String, Vec<String>), (&'static str, anyhow::Error)> {
         let work = self.builds_dir(&env.id);
         let repo = work.join("src");
         stage("fetch");
-        let mut log = Log::new(tx, &env.id, "fetch");
+        let secrets: Vec<String> = env.vars.iter().map(|v| v.value.clone()).collect();
+        let mut log = Log::new(tx, &env.id, "fetch").masking(&secrets);
         log.line(&format!(
             "取得 {} @ {}",
             src.repo_url,
@@ -211,8 +229,23 @@ impl EnvRunner {
         log.line("完成");
 
         stage("build");
-        let (jobs, compose) = build::plan(&env.compose, &repo, src, &env.id).map_err(|e| ("build", e))?;
-        let mut log = Log::new(tx, &env.id, "build");
+        let (mut jobs, compose) = build::plan(&env.compose, &repo, src, &env.id).map_err(|e| ("build", e))?;
+        let mut log = Log::new(tx, &env.id, "build").masking(&secrets);
+        // ADR 0019：build args 的 `${NAME}` 以秘密變數內插
+        let values: std::collections::HashMap<String, String> = env.vars.iter().map(|v| (v.name.clone(), v.value.clone())).collect();
+        for j in &mut jobs {
+            for (k, v) in &mut j.args {
+                let (out, missing) = build::interpolate(v, &values);
+                for m in missing {
+                    log.line(&format!(
+                        "⚠ `{}` 的 build arg `{k}` 用到未設定的變數 `{m}`，以空字串建置",
+                        j.service
+                    ));
+                }
+                *v = out;
+            }
+        }
+        let built: Vec<String> = jobs.iter().map(|j| j.service.clone()).collect();
         let job = async {
             let resolv = work.join("resolv.conf");
             tokio::fs::write(&resolv, sandbox::resolv_conf(&self.dns)).await?;
@@ -261,7 +294,7 @@ impl EnvRunner {
                 if jobs.is_empty() {
                     log.line("沒有需要建置的服務");
                 }
-                Ok(compose)
+                Ok((compose, built))
             }
         }
     }
@@ -319,20 +352,20 @@ impl EnvRunner {
         }
     }
 
-    async fn try_deploy(&self, env: &EnvSpec, compose_yaml: &str) -> anyhow::Result<Vec<EnvService>> {
+    async fn try_deploy(&self, env: &EnvSpec, compose_yaml: &str, inject: &[(String, Vec<String>)]) -> anyhow::Result<Vec<EnvService>> {
         // 控制面已檢查過；agent 再以同一份平臺政策檢查一次（docs/07）
         let compose = validate_with(compose_yaml, Policy::platform(0)).map_err(|e| anyhow::anyhow!("{e}"))?;
         if !compose.services.contains(&env.public_service) {
             anyhow::bail!("compose 中沒有服務 `{}`", env.public_service);
         }
         let net = EnvNet::new(env.subnet_index).ok_or_else(|| anyhow::anyhow!("網段索引超出範圍"))?;
-        let overlay = sandbox::env_override(&env.id, &compose, &net, Limits::default()).map_err(|e| anyhow::anyhow!(e))?;
+        let overlay = sandbox::env_override_with(&env.id, &compose, &net, Limits::default(), inject).map_err(|e| anyhow::anyhow!(e))?;
         let dir = self.dir.join(&env.id);
         tokio::fs::create_dir_all(&dir).await?;
         tokio::fs::write(dir.join("compose.yml"), compose_yaml).await?;
         tokio::fs::write(dir.join("caloud.override.yml"), overlay).await?;
         tokio::fs::write(dir.join("resolv.conf"), sandbox::resolv_conf(&self.dns)).await?;
-        self.compose(&env.id, &["up", "-d", "--wait", "--remove-orphans"], DEPLOY_TIMEOUT)
+        self.compose_env(&env.id, &["up", "-d", "--wait", "--remove-orphans"], DEPLOY_TIMEOUT, &env.vars)
             .await?;
         Ok(sandbox::service_ips(&compose, &net)
             .into_iter()
@@ -430,6 +463,7 @@ mod tests {
             subnet_index: idx,
             public_service: "web".into(),
             source: None,
+            vars: vec![],
         };
         let ok = "services:\n  web:\n    image: nginx:1.27\n  db:\n    image: postgres:16\n";
         match r.deploy(&spec(ok, 3)).await {
@@ -520,16 +554,33 @@ mod tests {
         // 建置失敗：buildctl 輸出含 boom
         let docker = fake_docker(
             &base,
-            "case \"$*\" in *buildctl-daemonless*) echo '#5 RUN make'; case \"$*\" in *fail-me*) echo 'boom' >&2; exit 1;; esac;; esac",
+            "case \"$*\" in *buildctl-daemonless*) echo '#5 RUN make'; echo \"#6 token=$SESSION_SECRET arg=$(echo \"$*\" | grep -o 'build-arg:A=[^ ]*')\"; case \"$*\" in *fail-me*) echo 'boom' >&2; exit 1;; esac;; esac\ncase \"$*\" in *' up '*) echo \"UPENV S=$SESSION_SECRET D=$CALOUD_DB_PASSWORD\" >> '{log}';; esac".replace("{log}", &base.join("docker.log").display().to_string()).as_str(),
         );
         let mut r = EnvRunner::new(docker, base.join("state"), vec!["1.1.1.1".into()]);
         r.git_bin = git.display().to_string();
         let mut spec = EnvSpec {
             id: "k2m9xq7a".into(),
             kind: "production".into(),
-            compose: "services:\n  web:\n    build: ./app\n  db:\n    image: postgres:16\n".into(),
+            compose: "services:\n  web:\n    build: {context: ./app, args: {A: '${NEXT_PUBLIC_X}', B: '${NOPE}'}}\n  db:\n    image: postgres:16\n    environment: {POSTGRES_PASSWORD: '${CALOUD_DB_PASSWORD}'}\n".into(),
             subnet_index: 5,
             public_service: "web".into(),
+            vars: vec![
+                EnvValue {
+                    name: "SESSION_SECRET".into(),
+                    value: "s3cr3t-value-123".into(),
+                    user: true,
+                },
+                EnvValue {
+                    name: "NEXT_PUBLIC_X".into(),
+                    value: "https://x.example".into(),
+                    user: true,
+                },
+                EnvValue {
+                    name: "CALOUD_DB_PASSWORD".into(),
+                    value: "dbpass-0000-1111".into(),
+                    user: false,
+                },
+            ],
             source: Some(EnvSource {
                 repo_url: "https://github.com/a/b".into(),
                 commit: "98b705d0123456789abcdef0123456789abcdef0".into(),
@@ -560,6 +611,24 @@ mod tests {
             "{log}"
         );
         assert!(log.contains("load -i"));
+        // ADR 0019：build arg 內插；值經行程環境給 compose；log 遮蔽；override 只列名稱
+        assert!(log.contains("--opt build-arg:A=https://x.example --opt build-arg:B="), "{log}");
+        assert!(logs.iter().any(|l| l.contains("未設定的變數 `NOPE`")), "{logs:?}");
+        assert!(logs.iter().any(|l| l.contains("token= arg=build-arg:A=***")), "{logs:?}");
+        assert!(!logs.iter().any(|l| l.contains("s3cr3t")));
+        assert!(log.contains("UPENV S=s3cr3t-value-123 D=dbpass-0000-1111"), "{log}");
+        let ov: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(base.join("state/envs/k2m9xq7a/caloud.override.yml")).unwrap()).unwrap();
+        assert_eq!(
+            ov["services"]["web"]["environment"],
+            serde_yaml::from_str::<serde_yaml::Value>("[SESSION_SECRET, NEXT_PUBLIC_X]").unwrap()
+        );
+        assert!(ov["services"]["db"].get("environment").is_none());
+        for f in ["compose.yml", "caloud.override.yml"] {
+            let t = std::fs::read_to_string(base.join("state/envs/k2m9xq7a").join(f)).unwrap();
+            assert!(!t.contains("s3cr3t") && !t.contains("dbpass"), "{f}");
+        }
+        assert!(!format!("{spec:?}").contains("s3cr3t"));
         // 權杖只經環境變數給 git，不在參數中
         let glog = std::fs::read_to_string(base.join("git.log")).unwrap();
         assert!(glog

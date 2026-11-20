@@ -123,7 +123,9 @@ const STALE_SECS: i64 = 40 * 60;
 /// 部署進行中：在某個階段、尚未失敗且仍有進展
 fn in_progress(e: &Environment) -> bool {
     e.error.is_none()
-        && now() - e.updated_at < STALE_SECS && e.status != "failed" && matches!(e.stage.as_deref(), Some("fetch" | "build" | "start" | "health"))
+        && now() - e.updated_at < STALE_SECS
+        && e.status != "failed"
+        && matches!(e.stage.as_deref(), Some("fetch" | "build" | "start" | "health"))
 }
 
 /// `POST /api/projects/{id}/deploy`
@@ -184,6 +186,9 @@ pub(crate) async fn redeploy_after_push(s: &AppState, project: &str) {
 
 async fn start(s: &AppState, p: &Project) -> ApiResult<Environment> {
     let t = target(s, p).await?;
+    // ADR 0019：秘密變數（先讀版本，產生資料庫密碼不算變更）
+    let vars_rev = super::vars::rev(s, &p.id).await?;
+    let vars = super::vars::for_deploy(s, &p.id, "production", &t.compose).await?;
     let need = envs::need_for(t.services);
     let ts = now();
     let env = match production(s, &p.id).await? {
@@ -196,7 +201,7 @@ async fn start(s: &AppState, p: &Project) -> ApiResult<Environment> {
             }
             sqlx::query(
                 "UPDATE environments SET compose = ?, public_service = ?, public_port = ?, cpu_millis = ?, memory_bytes = ?, commit_sha = ?, \
-                 stage = 'fetch', error = NULL, status = CASE WHEN status = 'running' THEN 'running' ELSE 'deploying' END, updated_at = ? \
+                 stage = 'fetch', error = NULL, status = CASE WHEN status = 'running' THEN 'running' ELSE 'deploying' END, updated_at = ?, vars_rev = ? \
                  WHERE subdomain = ?",
             )
             .bind(&t.compose)
@@ -206,6 +211,7 @@ async fn start(s: &AppState, p: &Project) -> ApiResult<Environment> {
             .bind(need.memory_bytes as i64)
             .bind(&t.commit)
             .bind(ts)
+            .bind(vars_rev)
             .bind(&e.subdomain)
             .execute(&s.db)
             .await?;
@@ -216,8 +222,8 @@ async fn start(s: &AppState, p: &Project) -> ApiResult<Environment> {
             let (subdomain, hostname) = super::admin::new_env_id(s, EnvKind::Production).await?;
             sqlx::query(
                 "INSERT INTO environments (subdomain, hostname, kind, node, subnet_index, compose, public_service, public_port, cpu_millis, memory_bytes, \
-                 status, created_by, created_at, updated_at, project, commit_sha, stage) \
-                 VALUES (?, ?, 'production', ?, ?, ?, ?, ?, ?, ?, 'deploying', ?, ?, ?, ?, ?, 'fetch')",
+                 status, created_by, created_at, updated_at, project, commit_sha, stage, vars_rev) \
+                 VALUES (?, ?, 'production', ?, ?, ?, ?, ?, ?, ?, 'deploying', ?, ?, ?, ?, ?, 'fetch', ?)",
             )
             .bind(&subdomain)
             .bind(&hostname)
@@ -233,6 +239,7 @@ async fn start(s: &AppState, p: &Project) -> ApiResult<Environment> {
             .bind(ts)
             .bind(&p.id)
             .bind(&t.commit)
+            .bind(vars_rev)
             .execute(&s.db)
             .await?;
             envs::get(s, &subdomain).await?
@@ -270,6 +277,7 @@ async fn start(s: &AppState, p: &Project) -> ApiResult<Environment> {
                     compose_dir: t.compose_dir,
                     auth_header,
                 }),
+                vars,
             },
         },
     );
@@ -288,6 +296,12 @@ pub(crate) async fn deployment(s: &AppState, p: &Project) -> ApiResult<Option<Va
             .fetch_all(&s.db)
             .await?;
     logs.reverse();
+    let env_rev: Option<i64> = sqlx::query_scalar("SELECT vars_rev FROM environments WHERE subdomain = ?")
+        .bind(&e.subdomain)
+        .fetch_one(&s.db)
+        .await?;
+    let vars_pending = env_rev.unwrap_or(0) != super::vars::rev(s, &p.id).await?;
+    let missing_vars = super::vars::missing(s, &p.id, "production").await?;
     let pending = match target(s, p).await {
         Ok(t) => t.pending_changes,
         Err(_) => false,
@@ -304,6 +318,8 @@ pub(crate) async fn deployment(s: &AppState, p: &Project) -> ApiResult<Option<Va
         "updated_at": e.updated_at,
         "in_progress": in_progress(&e),
         "pending_changes": pending,
+        "vars_pending": vars_pending,
+        "missing_vars": missing_vars,
         "logs": logs.into_iter().map(|(stage, line, at)| json!({ "stage": stage, "line": line, "at": at })).collect::<Vec<_>>(),
     })))
 }

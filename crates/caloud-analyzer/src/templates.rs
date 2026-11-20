@@ -71,6 +71,7 @@ impl Out<'_, '_> {
                         confidence: Confidence::Medium,
                         evidence: vec![ev],
                         why: vec!["Prisma SQLite".into()],
+                        weak: false,
                     }),
                 }
             }

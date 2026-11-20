@@ -121,6 +121,18 @@ fn overriding(v: Value) -> Value {
 
 /// 產生環境的 override：gVisor、只接環境網路、固定 IP、名稱解析、資源上限
 pub fn env_override(env_id: &str, compose: &ValidatedCompose, net: &EnvNet, limits: Limits) -> Result<String, String> {
+    env_override_with(env_id, compose, net, limits, &[])
+}
+
+/// 同 [`env_override`]，並在 `inject` 列出的服務加上 `environment: [名稱…]`（只有名稱，值由
+/// `docker compose` 的行程環境變數提供，ADR 0019）
+pub fn env_override_with(
+    env_id: &str,
+    compose: &ValidatedCompose,
+    net: &EnvNet,
+    limits: Limits,
+    inject: &[(String, Vec<String>)],
+) -> Result<String, String> {
     check_image_only(compose)?;
     let ips = service_ips(compose, net);
     let hosts: Vec<Value> = ips.iter().map(|(n, ip)| Value::String(format!("{n}:{ip}"))).collect();
@@ -147,6 +159,12 @@ pub fn env_override(env_id: &str, compose: &ValidatedCompose, net: &EnvNet, limi
         let mut labels = Mapping::new();
         labels.insert("io.caloud.env".into(), env_id.into());
         svc.insert("labels".into(), Value::Mapping(labels));
+        if let Some((_, names)) = inject.iter().find(|(s, _)| s == name).filter(|(_, n)| !n.is_empty()) {
+            svc.insert(
+                "environment".into(),
+                Value::Sequence(names.iter().map(|n| Value::String(n.clone())).collect()),
+            );
+        }
         services.insert(name.as_str().into(), Value::Mapping(svc));
     }
     let mut opts = Mapping::new();
@@ -207,6 +225,19 @@ mod tests {
         let y = "services:\n  web:\n    image: nginx:1.27\n    networks: [front]\n  db:\n    image: postgres:16\n    restart: always\nnetworks:\n  front: {}\n";
         let c = validate_with(y, Policy::platform(0)).unwrap();
         let o = env_override("k2m9xq7a4tz1", &c, &EnvNet::new(5).unwrap(), Limits::default()).unwrap();
+        // ADR 0019：只有指定的服務加上變數名稱，不含值
+        let inj = env_override_with(
+            "k2m9xq7a4tz1",
+            &c,
+            &EnvNet::new(5).unwrap(),
+            Limits::default(),
+            &[("web".to_string(), vec!["SESSION_SECRET".to_string()])],
+        )
+        .unwrap();
+        let d: Value = serde_yaml::from_str(&inj).unwrap();
+        assert_eq!(d["services"]["web"]["environment"][0], "SESSION_SECRET");
+        assert!(d["services"]["db"].get("environment").is_none());
+        assert!(!o.contains("environment"));
         let doc: Value = serde_yaml::from_str(&o).unwrap();
         let web = &doc["services"]["web"];
         assert_eq!(web["runtime"], "runsc");

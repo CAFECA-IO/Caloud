@@ -220,7 +220,7 @@ impl Env {
             format!(
                 "#!/bin/sh\necho \"$*\" >> '{log}'\nif [ -f '{fail}' ]; then echo 'image pull failed: not found' >&2; exit 1; fi\n\
                  case \"$*\" in *' ps '*) echo '{{\"Service\":\"web\",\"Name\":\"caloud-x-web-1\",\"State\":\"running\",\"Health\":\"\"}}';; \
-                 *' logs '*) echo 'web-1 | ready';; esac\nexit 0\n",
+                 *' logs '*) echo 'web-1 | ready';; *' up '*) echo \"UPENV S=${{SESSION_SECRET:-}} D=${{CALOUD_DB_PASSWORD:-}}\" >> '{log}';; esac\nexit 0\n",
                 log = dir.join("docker.log").display(),
                 fail = dir.join("docker.fail").display()
             ),
@@ -2461,6 +2461,222 @@ async fn project_deploys_to_production_through_runner() {
     assert!(env.routes.lookup_route(&format!("{sub}.caloud.tw")).is_none());
     agent.abort();
     nobuild.abort();
+}
+
+// FR-ENV-05（ADR 0019）：秘密變數加密保存、只寫不讀、部署時以行程環境變數注入；資料庫密碼由平臺產生且不變
+#[tokio::test]
+async fn project_vars_are_encrypted_and_injected() {
+    use caloud_runner::client::{run_once, Options};
+    use caloud_runner::envs::EnvRunner;
+    use caloud_runner::selfcheck::SelfCheck;
+    let env = Env::new().await;
+    let (admin, member) = admin_and_member(&env).await;
+    env.call(
+        "POST",
+        "/api/admin/domain-pools",
+        &admin,
+        Some(json!({ "root": "caloud.tw", "purposes": ["production", "staging", "verify"] })),
+    )
+    .await;
+    set_repo(
+        &env,
+        &[
+            (
+                "package.json",
+                "{\n  \"scripts\": { \"build\": \"next build\", \"start\": \"next start\" },\n  \"dependencies\": { \"next\": \"15\", \"@prisma/client\": \"6\" }\n}\n",
+            ),
+            ("prisma/schema.prisma", "datasource db {\n  provider = \"postgresql\"\n  url = env(\"PG_URL\")\n}\n"),
+            ("src/a.ts", "const s = process.env.SESSION_SECRET;\nconst u = process.env.NEXT_PUBLIC_API_URL;\n"),
+        ],
+    );
+    let (_, p) = env
+        .call(
+            "POST",
+            "/api/projects",
+            &member,
+            Some(json!({ "repo_url": "https://github.com/CAFECA-IO/SwarmStorage" })),
+        )
+        .await;
+    let id = p["id"].as_str().unwrap().to_string();
+    let v = wait_project(&env, &member, &id).await;
+    let lows: Vec<usize> = v["analysis"]["result"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f["confidence"] == "low")
+        .map(|(i, _)| i)
+        .collect();
+    let (st, e) = env
+        .call(
+            "PUT",
+            &format!("/api/projects/{id}/analysis"),
+            &member,
+            Some(json!({ "public_service": "web", "acknowledged": lows })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+
+    let vars = format!("/api/projects/{id}/vars");
+    let (st, l) = env.call("GET", &vars, &member, None).await;
+    assert_eq!(st, StatusCode::OK, "{l}");
+    let item = |l: &Value, n: &str| l["items"].as_array().unwrap().iter().find(|i| i["name"] == n).cloned();
+    let ss = item(&l, "SESSION_SECRET").expect("needed var");
+    assert_eq!((ss["set"].as_bool(), ss["needed"].as_bool()), (Some(false), Some(true)));
+    assert_eq!(item(&l, "NEXT_PUBLIC_API_URL").unwrap()["build_time"], true);
+
+    // 權限與輸入檢查
+    let (other, o) = env.login(acct(0xc7)).await;
+    env.call(
+        "PUT",
+        &format!("/api/users/{}", o["account"].as_str().unwrap()),
+        &admin,
+        Some(json!({ "role": "member" })),
+    )
+    .await;
+    let (st, _) = env.call("GET", &vars, &other, None).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    for bad in [
+        json!({ "set": { "1BAD": "x" } }),
+        json!({ "set": { "A-B": "x" } }),
+        json!({ "set": { "CALOUD_DB_PASSWORD": "x" } }),
+        json!({ "env": "dev", "set": { "A": "x" } }),
+        json!({ "set": { "BIG": "x".repeat(33 * 1024) } }),
+    ] {
+        let (st, _) = env.call("PUT", &vars, &member, Some(bad.clone())).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (st, l) = env
+        .call(
+            "PUT",
+            &vars,
+            &member,
+            Some(json!({ "set": { "SESSION_SECRET": "supersecret-value-42", "SHORT": "abc" } })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{l}");
+    assert!(!l.to_string().contains("supersecret") && !l.to_string().contains("\"abc\""), "{l}");
+    assert_eq!(item(&l, "SESSION_SECRET").unwrap()["hint"], "…e-42");
+    assert!(item(&l, "SHORT").unwrap()["hint"].is_null(), "短值不給提示");
+    assert_eq!(l["rev"], 1);
+    let stored: Vec<String> = sqlx::query_scalar("SELECT value_enc FROM project_vars")
+        .fetch_all(&env.db)
+        .await
+        .unwrap();
+    assert!(stored.iter().all(|v| v.starts_with("v1:") && !v.contains("supersecret")));
+
+    // Runner 與部署
+    let (_, jt) = env.call("POST", "/api/admin/nodes/join-tokens", &admin, Some(json!({}))).await;
+    let mut runner = EnvRunner::new(
+        env.dir.join("fake-docker.sh").display().to_string(),
+        env.dir.join("runner-vars"),
+        vec!["1.1.1.1".into()],
+    );
+    runner.git_bin = env.dir.join("fake-git.sh").display().to_string();
+    let opts = Options {
+        server: env.base.clone(),
+        join_token: Some(jt["token"].as_str().unwrap().to_string()),
+        name: "runner-vars".into(),
+        state_dir: env.dir.join("runner-vars"),
+        envs: runner,
+        check: SelfCheck {
+            gvisor: true,
+            isolation: true,
+            buildkit: true,
+            reason: None,
+        },
+    };
+    let agent = tokio::spawn(async move { run_once(&opts).await });
+    wait_node(&env, &admin, "runner-vars", "active").await;
+    let path = format!("/api/projects/{id}/deploy");
+    let (st, d) = env.call("POST", &path, &member, None).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    let sub = d["subdomain"].as_str().unwrap().to_string();
+    let d = wait_deploy(&env, &member, &id, |d| d["stage"] == "done").await;
+    assert_eq!(d["vars_pending"], false);
+    assert_eq!(d["missing_vars"], json!(["NEXT_PUBLIC_API_URL"]));
+    let upenv = |log: &str| -> Vec<String> { log.lines().filter(|l| l.starts_with("UPENV")).map(str::to_string).collect() };
+    let first = upenv(&env.docker_log());
+    assert_eq!(first.len(), 1, "{first:?}");
+    let db_pw = first[0].split(" D=").nth(1).unwrap().to_string();
+    assert!(
+        first[0].starts_with("UPENV S=supersecret-value-42 D=") && db_pw.len() == 32,
+        "{first:?}"
+    );
+    // override 只列名稱，只給建置的服務；檔案中沒有值
+    let ov = std::fs::read_to_string(env.dir.join(format!("runner-vars/envs/{sub}/caloud.override.yml"))).unwrap();
+    assert_eq!(ov.matches("environment:").count(), 1, "只有 web：{ov}");
+    assert!(ov.contains("- SESSION_SECRET"), "{ov}");
+    assert!(!ov.contains("supersecret") && !ov.contains(&db_pw));
+    let (_, l) = env.call("GET", &vars, &member, None).await;
+    let g = item(&l, "CALOUD_DB_PASSWORD").unwrap();
+    assert_eq!((g["source"].as_str(), g["set"].as_bool()), (Some("generated"), Some(true)));
+    assert!(g["hint"].is_null());
+
+    // 變更後提示重新部署；資料庫密碼不變
+    env.call(
+        "PUT",
+        &vars,
+        &member,
+        Some(json!({ "set": { "SESSION_SECRET": "rotated-secret-99" }, "unset": ["SHORT"] })),
+    )
+    .await;
+    let (_, v) = env.call("GET", &format!("/api/projects/{id}"), &member, None).await;
+    assert_eq!(v["deployment"]["vars_pending"], true);
+    env.call("POST", &path, &member, None).await;
+    let d = wait_deploy(&env, &member, &id, |d| d["stage"] == "done" && d["vars_pending"] == false).await;
+    assert_eq!(d["vars_pending"], false);
+    let second = upenv(&env.docker_log());
+    assert_eq!(second.last().unwrap(), &format!("UPENV S=rotated-secret-99 D={db_pw}"));
+
+    // 稽核只有名稱
+    let details: Vec<String> = sqlx::query_scalar("SELECT detail FROM audit_log WHERE action = 'project_vars' ORDER BY id")
+        .fetch_all(&env.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        details,
+        [
+            "production: set SESSION_SECRET,SHORT",
+            "production: set SESSION_SECRET; unset SHORT"
+        ]
+    );
+    // 刪除專案時一併刪除變數
+    env.call("DELETE", &format!("/api/projects/{id}"), &member, None).await;
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project_vars")
+        .fetch_one(&env.db)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+    agent.abort();
+}
+
+// ADR 0019：沒有主金鑰時拒絕保存
+#[tokio::test]
+async fn project_vars_require_master_key() {
+    let env = Env::with_master_key(false).await;
+    let (_, member) = admin_and_member(&env).await;
+    set_repo(&env, &[("index.html", "<h1>x</h1>")]);
+    let (_, p) = env
+        .call(
+            "POST",
+            "/api/projects",
+            &member,
+            Some(json!({ "repo_url": "https://github.com/a/b" })),
+        )
+        .await;
+    let id = p["id"].as_str().unwrap();
+    wait_project(&env, &member, id).await;
+    let (st, e) = env
+        .call(
+            "PUT",
+            &format!("/api/projects/{id}/vars"),
+            &member,
+            Some(json!({ "set": { "A": "x" } })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("CALOUD_MASTER_KEY"));
 }
 
 // ───────────────────────── Edge TLS 與憑證（ADR 0016） ─────────────────────────

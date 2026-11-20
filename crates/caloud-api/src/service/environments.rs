@@ -234,6 +234,7 @@ pub async fn create(s: &AppState, me: &CurrentUser, input: EnvInput) -> ApiResul
                 subnet_index: index as u16,
                 public_service: input.public_service.clone(),
                 source: None,
+                vars: vec![],
             },
         },
     );

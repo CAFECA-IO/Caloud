@@ -34,6 +34,8 @@ pub struct Log<'a> {
     env_id: &'a str,
     stage: &'static str,
     count: usize,
+    /// 要遮蔽的秘密變數值（ADR 0019）
+    secrets: Vec<String>,
     /// 最後幾行，失敗時當作錯誤訊息
     pub tail: Vec<String>,
 }
@@ -45,12 +47,19 @@ impl<'a> Log<'a> {
             env_id,
             stage,
             count: 0,
+            secrets: Vec::new(),
             tail: Vec::new(),
         }
     }
 
+    /// 送出前遮蔽這些值
+    pub fn masking(mut self, secrets: &[String]) -> Self {
+        self.secrets = secrets.to_vec();
+        self
+    }
+
     pub fn line(&mut self, raw: &str) {
-        let line: String = raw.trim_end().chars().take(MAX_LINE).collect();
+        let line: String = mask(raw.trim_end(), &self.secrets).chars().take(MAX_LINE).collect();
         if line.is_empty() {
             return;
         }
@@ -107,6 +116,73 @@ pub async fn run_logged(mut cmd: Command, log: &mut Log<'_>) -> anyhow::Result<(
         anyhow::bail!("{}", log.tail.join("\n"));
     }
     Ok(())
+}
+
+/// 把每個長度 ≥ 4 的秘密值換成 `***`（ADR 0019）
+pub fn mask(s: &str, secrets: &[String]) -> String {
+    let mut out = s.to_string();
+    let mut sorted: Vec<&String> = secrets.iter().filter(|v| v.chars().count() >= 4).collect();
+    // 長的先換，避免短值是長值的一部分
+    sorted.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    for v in sorted {
+        if out.contains(v.as_str()) {
+            out = out.replace(v.as_str(), "***");
+        }
+    }
+    out
+}
+
+/// build args 的 `${NAME}`、`${NAME:-預設}`、`$NAME` 以變數值內插；回傳結果與未設定的名稱
+pub fn interpolate(s: &str, vars: &std::collections::HashMap<String, String>) -> (String, Vec<String>) {
+    let mut out = String::new();
+    let mut missing = Vec::new();
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'$' {
+            let ch = s[i..].chars().next().unwrap_or_default();
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        if b.get(i + 1) == Some(&b'$') {
+            out.push('$');
+            i += 2;
+            continue;
+        }
+        let (expr, next) = if b.get(i + 1) == Some(&b'{') {
+            match s[i + 2..].find('}') {
+                Some(j) => (&s[i + 2..i + 2 + j], i + 3 + j),
+                None => {
+                    out.push_str(&s[i..]);
+                    break;
+                }
+            }
+        } else {
+            let end = s[i + 1..]
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .map(|j| i + 1 + j)
+                .unwrap_or(s.len());
+            (&s[i + 1..end], end)
+        };
+        if expr.is_empty() {
+            out.push('$');
+            i += 1;
+            continue;
+        }
+        let (name, default) = match expr.split_once(":-").or_else(|| expr.split_once('-')) {
+            Some((n, d)) => (n, Some(d)),
+            None => (expr, None),
+        };
+        match (vars.get(name), default) {
+            (Some(v), _) if !v.is_empty() || default.is_none() => out.push_str(v),
+            (_, Some(d)) => out.push_str(d),
+            (None, None) => missing.push(name.to_string()),
+            (Some(_), None) => {}
+        }
+        i = next;
+    }
+    (out, missing)
 }
 
 /// 映像名稱只能用小寫英數與 `-`
@@ -411,6 +487,24 @@ mod tests {
         assert_eq!(first.unwrap().chars().count(), MAX_LINE);
         assert!(last.unwrap().contains("省略"));
         assert_eq!(log.tail.len(), 8);
+    }
+
+    // ADR 0019
+    #[test]
+    fn interpolates_and_masks() {
+        let vars: std::collections::HashMap<String, String> = [("A".to_string(), "1".to_string()), ("E".to_string(), String::new())].into();
+        assert_eq!(
+            interpolate("${A}-$A-${B:-x}-${E:-d}-$$-${C}", &vars),
+            ("1-1-x-d-$-".to_string(), vec!["C".to_string()])
+        );
+        assert_eq!(interpolate("plain", &vars).0, "plain");
+        assert_eq!(
+            mask(
+                "key=abcd1234 short=ab both=abcd1234xyz",
+                &["abcd1234".into(), "ab".into(), "abcd1234xyz".into()]
+            ),
+            "key=*** short=ab both=***"
+        );
     }
 
     #[test]

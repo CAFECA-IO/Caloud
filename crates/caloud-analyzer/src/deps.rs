@@ -215,7 +215,9 @@ pub(crate) fn scan_env(cx: &mut Ctx, platform: &[String]) -> Vec<EnvVar> {
     let mut out: Vec<EnvVar> = found
         .into_iter()
         .map(|(name, evidence)| {
-            let provider = if PLATFORM_VARS.contains(&name.as_str()) || platform.contains(&name) {
+            // FR-AN-07：目錄變數的預設值已掛 volume，不需要用戶提供
+            let defaulted = cx.code().writes.iter().any(|w| w.why == format!("`{name}` 預設值"));
+            let provider = if PLATFORM_VARS.contains(&name.as_str()) || platform.contains(&name) || defaulted {
                 Provider::Platform
             } else {
                 Provider::User

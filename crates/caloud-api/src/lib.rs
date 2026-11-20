@@ -86,6 +86,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/projects/{id}/analysis", post(projects::reanalyze).put(projects::confirm))
         .route("/api/projects/{id}/deploy", post(projects::deploy))
+        .route("/api/projects/{id}/vars", get(projects::vars).put(projects::set_vars))
         .route("/api/tokens", get(tokens::list).post(tokens::create))
         .route("/api/tokens/{id}", delete(tokens::remove))
         .route("/mcp", post(mcp::post).get(mcp::method_not_allowed).delete(mcp::method_not_allowed))

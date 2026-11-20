@@ -7,6 +7,7 @@
 mod compose;
 mod deps;
 pub mod fs;
+mod links;
 mod runtime;
 mod templates;
 
@@ -189,12 +190,17 @@ pub fn analyze(repo: &Path, opts: &Options) -> Analysis {
     };
 
     let plan = compose::plan(&mut cx);
-    let (source, compose_dir, doc, app_env) = (plan.source, plan.compose_dir, plan.doc, plan.app_env);
+    let (source, compose_dir, mut doc, mut app_env) = (plan.source, plan.compose_dir, plan.doc, plan.app_env);
     // M5-08：用戶自己的 Dockerfile 與 compose 只檢查、不修改
     if let Some(doc) = &doc {
         if matches!(source, Source::Compose { .. } | Source::Dockerfile { .. } | Source::Override { .. }) {
             check_existing(&mut cx, doc, &compose_dir);
         }
+    }
+
+    // FR-AN-11：連到其他服務的本機位址改為服務名稱（ports 移除前，才知道服務提供哪些 port）
+    if let Some(doc) = doc.as_mut() {
+        app_env.extend(links::apply(&mut cx, doc));
     }
 
     // 平臺政策（07 §3.6）：ports、env_file 轉換後檢查

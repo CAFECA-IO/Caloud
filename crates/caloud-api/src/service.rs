@@ -14,6 +14,7 @@ pub mod admin;
 pub mod deploy;
 pub mod environments;
 pub mod projects;
+pub mod vars;
 
 // ───────────────────────── App ─────────────────────────
 

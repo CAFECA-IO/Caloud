@@ -551,7 +551,7 @@ async function renderProject(id) {
       <section class="c-card"><div class="c-card__header"><h2 class="c-card__title">判斷與依據</h2><span class="u-small u-muted">${r.findings.length} 項${lows.length ? `，${lows.length} 項低信心需確認` : ""}</span></div>
         <div class="c-card__body c-card__body--flush"><div class="c-table-wrap"><table class="c-table">
         <thead><tr><th>信心</th><th>判斷</th><th>依據</th><th><span class="u-sr-only">確認</span></th></tr></thead><tbody>${findingRows}</tbody></table></div></div></section>
-      <section class="c-card"><div class="c-card__header"><h2 class="c-card__title">環境變數</h2><span class="u-small u-muted">${userVars} 個需要你提供；值的設定在秘密變數功能開放後提供</span></div>
+      <section class="c-card" id="pj-env"><div class="c-card__header"><h2 class="c-card__title">環境變數</h2><span class="u-small u-muted">${userVars} 個需要你提供；確認設定後即可填值</span></div>
         <div class="c-card__body c-card__body--flush"><div class="c-table-wrap"><table class="c-table">
         <thead><tr><th>名稱</th><th>由誰提供</th><th>依據</th></tr></thead>
         <tbody>${envRows || `<tr><td colspan="3">${empty({ iconName: "inbox", title: "沒有偵測到環境變數" })}</td></tr>`}</tbody></table></div></div></section>
@@ -561,6 +561,8 @@ async function renderProject(id) {
       <span class="c-field__error" id="pj-err" role="alert"></span>
       <div class="l-row"><span class="l-spacer"></span><span class="u-small u-muted" id="pj-hint"></span><button class="c-btn c-btn--primary" id="pj-confirm">${icon("check")}<span>${isConfirmedLatest ? "更新確認" : "確認設定"}</span></button></div>`;
   }
+
+  if (c) drawVars(id, c.result);
 
   let compose = editedCompose; // 用戶編輯版（null 表示使用產生的）
   const ackSet = () => $$("[data-ack]").filter((x) => x.checked).map((x) => Number(x.dataset.ack));
@@ -634,6 +636,8 @@ function drawDeploy(id, data) {
   const head = statusPill("deploy", !d ? "none" : d.in_progress ? "deploying" : live ? "running" : "failed");
   const notes = [];
   if (d?.error) notes.push(`<div class="c-banner c-banner--danger">${icon("alert")}<div class="c-banner__body"><strong>${live ? "這次部署失敗，仍在執行上一版" : "部署失敗"}</strong><span class="u-small">${esc(d.error)}</span></div></div>`);
+  if (d?.vars_pending) notes.push(`<div class="c-banner c-banner--warning">${icon("info")}<div class="c-banner__body"><strong>環境變數已變更</strong><span class="u-small">重新部署後生效。</span></div></div>`);
+  if (d?.missing_vars?.length) notes.push(`<div class="c-banner">${icon("info")}<div class="c-banner__body"><strong>${d.missing_vars.length} 個變數尚未設定</strong><span class="u-small u-mono">${d.missing_vars.map(esc).join("、")}</span><span class="u-small">可在下方「環境變數」設定；未設定也能部署。</span></div></div>`);
   if (d?.pending_changes) notes.push(`<div class="c-banner c-banner--warning">${icon("info")}<div class="c-banner__body"><strong>設定有變動，請重新確認</strong><span class="u-small">最新解析的 compose 與確認版本不同；確認前部署仍使用 ${esc(c.commit.slice(0, 7))} 的程式碼。</span></div></div>`);
   const logs = d?.logs?.length ? d.logs.map((l) => `[${l.stage}] ${l.line}`).join("\n") : "";
   box.innerHTML = `<section class="c-card"><div class="c-card__header"><h2 class="c-card__title">部署</h2>${head}<span class="l-spacer"></span>
@@ -653,6 +657,59 @@ function drawDeploy(id, data) {
     catch (err) { showMsg($("#pj-deploy-err"), err); }
   });
   if (d?.in_progress) deployTimer = setTimeout(() => pollDeploy(id), 3000);
+}
+/** FR-ENV-05（ADR 0019）：秘密變數，依環境、只寫不讀；變更後重新部署生效 */
+async function drawVars(id, result) {
+  const box = $("#pj-env"); if (!box) return;
+  let v;
+  try { v = await api(`/api/projects/${encodeURIComponent(id)}/vars?env=production`); }
+  catch (err) { return box.insertAdjacentHTML("beforeend", `<p class="c-msg c-msg--danger" role="alert">${esc(err.message)}</p>`); }
+  if (currentPage() !== "projects" || pageArg() !== id) return;
+  const meta = Object.fromEntries((result?.env || []).map((e) => [e.name, e]));
+  const platform = (result?.env || []).filter((e) => e.provider === "platform");
+  const badges = (e) => `${e?.build_time ? ' <span class="c-badge" title="值在建置時寫入映像，不要放秘密">建置時</span>' : ""}${e?.varies_by_env ? ' <span class="c-badge c-badge--warning" title="staging 與 production 需各自建置">隨環境不同</span>' : ""}`;
+  const rows = v.items.map((it) => {
+    const m = meta[it.name];
+    const state = it.source === "generated" ? '<span class="c-badge c-badge--success">平臺產生</span>'
+      : it.set ? `<span class="c-badge c-badge--success">已設定</span>${it.hint ? ` <span class="u-mono u-small">${esc(it.hint)}</span>` : ""}`
+      : it.needed ? '<span class="c-badge c-badge--warning">未設定</span>' : "";
+    const actions = it.source === "generated" ? '<span class="u-muted u-small">不可修改</span>'
+      : `<button class="c-btn c-btn--sm" data-var-set="${esc(it.name)}">${icon("key")}<span>${it.set ? "更新" : "設定"}</span></button>${it.set ? `<button class="c-btn c-btn--ghost c-btn--sm" data-var-unset="${esc(it.name)}">${icon("trash")}<span>清除</span></button>` : ""}`;
+    return `<tr><td><span class="c-table__primary u-mono">${esc(it.name)}</span>${badges(m || it)}</td><td>${state}</td>
+      <td>${(it.evidence.length ? it.evidence : m?.evidence || []).map((ev) => `<span class="u-mono u-small">${esc(ev.file)}${ev.line ? ":" + ev.line : ""}</span>`).join("<br>") || '<span class="u-muted">—</span>'}</td>
+      <td><div class="c-table__actions">${actions}</div></td></tr>`;
+  }).concat(platform.map((e) => `<tr><td><span class="c-table__primary u-mono">${esc(e.name)}</span>${badges(e)}</td><td><span class="u-muted u-small">平臺自動填入</span></td><td>${e.evidence.map((ev) => `<span class="u-mono u-small">${esc(ev.file)}${ev.line ? ":" + ev.line : ""}</span>`).join("<br>") || '<span class="u-muted">—</span>'}</td><td></td></tr>`)).join("");
+  box.innerHTML = `<div class="c-card__header"><h2 class="c-card__title">環境變數</h2><span class="u-small u-muted">production · 值加密保存、只寫不讀；變更後重新部署生效</span><span class="l-spacer"></span>
+      <button class="c-btn c-btn--sm" id="pj-var-new">${icon("plus")}<span>新增變數</span></button></div>
+    <div class="c-card__body c-card__body--flush"><div class="c-table-wrap"><table class="c-table">
+      <thead><tr><th>名稱</th><th>狀態</th><th>依據</th><th><span class="u-sr-only">操作</span></th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="4">${empty({ iconName: "key", title: "沒有環境變數", body: "按「新增變數」加入 App 需要的設定或金鑰。" })}</td></tr>`}</tbody></table></div></div>`;
+  const save = async (body, msg) => { await api(`/api/projects/${encodeURIComponent(id)}/vars`, { method: "PUT", body: { env: "production", ...body } }); toast(msg); drawVars(id, result); pollDeploy(id); };
+  const open = (name) => {
+    const m = meta[name];
+    const dr = drawer({ title: name ? `設定 ${name}` : "新增變數", subtitle: "值以主金鑰加密保存，之後不會再顯示；重新部署後生效。" });
+    dr.body.innerHTML = `
+      ${name ? "" : `<label class="c-field"><span class="c-field__label">名稱</span><input class="c-input u-mono" id="pv-name" placeholder="例如 SESSION_SECRET" autocomplete="off" spellcheck="false"><span class="c-field__hint">英數與底線，不可以數字開頭；CALOUD_ 開頭保留給平臺。</span></label>`}
+      <label class="c-field"><span class="c-field__label">值</span><input class="c-input u-mono" type="password" id="pv-value" autocomplete="new-password" spellcheck="false"></label>
+      ${m?.build_time ? `<div class="c-banner c-banner--warning">${icon("alert")}<div class="c-banner__body"><strong>建置時變數</strong><span class="u-small">值會寫進映像與前端程式，任何人都看得到，不要放秘密。</span></div></div>` : ""}
+      <span class="c-field__error" id="pv-err" role="alert"></span>`;
+    dr.footer.classList.remove("u-hidden");
+    dr.footer.innerHTML = `<button class="c-btn" data-close>取消</button><button class="c-btn c-btn--primary" id="pv-save">${icon("check")}<span>儲存</span></button>`;
+    $("#pv-save", dr.el).addEventListener("click", async (e) => {
+      const n = name || $("#pv-name", dr.el).value.trim();
+      showMsg($("#pv-err", dr.el), null);
+      if (!n) return showMsg($("#pv-err", dr.el), new Error("請輸入名稱。"));
+      try { await busy(e.currentTarget, save({ set: { [n]: $("#pv-value", dr.el).value } }, `已儲存 ${n}，重新部署後生效`)); dr.close(); }
+      catch (err) { showMsg($("#pv-err", dr.el), err); }
+    });
+  };
+  $("#pj-var-new", box).addEventListener("click", () => open(null));
+  $$("[data-var-set]", box).forEach((b) => b.addEventListener("click", () => open(b.dataset.varSet)));
+  $$("[data-var-unset]", box).forEach((b) => b.addEventListener("click", async () => {
+    const n = b.dataset.varUnset;
+    if (!(await confirmDialog({ title: `清除 ${n}？`, body: "值會被刪除，無法復原；重新部署後生效。", confirmText: "清除變數" }))) return;
+    try { await busy(b, save({ unset: [n] }, `已清除 ${n}`)); } catch (err) { toast(err.message, "danger"); }
+  }));
 }
 async function pollDeploy(id) {
   if (currentPage() !== "projects" || pageArg() !== id) return;

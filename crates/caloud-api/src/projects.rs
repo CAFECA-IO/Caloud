@@ -51,3 +51,29 @@ pub async fn confirm(
 pub async fn deploy(State(s): State<AppState>, me: CurrentUser, Path(id): Path<String>) -> ApiResult<(StatusCode, Json<Value>)> {
     Ok((StatusCode::ACCEPTED, Json(crate::service::deploy::deploy(&s, &me, &id).await?)))
 }
+
+#[derive(serde::Deserialize)]
+pub struct EnvQuery {
+    #[serde(default)]
+    pub env: Option<String>,
+}
+
+/// FR-ENV-05：秘密變數（只回名稱與提示，ADR 0019）
+pub async fn vars(
+    State(s): State<AppState>,
+    me: CurrentUser,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<EnvQuery>,
+) -> ApiResult<Json<crate::service::vars::VarList>> {
+    let env = q.env.unwrap_or_else(|| "production".into());
+    Ok(Json(crate::service::vars::list(&s, &me, &id, &env).await?))
+}
+
+pub async fn set_vars(
+    State(s): State<AppState>,
+    me: CurrentUser,
+    Path(id): Path<String>,
+    Json(b): Json<crate::service::vars::VarsInput>,
+) -> ApiResult<Json<crate::service::vars::VarList>> {
+    Ok(Json(crate::service::vars::update(&s, &me, &id, b).await?))
+}

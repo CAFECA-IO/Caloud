@@ -49,6 +49,28 @@ pub struct EnvSpec {
     /// 從原始碼建置（ADR 0018）；None 表示 compose 只用 image
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<EnvSource>,
+    /// 秘密變數（ADR 0019）：`docker compose up` 時放進行程環境變數；Debug 輸出遮蔽值
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vars: Vec<EnvValue>,
+}
+
+/// 一個秘密變數；`user` 為用戶變數（注入從儲存庫建置的服務），否則為平臺產生（只供 compose 內插）
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvValue {
+    pub name: String,
+    pub value: String,
+    #[serde(default)]
+    pub user: bool,
+}
+
+impl std::fmt::Debug for EnvValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnvValue")
+            .field("name", &self.name)
+            .field("value", &"***")
+            .field("user", &self.user)
+            .finish()
+    }
 }
 
 /// 原始碼位置；`auth_header` 只在記憶體使用，Debug 輸出遮蔽（ADR 0018）

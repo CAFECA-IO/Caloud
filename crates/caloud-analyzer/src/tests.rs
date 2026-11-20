@@ -645,3 +645,81 @@ fn existing_dockerfile_is_checked_not_modified() {
         "已掛 volume"
     );
 }
+
+/// SwarmStorage 的 compose：IPFS 節點＋Next.js App（由範本產生）
+const SWARM_COMPOSE: &str = "services:\n  ipfs_bootstrap:\n    image: ipfs/kubo:latest\n    container_name: ipfs_bootstrap\n    ports:\n      - \"5001:5001\"\n      - \"8080:8080\"\n    volumes:\n      - ipfs_data:/data/ipfs\nvolumes:\n  ipfs_data: {}\n";
+const SWARM_PKG: &str =
+    "{\n  \"scripts\": { \"build\": \"next build\", \"start\": \"next start\" },\n  \"dependencies\": { \"next\": \"15\" }\n}\n";
+
+// FR-AN-11：寫死的本機位址列為 High；FR-AN-07：`path.join(process.cwd(), 'room')`
+#[test]
+fn hardcoded_loopback_to_other_service() {
+    let r = Repo::new(
+        "swarm-old",
+        &[
+            ("docker-compose.yml", SWARM_COMPOSE),
+            ("package.json", SWARM_PKG),
+            (
+                "src/app/api/v1/file/route.ts",
+                "const IPFS_API_URL = 'http://127.0.0.1:5001';\nawait fetch(`${IPFS_API_URL}/api/v0/add`);\n",
+            ),
+            (
+                "src/lib/room_store.ts",
+                "const IPFS_API_URL = 'http://127.0.0.1:5001';\nconst ROOM_BASE_DIR = path.join(process.cwd(), 'room');\n",
+            ),
+            ("src/lib/self.ts", "const SELF = 'http://localhost:3000';\n"),
+            ("src/lib/content.ts", "const C = path.join(process.cwd(), 'content');\n"),
+            ("content/a.md", "# a\n"),
+            ("tests/x.test.ts", "const T = 'http://127.0.0.1:5001';\n"),
+        ],
+    );
+    let a = r.analyze("");
+    let links: Vec<&Finding> = a.findings.iter().filter(|f| f.key == "service_link").collect();
+    assert_eq!(links.len(), 1, "{links:#?}\n{:#?}\n{:?}", a.findings, a.compose);
+    assert_eq!(links[0].confidence, Confidence::High);
+    assert!(links[0].message.contains("http://ipfs_bootstrap:5001"), "{}", links[0].message);
+    assert_eq!(links[0].evidence.len(), 2, "測試檔不算");
+    let c = a.compose.unwrap();
+    assert!(!c.contains("IPFS_API_URL"), "寫死時不填入");
+    assert!(c.contains("/app/room"), "{c}");
+    assert!(!c.contains("/app/content"), "已有內容的目錄是讀取");
+}
+
+// FR-AN-11：可由變數設定時自動填入服務名稱；FR-AN-07：`.drophere` 也掛 volume
+#[test]
+fn configurable_loopback_is_filled() {
+    let r = Repo::new(
+        "swarm-new",
+        &[
+            ("docker-compose.yml", SWARM_COMPOSE),
+            ("package.json", SWARM_PKG),
+            (
+                "src/lib/server_env.ts",
+                "export const IPFS_API_URL = (process.env.IPFS_API_URL?.trim() || 'http://127.0.0.1:5001').replace(/\\/+$/, '');\n\
+                 export const ROOM_DATA_DIR = dirFromEnv(process.env.ROOM_DATA_DIR, path.join(process.cwd(), 'room'));\n\
+                 export const DROPHERE_DATA_DIR = dirFromEnv(process.env.DROPHERE_DATA_DIR, path.join(process.cwd(), '.drophere'));\n\
+                 const CONF = path.join(process.cwd(), '.env');\n",
+            ),
+        ],
+    );
+    let a = r.analyze("");
+    let f = a.findings.iter().find(|f| f.key == "service_link").expect("service_link");
+    assert_eq!(f.confidence, Confidence::Medium);
+    assert!(f.message.contains("IPFS_API_URL=http://ipfs_bootstrap:5001"), "{}", f.message);
+    assert_eq!(env(&a, "IPFS_API_URL"), Provider::Platform);
+    let c = a.compose.unwrap();
+    let doc: serde_yaml::Value = serde_yaml::from_str(&c).unwrap();
+    let app = doc["services"]
+        .as_mapping()
+        .unwrap()
+        .iter()
+        .find(|(_, s)| s.get("build").is_some())
+        .map(|(_, s)| s.clone())
+        .unwrap();
+    assert_eq!(app["environment"]["IPFS_API_URL"], "http://ipfs_bootstrap:5001", "{c}");
+    let vols = serde_yaml::to_string(&app["volumes"]).unwrap();
+    assert!(vols.contains("/app/room") && vols.contains("/app/.drophere"), "{vols}");
+    assert!(!vols.contains(".env"));
+    // ipfs 服務不被改動
+    assert!(doc["services"]["ipfs_bootstrap"].get("environment").is_none());
+}

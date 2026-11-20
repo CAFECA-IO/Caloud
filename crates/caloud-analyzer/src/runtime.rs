@@ -18,6 +18,19 @@ pub(crate) struct CodeScan {
     pub env: BTreeMap<String, Vec<Evidence>>,
     /// 寫入工作目錄下路徑的訊號
     pub writes: Vec<Signal>,
+    /// 程式中以 localhost／127.0.0.1 連線的位址（FR-AN-11）
+    pub loopback: Vec<Loopback>,
+}
+
+/// `http://127.0.0.1:5001` 這類連到自己主機的位址
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Loopback {
+    /// 原始字面量
+    pub url: String,
+    pub port: u16,
+    pub evidence: Evidence,
+    /// 位址是這個環境變數的預設值（可由變數設定）；None 表示寫死
+    pub var: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -28,6 +41,70 @@ pub(crate) struct Signal {
     pub confidence: Confidence,
     /// 例：`寫入`、`SQLite`、`UPLOAD_DIR 預設值`
     pub why: String,
+    /// 只知道是工作目錄下的路徑、不確定會寫入：目錄已有內容時略過，且允許 `.` 開頭的目錄（FR-AN-07 補強）
+    pub weak: bool,
+}
+
+/// 連到本機的主機名稱
+const LOOPBACK_HOSTS: &[&str] = &["localhost", "127.0.0.1", "0.0.0.0"];
+
+/// 解析 `scheme://localhost:5001/path` 或 `localhost:5001`；回傳 port
+pub(crate) fn loopback_port(lit: &str) -> Option<u16> {
+    let rest = match lit.split_once("://") {
+        Some((scheme, r)) if !scheme.is_empty() && scheme.chars().all(|c| c.is_ascii_alphanumeric() || c == '+') => r,
+        Some(_) => return None,
+        None => lit,
+    };
+    // 帳密（`postgres://u:p@localhost:5432`）
+    let rest = rest.rsplit_once('@').map(|(_, h)| h).unwrap_or(rest);
+    let hostport = rest.split(['/', '?', '#']).next()?;
+    let (host, port) = hostport.rsplit_once(':')?;
+    if !LOOPBACK_HOSTS.contains(&host) {
+        return None;
+    }
+    port.parse().ok().filter(|p| *p > 0)
+}
+
+/// 一行中 `path.join(process.cwd(), 'x')` 這類工作目錄下的路徑
+fn cwd_paths(l: &str) -> Vec<String> {
+    const JOINS: &[&str] = &["path.join(", "path.resolve(", "os.path.join(", "filepath.Join("];
+    let mut out = Vec::new();
+    for j in JOINS {
+        let mut rest = l;
+        while let Some(i) = rest.find(j) {
+            let call = &rest[i..];
+            rest = &rest[i + j.len()..];
+            let args = &call[j.len()..];
+            // 找到這個呼叫的結尾
+            let mut depth = 1i32;
+            let mut end = None;
+            let mut quote: Option<char> = None;
+            for (k, c) in args.char_indices() {
+                match (quote, c) {
+                    (Some(q), c) if c == q => quote = None,
+                    (Some(_), _) => {}
+                    (None, '\'' | '"' | '`') => quote = Some(c),
+                    (None, '(') => depth += 1,
+                    (None, ')') => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(k);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(end) = end else { continue };
+            let full = format!("{}{})", &call[..j.len()], &args[..end]);
+            let full = full.strip_prefix("os.").unwrap_or(&full);
+            let full = full.replace("filepath.Join(", "path.join(").replace("os.Getwd()", "os.getcwd()");
+            if let Some(p) = arg_path(&full).filter(|p| full.contains("cwd()") && !out.contains(p)) {
+                out.push(p);
+            }
+        }
+    }
+    out
 }
 
 const ENV_PATTERNS: &[&str] = &[
@@ -248,12 +325,21 @@ pub(crate) fn scan_code(fs: &RepoFs) -> CodeScan {
             }
             add(&mut scan, k, ev(f, i));
             let v = v.trim().trim_matches(['"', '\'']);
+            if let Some(port) = loopback_port(v) {
+                scan.loopback.push(Loopback {
+                    url: v.to_string(),
+                    port,
+                    evidence: ev(f, i),
+                    var: Some(k.to_string()),
+                });
+            }
             if dirish(k) && dir_default(k, v) {
                 scan.writes.push(Signal {
                     path: v.to_string(),
                     evidence: ev(f, i),
                     confidence: Confidence::Medium,
                     why: format!("`{k}` 預設值"),
+                    weak: true,
                 });
             }
         }
@@ -273,7 +359,7 @@ pub(crate) fn scan_code(fs: &RepoFs) -> CodeScan {
                         // `process.env.UPLOAD_DIR || './uploads'`、`os.getenv("DATA_DIR", "./data")`
                         if dirish(n) {
                             let fallback = ["||", "??", ","].iter().find_map(|op| {
-                                let after = l.split(n).nth(1)?;
+                                let after = l.rsplit(n).next()?;
                                 let expr = strip_block_comments(after.split_once(op)?.1);
                                 let expr = expr.trim();
                                 let end = top_arg(&format!("{expr})")).map(str::len).unwrap_or(expr.len());
@@ -285,6 +371,7 @@ pub(crate) fn scan_code(fs: &RepoFs) -> CodeScan {
                                     evidence: ev(f, i),
                                     confidence: Confidence::Medium,
                                     why: format!("`{n}` 預設值"),
+                                    weak: true,
                                 });
                             }
                         }
@@ -294,12 +381,40 @@ pub(crate) fn scan_code(fs: &RepoFs) -> CodeScan {
             if is_script(f) || is_import(l) {
                 continue;
             }
+            // FR-AN-11：連到本機的位址；同一行有環境變數時視為該變數的預設值
+            for lit in literals(l).into_iter().flatten() {
+                let Some(port) = loopback_port(&lit) else { continue };
+                let var = ENV_PATTERNS
+                    .iter()
+                    .flat_map(|p| names_after(l, p))
+                    .find(|n| l.find(*n).zip(l.find(lit.as_str())).is_some_and(|(a, b)| a < b))
+                    .map(str::to_string);
+                scan.loopback.push(Loopback {
+                    url: lit,
+                    port,
+                    evidence: ev(f, i),
+                    var,
+                });
+            }
+            // FR-AN-07 補強：`path.join(process.cwd(), 'room')` 這類工作目錄下的路徑
+            if !WRITE_CALLS.iter().any(|c| l.contains(c)) {
+                for path in cwd_paths(l) {
+                    scan.writes.push(Signal {
+                        path,
+                        evidence: ev(f, i),
+                        confidence: Confidence::Medium,
+                        why: "工作目錄下的路徑".into(),
+                        weak: true,
+                    });
+                }
+            }
             let push = |scan: &mut CodeScan, path: String, conf: Confidence, why: &str| {
                 scan.writes.push(Signal {
                     path,
                     evidence: ev(f, i),
                     confidence: conf,
                     why: why.into(),
+                    weak: false,
                 })
             };
             // SQLite
@@ -393,7 +508,27 @@ fn looks_like_file(seg: &str) -> bool {
 }
 
 /// 相對路徑字面量 → 目錄；絕對路徑、`..`、URL、樣板一律不算
+#[cfg(test)]
 fn target(lit: &str) -> Option<Target> {
+    target_with(lit, false)
+}
+
+/// 不掛 volume 的隱藏目錄（設定、工具快取）
+const HIDDEN_NOT_DATA: &[&str] = &[
+    ".env",
+    ".git",
+    ".github",
+    ".vscode",
+    ".idea",
+    ".husky",
+    ".config",
+    ".npm",
+    ".yarn",
+    ".pnpm-store",
+];
+
+/// `hidden`：允許 `.` 開頭的目錄（例：`.drophere`）
+fn target_with(lit: &str, hidden: bool) -> Option<Target> {
     let p = lit.trim().strip_prefix("file:").unwrap_or(lit.trim());
     if p.is_empty() || p.starts_with(['/', '~', '$']) || p.contains("://") || p.contains('\\') || p.contains(':') {
         return None;
@@ -409,7 +544,9 @@ fn target(lit: &str) -> Option<Target> {
     let Some(first) = dirs.first() else {
         return Some(Target::CwdFile(segs[0].to_string()));
     };
-    if NOT_DATA.contains(first) || first.starts_with('.') {
+    if NOT_DATA.contains(first)
+        || first.starts_with('.') && (!hidden || first.len() < 2 || HIDDEN_NOT_DATA.iter().any(|h| first.starts_with(h)))
+    {
         return None;
     }
     // public/uploads 這類放在靜態目錄下的資料，掛第二層
@@ -436,19 +573,23 @@ pub(crate) struct Persist {
     pub confidence: Confidence,
     pub evidence: Vec<Evidence>,
     pub why: Vec<String>,
+    /// 只有弱訊號（見 [`Signal::weak`]）
+    pub weak: bool,
 }
 
 /// FR-AN-07：彙整成目錄。無法整個掛載（目錄內有原始碼，或檔案直接寫在工作目錄）者回傳在 `blocked`
 pub(crate) fn persistent(cx: &Ctx) -> (Vec<Persist>, Vec<Finding>) {
     let mut dirs: BTreeMap<String, Persist> = BTreeMap::new();
     let mut blocked = Vec::new();
-    let mut merge = |dir: String, conf: Confidence, ev: Evidence, why: &str| {
+    let mut merge = |dir: String, conf: Confidence, ev: Evidence, why: &str, weak: bool| {
         let p = dirs.entry(dir.clone()).or_insert_with(|| Persist {
             dir,
             confidence: conf,
             evidence: vec![],
             why: vec![],
+            weak: true,
         });
+        p.weak &= weak;
         if conf == Confidence::High {
             p.confidence = Confidence::High;
         }
@@ -460,8 +601,9 @@ pub(crate) fn persistent(cx: &Ctx) -> (Vec<Persist>, Vec<Finding>) {
         }
     };
     for s in &cx.code().writes {
-        match target(&s.path) {
-            Some(Target::Dir(d)) => merge(d, s.confidence, s.evidence.clone(), &s.why),
+        match target_with(&s.path, s.weak) {
+            Some(Target::Dir(d)) => merge(d, s.confidence, s.evidence.clone(), &s.why, s.weak),
+            Some(Target::CwdFile(_)) if s.weak => {}
             Some(Target::CwdFile(f)) if !blocked.iter().any(|b: &Finding| b.message.contains(&format!("`{f}`"))) => blocked.push(Finding {
                 key: "persistent_dir".into(),
                 message: format!(
@@ -477,13 +619,15 @@ pub(crate) fn persistent(cx: &Ctx) -> (Vec<Persist>, Vec<Finding>) {
     for name in DATA_DIR_NAMES {
         if cx.fs.is_dir(name) && (cx.fs.is_file(&format!("{name}/.gitkeep")) || cx.fs.is_file(&format!("{name}/.keep"))) {
             let ev = cx.ev(&format!("{name}/.gitkeep"), None);
-            merge(name.to_string(), Confidence::Medium, ev, "儲存庫保留的空目錄");
+            merge(name.to_string(), Confidence::Medium, ev, "儲存庫保留的空目錄", false);
         }
     }
     let mut ok = Vec::new();
     for (_, p) in dirs {
         if mountable(cx.fs, &p.dir) {
             ok.push(p);
+        } else if p.weak {
+            // 只知道是工作目錄下的路徑：已有內容的目錄多半是讀取（例：content/、templates/）
         } else {
             blocked.push(Finding {
                 key: "persistent_dir".into(),
@@ -923,6 +1067,36 @@ mod unit {
         assert_eq!(target("https://a.b/c"), None);
         assert_eq!(target("node_modules/.cache"), None);
         assert_eq!(volume_name("web", "public/uploads"), "web-public-uploads");
+        assert_eq!(target(".drophere"), None);
+        assert_eq!(target_with(".drophere", true), Some(Target::Dir(".drophere".into())));
+        assert_eq!(target_with(".env", true), None);
+        assert_eq!(target_with(".git/x", true), None);
+    }
+
+    // FR-AN-11、FR-AN-07
+    #[test]
+    fn loopback_and_cwd_paths() {
+        assert_eq!(loopback_port("http://127.0.0.1:5001"), Some(5001));
+        assert_eq!(loopback_port("http://localhost:5001/api/v0"), Some(5001));
+        assert_eq!(loopback_port("postgres://u:p@localhost:5432/app"), Some(5432));
+        assert_eq!(loopback_port("redis://0.0.0.0:6379"), Some(6379));
+        assert_eq!(loopback_port("localhost:8080"), Some(8080));
+        assert_eq!(loopback_port("http://localhost"), None);
+        assert_eq!(loopback_port("http://example.com:5001"), None);
+        assert_eq!(loopback_port("a:b://localhost:1"), None);
+        assert_eq!(
+            cwd_paths("const ROOM = path.join(process.cwd(), 'room');"),
+            vec!["room".to_string()]
+        );
+        assert_eq!(
+            cwd_paths("x(process.env.D, path.join(process.cwd(), '.drophere'), path.join(a, 'b'))"),
+            vec![".drophere".to_string()]
+        );
+        assert_eq!(
+            cwd_paths("p = os.path.join(os.getcwd(), 'media', 'x')"),
+            vec!["media/x".to_string()]
+        );
+        assert!(cwd_paths("path.join(__dirname, 'x')").is_empty());
     }
 
     // FR-AN-09
