@@ -91,16 +91,56 @@ async fn dispatch(s: &AppState, event: &str, v: &Value) -> anyhow::Result<()> {
             }
             audit(&s.db, None, "github_installation", Some(&id.to_string()), Some(action)).await;
         }
-        "push" | "create" | "pull_request" => {
+        // ADR 0021：以專案分支為 base 的 PR → PR 驗證（不重新解析、不部署、不注入用戶變數）
+        "pull_request" => {
+            let Some(id) = installation else { return Ok(()) };
+            if !["opened", "synchronize", "reopened"].contains(&action) {
+                return Ok(());
+            }
+            let repo = v["repository"]["full_name"].as_str().unwrap_or_default();
+            let default_branch = v["repository"]["default_branch"].as_str().unwrap_or_default();
+            let base = v["pull_request"]["base"]["ref"].as_str().unwrap_or_default();
+            let head = v["pull_request"]["head"]["sha"].as_str().unwrap_or_default();
+            let Some(number) = v["pull_request"]["number"].as_i64().or_else(|| v["number"].as_i64()) else {
+                return Ok(());
+            };
+            if base.is_empty() || head.len() != 40 || !head.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Ok(());
+            }
+            let projects: Vec<caloud_core::model::Project> = sqlx::query_as(
+                "SELECT * FROM projects WHERE installation_id = ? AND repo_full_name = ? AND confirmed_analysis IS NOT NULL
+                   AND (git_ref = ? OR (git_ref IS NULL AND ? = ?))",
+            )
+            .bind(id)
+            .bind(repo)
+            .bind(base)
+            .bind(base)
+            .bind(default_branch)
+            .fetch_all(&s.db)
+            .await?;
+            for p in projects {
+                audit(
+                    &s.db,
+                    None,
+                    "github_event",
+                    Some(&p.id),
+                    Some(&format!("via=github; pull_request #{number} {action}")),
+                )
+                .await;
+                if let Err(e) =
+                    crate::service::verify::start(s, &p, "pr", false, false, None, "via=github", Some((number, head.to_string()))).await
+                {
+                    tracing::warn!(project = %p.id, error = %e, "pr verification skipped");
+                }
+            }
+        }
+        "push" | "create" => {
             let Some(id) = installation else { return Ok(()) };
             let repo = v["repository"]["full_name"].as_str().unwrap_or_default();
             let default_branch = v["repository"]["default_branch"].as_str().unwrap_or_default();
             let branch = match event {
                 "push" => v["ref"].as_str().and_then(|r| r.strip_prefix("refs/heads/")).map(str::to_string),
-                "create" => (v["ref_type"] == "branch").then(|| v["ref"].as_str().unwrap_or_default().to_string()),
-                _ => ["opened", "synchronize", "reopened"]
-                    .contains(&action)
-                    .then(|| v["pull_request"]["head"]["ref"].as_str().unwrap_or_default().to_string()),
+                _ => (v["ref_type"] == "branch").then(|| v["ref"].as_str().unwrap_or_default().to_string()),
             };
             let Some(branch) = branch.filter(|b| !b.is_empty()) else {
                 return Ok(());

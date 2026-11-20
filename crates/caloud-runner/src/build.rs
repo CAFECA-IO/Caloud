@@ -280,7 +280,7 @@ fn build_args(v: Option<&Value>) -> Vec<(String, String)> {
 /// - 以平臺政策（含 compose 目錄深度）檢查；
 /// - 不可自行引用平臺產生的映像（`caloud-env/…`）；
 /// - 有 `profiles` 的服務（工具類）不會被 `up` 啟動，直接移除。
-pub fn plan(compose: &str, repo: &Path, src: &EnvSource, env_id: &str) -> anyhow::Result<(Vec<BuildJob>, String)> {
+pub fn plan(compose: &str, repo: &Path, src: &EnvSource, env_id: &str, keep: &[String]) -> anyhow::Result<(Vec<BuildJob>, String)> {
     let depth = src.compose_dir.split('/').filter(|c| !c.is_empty()).count();
     let validated = validate_with(compose, Policy::platform(depth)).map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut doc = validated.doc;
@@ -290,7 +290,8 @@ pub fn plan(compose: &str, repo: &Path, src: &EnvSource, env_id: &str) -> anyhow
         .get_mut("services")
         .and_then(Value::as_mapping_mut)
         .ok_or_else(|| anyhow::anyhow!("compose 沒有 services"))?;
-    services.retain(|_, svc| svc.get("profiles").is_none());
+    // 發布前任務的服務（ADR 0021）保留並建置；其他帶 profiles 的服務不會被 `up` 啟動，直接移除
+    services.retain(|name, svc| svc.get("profiles").is_none() || name.as_str().is_some_and(|n| keep.iter().any(|k| k == n)));
     for (name, svc) in services.iter_mut() {
         let name = name.as_str().unwrap_or_default().to_string();
         let Some(svc) = svc.as_mapping_mut() else { continue };
@@ -348,7 +349,18 @@ pub fn container_name(env_id: &str, service: &str) -> String {
 }
 
 /// `docker run … buildctl-daemonless.sh build …` 的參數（ADR 0018 §2）
-pub fn build_command(job: &BuildJob, env_id: &str, image: &str, resolv: &Path, df_dir: &Path, df_name: &str, out: &Path) -> Vec<String> {
+#[allow(clippy::too_many_arguments)]
+pub fn build_command(
+    limits: caloud_core::agent::BuildLimits,
+    job: &BuildJob,
+    env_id: &str,
+    image: &str,
+    resolv: &Path,
+    df_dir: &Path,
+    df_name: &str,
+    out: &Path,
+) -> Vec<String> {
+    let (cpus, mem) = (limits.cpus.to_string(), format!("{}m", limits.memory_mb));
     let mut a: Vec<String> = [
         "run",
         "--rm",
@@ -359,9 +371,9 @@ pub fn build_command(job: &BuildJob, env_id: &str, image: &str, resolv: &Path, d
         "--network",
         BUILD_NETWORK,
         "--cpus",
-        "4",
+        &cpus,
         "--memory",
-        "8g",
+        &mem,
         "--pids-limit",
         "4096",
         "--label",
@@ -438,7 +450,7 @@ mod tests {
         std::fs::create_dir_all(repo.join("app/docker")).unwrap();
         std::fs::write(repo.join("app/docker/Dockerfile.web"), "FROM scratch\n").unwrap();
         let compose = "services:\n  Web_1:\n    build: {context: ../app, dockerfile: docker/Dockerfile.web, target: prod, args: {A: 1, B: x}}\n    pull_policy: build\n  api:\n    build: {context: ../app, dockerfile_inline: \"FROM alpine\\n\"}\n  migrate:\n    build: ../app\n    profiles: [tools]\n  db:\n    image: postgres:16\n";
-        let (jobs, out) = plan(compose, &repo, &src("deploy"), "k2m9xq7a").unwrap();
+        let (jobs, out) = plan(compose, &repo, &src("deploy"), "k2m9xq7a", &[]).unwrap();
         assert_eq!(jobs.len(), 2);
         let web = &jobs[0];
         assert_eq!(web.tag, "caloud-env/k2m9xq7a/web-1:98b705d01234");
@@ -456,9 +468,19 @@ mod tests {
         assert!(doc["services"].get("migrate").is_none(), "profiles 服務移除");
         assert_eq!(doc["services"]["db"]["image"], "postgres:16");
 
-        let args = build_command(web, "k2m9xq7a", BUILDKIT_IMAGE, Path::new("/r"), &dfdir, &dfname, Path::new("/o")).join(" ");
+        let args = build_command(
+            Default::default(),
+            web,
+            "k2m9xq7a",
+            BUILDKIT_IMAGE,
+            Path::new("/r"),
+            &dfdir,
+            &dfname,
+            Path::new("/o"),
+        )
+        .join(" ");
         for want in [
-            "--runtime runsc --network caloud-build",
+            "--runtime runsc --network caloud-build --cpus 4 --memory 8192m",
             "-v /r:/etc/resolv.conf:ro",
             ":/ctx:ro",
             "caloud-bkcache-k2m9xq7a:/home/user/.local/share/buildkit",
@@ -476,12 +498,19 @@ mod tests {
             "services:\n  a:\n    image: x\n    volumes: ['/etc:/x']\n",
             "services:\n  a:\n    build: {context: ../app, dockerfile: nope}\n",
         ] {
-            assert!(plan(bad, &repo, &src("deploy"), "k2m9xq7a").is_err(), "{bad}");
+            assert!(plan(bad, &repo, &src("deploy"), "k2m9xq7a", &[]).is_err(), "{bad}");
         }
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink("/etc", repo.join("app/escape")).unwrap();
-            assert!(plan("services:\n  a:\n    build: ../app/escape\n", &repo, &src("deploy"), "k2m9xq7a").is_err());
+            assert!(plan(
+                "services:\n  a:\n    build: ../app/escape\n",
+                &repo,
+                &src("deploy"),
+                "k2m9xq7a",
+                &[]
+            )
+            .is_err());
         }
         let _ = std::fs::remove_dir_all(&repo);
     }

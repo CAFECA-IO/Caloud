@@ -11,7 +11,7 @@ mod links;
 mod runtime;
 mod templates;
 pub mod verifyplan;
-pub use verifyplan::{VerifyCmd, VerifyPlan};
+pub use verifyplan::{ReleaseTask, VerifyCmd, VerifyPlan};
 
 use fs::RepoFs;
 use serde::{Deserialize, Serialize};
@@ -260,7 +260,15 @@ pub fn analyze(repo: &Path, opts: &Options) -> Analysis {
         env.push(g);
     }
     note_build_env(&mut cx, &env, matches!(source, Source::Template { .. }));
-    let verify = verifyplan::plan(&mut cx);
+    let mut verify = verifyplan::plan(&mut cx);
+    if let Some(c) = compose_out
+        .as_deref()
+        .and_then(|c| serde_yaml::from_str::<serde_yaml::Value>(c).ok())
+    {
+        verifyplan::release(&mut cx, &mut verify, &c);
+    } else {
+        verify.release.clear();
+    }
 
     let needs_confirmation = !cx.errors.is_empty() || cx.findings.iter().any(|f| f.confidence == Confidence::Low);
     Analysis {

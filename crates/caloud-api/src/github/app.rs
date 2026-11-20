@@ -267,6 +267,16 @@ pub async fn gh_post(s: &AppState, path: &str, auth: &str, body: Value) -> anyho
     .await
 }
 
+pub async fn gh_patch(s: &AppState, path: &str, auth: &str, body: Value) -> anyhow::Result<Value> {
+    gh_send(
+        s.http
+            .patch(format!("{}{path}", s.cfg.github_api))
+            .header("authorization", auth)
+            .json(&body),
+    )
+    .await
+}
+
 /// installation token：記憶體快取到過期前 5 分鐘（ADR 0017）
 pub async fn installation_token(s: &AppState, installation_id: i64) -> anyhow::Result<String> {
     if let Some(t) = s.github.cached_token(installation_id) {

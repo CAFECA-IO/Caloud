@@ -234,6 +234,8 @@ pub async fn create(s: &AppState, me: &CurrentUser, input: EnvInput) -> ApiResul
                 subnet_index: index as u16,
                 public_service: input.public_service.clone(),
                 source: None,
+                build: None,
+                release: vec![],
                 vars: vec![],
             },
         },
@@ -368,7 +370,7 @@ pub(crate) async fn report(
         _ => {
             let err: String = error.unwrap_or_else(|| "部署失敗".into()).chars().take(2000).collect();
             // 取得原始碼或建置失敗時，舊版仍在執行（ADR 0018）
-            let keep = env.status == "running" && matches!(stage.as_deref(), Some("fetch" | "build"));
+            let keep = env.status == "running" && matches!(stage.as_deref(), Some("fetch" | "build" | "release"));
             sqlx::query("UPDATE environments SET status = ?, stage = COALESCE(?, stage), error = ?, updated_at = ? WHERE subdomain = ?")
                 .bind(if keep { "running" } else { "failed" })
                 .bind(&stage)

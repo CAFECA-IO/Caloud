@@ -304,8 +304,13 @@ pub(crate) async fn for_deploy(s: &AppState, project: &str, env: &str, compose: 
 }
 
 /// 驗證用（ADR 0020）：production 的用戶變數；資料庫密碼每次重新產生，不寫入資料庫
-pub(crate) async fn for_verify(s: &AppState, project: &str, compose: &str) -> ApiResult<Vec<EnvValue>> {
-    let list: Vec<Row> = rows(s, project, "production").await?.into_iter().filter(|r| !r.generated).collect();
+/// `user`：是否帶入用戶變數（PR 驗證不帶，ADR 0021）
+pub(crate) async fn for_verify(s: &AppState, project: &str, compose: &str, user: bool) -> ApiResult<Vec<EnvValue>> {
+    let list: Vec<Row> = if user {
+        rows(s, project, "production").await?.into_iter().filter(|r| !r.generated).collect()
+    } else {
+        vec![]
+    };
     let mut out = Vec::new();
     if !list.is_empty() {
         let key = s

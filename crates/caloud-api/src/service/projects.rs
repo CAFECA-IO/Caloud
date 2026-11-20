@@ -198,12 +198,17 @@ pub async fn get(s: &AppState, me: &CurrentUser, id: &str) -> ApiResult<Value> {
     };
     let deployment = super::deploy::deployment(s, &p).await?;
     let verification = super::verify::summary(s, &p).await?;
+    let build_usage = json!({
+        "minutes": super::build::minutes(s, &p.owner).await?,
+        "limit": super::build::settings(s).await?.minutes_monthly,
+    });
     Ok(json!({
         "project": p,
         "analysis": last.as_ref().map(analysis_json),
         "confirmed": confirmed.as_ref().map(analysis_json),
         "deployment": deployment,
         "verification": verification,
+        "build_usage": build_usage,
     }))
 }
 

@@ -104,6 +104,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/blocked-hosts/{hostname}", delete(admin::unblock_host))
         .route("/api/admin/subdomain-ids", post(admin::subdomain_id))
         .route("/api/admin/nodes", get(admin::list_nodes))
+        .route(
+            "/api/admin/build-settings",
+            get(admin::build_settings).put(admin::set_build_settings),
+        )
         .route("/api/admin/nodes/join-tokens", post(admin::join_token))
         .route("/api/admin/nodes/{id}", delete(admin::delete_node))
         .route("/api/admin/nodes/{id}/drain", post(admin::drain_node))

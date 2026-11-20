@@ -142,3 +142,16 @@ pub async fn delete_env(State(s): State<AppState>, me: CurrentUser, Path(sub): P
     envs::delete(&s, &me, &sub).await?;
     Ok(StatusCode::ACCEPTED)
 }
+
+/// FR-CI-06（ADR 0021）：建置資源與每月建置分鐘
+pub async fn build_settings(State(s): State<AppState>, me: CurrentUser) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(crate::service::build::get(&s, &me).await?))
+}
+
+pub async fn set_build_settings(
+    State(s): State<AppState>,
+    me: CurrentUser,
+    Json(b): Json<crate::service::build::Settings>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(crate::service::build::set(&s, &me, b).await?))
+}

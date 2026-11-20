@@ -224,6 +224,8 @@ impl EnvRunner {
     pub async fn verify(&self, spec: &VerifySpec, tx: &UnboundedSender<AgentMsg>) {
         let env_id = spec.env.id.clone();
         let done = |error: Option<String>, kept: bool| {
+            // ADR 0021：建置與沙箱的用量在結束前回報
+            self.send_usage(Some(tx), "verify", &env_id, &spec.id);
             let _ = tx.send(AgentMsg::VerifyDone {
                 id: spec.id.clone(),
                 error,
@@ -387,8 +389,19 @@ impl EnvRunner {
                 match self.try_deploy(env, yaml, &inject).await {
                     Ok(s) => {
                         services = s;
-                        rep.stage("start", "passed");
-                        true
+                        // ADR 0021：發布前任務（migration、seed），失敗為 Blocker
+                        let mut log = Log::new(Some(tx), id, "start").for_verify(Some(id)).masking(&rep.secrets);
+                        match self.run_release(env, false, &mut log).await {
+                            Ok(()) => {
+                                rep.stage("start", "passed");
+                                true
+                            }
+                            Err(e) => {
+                                rep.stage("start", "failed");
+                                rep.simple("blocker", "start", "release/failed", "發布前任務失敗", short(&e.to_string()));
+                                false
+                            }
+                        }
                     }
                     Err(e) => {
                         rep.stage("start", "failed");
@@ -537,6 +550,8 @@ impl EnvRunner {
         let resolv = work.join("resolv.conf");
         let _ = tokio::fs::write(&resolv, sandbox::resolv_conf(&self.dns)).await;
         let name = format!("caloud-osv-{}", spec.env.id);
+        let limits = spec.env.build.unwrap_or_default();
+        let started = std::time::Instant::now();
         let args = [
             "run".to_string(),
             "--rm".into(),
@@ -547,9 +562,9 @@ impl EnvRunner {
             "--network".into(),
             build::BUILD_NETWORK.into(),
             "--cpus".into(),
-            "2".into(),
+            limits.cpus.min(2).to_string(),
             "--memory".into(),
-            "2g".into(),
+            format!("{}m", limits.memory_mb.min(4096)),
             "-v".into(),
             format!("{}:/etc/resolv.conf:ro", resolv.display()),
             "-v".into(),
@@ -564,7 +579,9 @@ impl EnvRunner {
         ];
         let mut c = Command::new(&self.docker_bin);
         c.args(&args).stdin(Stdio::null()).kill_on_drop(true);
-        match tokio::time::timeout(SCAN_TIMEOUT, c.output()).await {
+        let out = tokio::time::timeout(SCAN_TIMEOUT, c.output()).await;
+        self.add_usage(&spec.env.id, started.elapsed());
+        match out {
             Ok(Ok(out)) => {
                 // 0：沒有漏洞；1：有漏洞；128：沒有可掃描的套件
                 let code = out.status.code().unwrap_or(-1);
@@ -621,6 +638,8 @@ impl EnvRunner {
         let resolv = work.join("resolv.conf");
         let _ = tokio::fs::write(&resolv, sandbox::resolv_conf(&self.dns)).await;
         let name = format!("caloud-test-{env_id}-{kind}");
+        let limits = spec.env.build.unwrap_or_default();
+        let (cpus, mem) = (limits.cpus.to_string(), format!("{}m", limits.memory_mb));
         let script = if cmd.setup.trim().is_empty() {
             cmd.command.clone()
         } else {
@@ -637,9 +656,9 @@ impl EnvRunner {
             "--network",
             build::BUILD_NETWORK,
             "--cpus",
-            "4",
+            &cpus,
             "--memory",
-            "8g",
+            &mem,
             "--pids-limit",
             "4096",
             "-e",
@@ -658,7 +677,9 @@ impl EnvRunner {
         let secrets: Vec<String> = spec.env.vars.iter().map(|v| v.value.clone()).collect();
         let mut log = Log::new(Some(tx), &spec.id, stage).for_verify(Some(&spec.id)).masking(&secrets);
         log.line(&format!("$ {script}"));
+        let started = std::time::Instant::now();
         let res = tokio::time::timeout(TEST_TIMEOUT, build::run_logged(c, &mut log)).await;
+        self.add_usage(env_id, started.elapsed());
         let _ = tokio::fs::remove_dir_all(&copy).await;
         match res {
             Err(_) => {
@@ -762,6 +783,8 @@ mod tests {
                     compose_dir: String::new(),
                     auth_header: None,
                 }),
+                build: None,
+                release: vec![],
                 vars: vec![EnvValue {
                     name: "S".into(),
                     value: "FATAL boom".into(),
@@ -812,6 +835,7 @@ mod tests {
                 AgentMsg::VerifyIssue { issue, .. } => issues.push(issue),
                 AgentMsg::VerifyLog { line, .. } => logs.push(line),
                 AgentMsg::VerifyDone { error, kept, .. } => done = Some((error, kept)),
+                AgentMsg::BuildUsage { kind, secs, .. } => assert!(kind == "verify" && secs >= 1),
                 m => panic!("{m:?}"),
             }
         }

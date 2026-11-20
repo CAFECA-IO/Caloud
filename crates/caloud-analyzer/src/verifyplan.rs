@@ -15,8 +15,19 @@ pub struct VerifyCmd {
     pub command: String,
 }
 
+/// 發布前任務（FR-ENV-08，ADR 0021）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseTask {
+    pub service: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct VerifyPlan {
+    /// 發布前任務（驗證與部署都執行）
+    #[serde(default)]
+    pub release: Vec<ReleaseTask>,
     #[serde(default)]
     pub test: Option<VerifyCmd>,
     #[serde(default)]
@@ -39,6 +50,7 @@ struct FileCmd {
 
 #[derive(Debug, Deserialize)]
 struct VerifyFile {
+    release: Option<Vec<ReleaseTask>>,
     test: Option<FileCmd>,
     lint: Option<FileCmd>,
     smoke: Option<Vec<String>>,
@@ -178,9 +190,72 @@ pub(crate) fn plan(cx: &mut Ctx) -> VerifyPlan {
         vec![ev],
     );
     VerifyPlan {
+        release: file.release.unwrap_or_default(),
         test,
         lint,
         smoke,
         custom: true,
     }
+}
+
+/// 發布前任務（ADR 0021）：`verify.yml` 已指定時沿用；否則偵測帶 profiles 的 migrate／seed 服務與 Prisma migrations。
+/// 只保留 compose 中存在的服務。
+pub(crate) fn release(cx: &mut Ctx, plan: &mut VerifyPlan, doc: &serde_yaml::Value) {
+    let Some(services) = doc.get("services").and_then(serde_yaml::Value::as_mapping) else {
+        plan.release.clear();
+        return;
+    };
+    let names: Vec<String> = services.keys().filter_map(|k| k.as_str().map(str::to_string)).collect();
+    if plan.custom && !plan.release.is_empty() {
+        plan.release
+            .retain(|r| names.contains(&r.service) && r.command.as_deref().is_none_or(|c| !c.trim().is_empty()));
+        return;
+    }
+    let mut out = Vec::new();
+    for (k, v) in services {
+        let Some(name) = k.as_str() else { continue };
+        if v.get("profiles").is_none() {
+            continue;
+        }
+        let cmd = match v.get("command") {
+            Some(serde_yaml::Value::String(c)) => c.clone(),
+            Some(serde_yaml::Value::Sequence(l)) => l.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" "),
+            _ => String::new(),
+        };
+        let hay = format!("{} {}", name.to_ascii_lowercase(), cmd.to_ascii_lowercase());
+        if hay.contains("migrat") || hay.contains("seed") {
+            out.push(ReleaseTask {
+                service: name.to_string(),
+                command: None,
+            });
+        }
+    }
+    if out.is_empty() && cx.fs.is_dir("prisma/migrations") {
+        let app = services
+            .iter()
+            .find(|(_, v)| v.get("build").is_some() && v.get("profiles").is_none())
+            .and_then(|(k, _)| k.as_str());
+        if let Some(app) = app {
+            out.push(ReleaseTask {
+                service: app.to_string(),
+                command: Some("npx prisma migrate deploy".into()),
+            });
+        }
+    }
+    if !out.is_empty() {
+        let list: Vec<String> = out
+            .iter()
+            .map(|r| match &r.command {
+                Some(c) => format!("`{}`（{c}）", r.service),
+                None => format!("`{}`", r.service),
+            })
+            .collect();
+        cx.note(
+            "release",
+            Confidence::Medium,
+            format!("發布前任務：{}；驗證與部署時在啟動新版前執行，失敗則保留舊版。", list.join("、")),
+            vec![],
+        );
+    }
+    plan.release = out;
 }

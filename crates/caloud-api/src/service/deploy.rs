@@ -158,6 +158,7 @@ pub async fn deploy(s: &AppState, me: &CurrentUser, id: &str, input: DeployInput
                 false,
                 Some(&me.0.account),
                 &me.audit_detail(None).unwrap_or_default(),
+                None,
             )
             .await?;
             return Ok(json!({ "verification": v }));
@@ -216,13 +217,16 @@ pub(crate) async fn verify_after_push(s: &AppState, project: &str) {
     }
     let deployed = matches!(production(s, project).await, Ok(Some(_)));
     let unchanged = matches!(target(s, &p).await, Ok(t) if !t.pending_changes);
-    if let Err(e) = super::verify::start(s, &p, "push", deployed && unchanged, false, None, "via=github").await {
+    if let Err(e) = super::verify::start(s, &p, "push", deployed && unchanged, false, None, "via=github", None).await {
         tracing::warn!(%project, error = %e, "verification after push skipped");
     }
 }
 
 pub(crate) async fn start(s: &AppState, p: &Project) -> ApiResult<Environment> {
     let t = target(s, p).await?;
+    // ADR 0021：建置分鐘上限與建置資源
+    super::build::check_quota(s, &p.owner).await?;
+    let build = super::build::limits(s).await?;
     // ADR 0019：秘密變數（先讀版本，產生資料庫密碼不算變更）
     let vars_rev = super::vars::rev(s, &p.id).await?;
     let vars = super::vars::for_deploy(s, &p.id, "production", &t.compose).await?;
@@ -314,6 +318,16 @@ pub(crate) async fn start(s: &AppState, p: &Project) -> ApiResult<Environment> {
                     compose_dir: t.compose_dir,
                     auth_header,
                 }),
+                build: Some(build),
+                release: t
+                    .verify
+                    .release
+                    .iter()
+                    .map(|r| caloud_core::agent::ReleaseTask {
+                        service: r.service.clone(),
+                        command: r.command.clone(),
+                    })
+                    .collect(),
                 vars,
             },
         },

@@ -158,6 +158,8 @@ async fn probe(env: &EnvRunner) -> Result<(), String> {
         subnet_index: PROBE_INDEXES[0],
         public_service: "web".into(),
         source: None,
+        build: None,
+        release: vec![],
         vars: vec![],
     };
     let b = EnvSpec {

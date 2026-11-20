@@ -4,6 +4,7 @@
 //! - [`install`]：安裝與擁有者確認（FR-GH-01）
 //! - [`webhook`]：驗簽、去重、事件分派（FR-GH-02）
 pub mod app;
+pub mod checks;
 pub mod install;
 pub mod webhook;
 

@@ -161,6 +161,11 @@ async fn session(s: AppState, mut sock: WebSocket) {
                             tracing::warn!(error = %e, "verify log failed");
                         }
                     }
+                    Ok(AgentMsg::BuildUsage { kind, id, secs }) => {
+                        if let Err(e) = crate::service::build::record(&s, &node.id, &kind, &id, secs).await {
+                            tracing::warn!(error = %e, "build usage failed");
+                        }
+                    }
                     Ok(AgentMsg::VerifyDone { id, error, kept }) => {
                         if let Err(e) = crate::service::verify::on_done(&s, &node.id, &id, error, kept).await {
                             tracing::warn!(error = %e, "verify done failed");

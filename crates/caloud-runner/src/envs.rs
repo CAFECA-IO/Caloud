@@ -14,6 +14,8 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::mpsc::UnboundedSender;
 
+/// 發布前任務的逾時（ADR 0021）
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// 一次部署的逾時
 const DEPLOY_TIMEOUT: Duration = Duration::from_secs(600);
 /// 預設外部 DNS（ADR 0015）
@@ -35,6 +37,8 @@ pub struct EnvRunner {
     locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     /// 進行中的驗證：ID → 取消訊號
     pub(crate) runs: Arc<Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>>,
+    /// 建置與沙箱的累計秒數（ADR 0021）：環境 ID → 秒
+    usage: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl Default for EnvRunner {
@@ -87,7 +91,23 @@ impl EnvRunner {
             smoke_target: None,
             locks: Default::default(),
             runs: Default::default(),
+            usage: Default::default(),
         }
+    }
+
+    /// 記錄建置與沙箱的時間
+    pub(crate) fn add_usage(&self, env_id: &str, d: Duration) {
+        *self
+            .usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(env_id.to_string())
+            .or_default() += d.as_secs().max(1);
+    }
+
+    /// 取出並清除累計秒數
+    pub(crate) fn take_usage(&self, env_id: &str) -> u64 {
+        self.usage.lock().unwrap_or_else(|e| e.into_inner()).remove(env_id).unwrap_or(0)
     }
 
     pub(crate) fn builds_dir(&self, env_id: &str) -> PathBuf {
@@ -129,11 +149,24 @@ impl EnvRunner {
     }
 
     pub(crate) async fn compose_env(&self, env_id: &str, args: &[&str], timeout: Duration, vars: &[EnvValue]) -> anyhow::Result<String> {
+        self.compose_files(env_id, false, args, timeout, vars).await
+    }
+
+    /// `next`：使用 `compose.next.yml`／`caloud.override.next.yml`（發布前任務，ADR 0021）
+    fn files(&self, env_id: &str, next: bool) -> (String, String) {
+        let dir = self.dir.join(env_id);
+        let sfx = if next { ".next" } else { "" };
+        (
+            dir.join(format!("compose{sfx}.yml")).display().to_string(),
+            dir.join(format!("caloud.override{sfx}.yml")).display().to_string(),
+        )
+    }
+
+    async fn compose_files(&self, env_id: &str, next: bool, args: &[&str], timeout: Duration, vars: &[EnvValue]) -> anyhow::Result<String> {
         let dir = self.dir.join(env_id);
         let project = sandbox::project(env_id);
         let d = dir.display().to_string();
-        let compose_file = dir.join("compose.yml").display().to_string();
-        let override_file = dir.join("caloud.override.yml").display().to_string();
+        let (compose_file, override_file) = self.files(env_id, next);
         let mut full = vec![
             "compose",
             "-p",
@@ -191,16 +224,36 @@ impl EnvRunner {
                 Err((st, e)) => {
                     tracing::warn!(env = %env.id, stage = st, "build failed");
                     let _ = tokio::fs::remove_dir_all(self.builds_dir(&env.id)).await;
+                    self.send_usage(tx, "deploy", &env.id, &env.id);
                     return failed_at(&env.id, Some(st), build::mask(&short(&e.to_string()), &secrets));
                 }
             },
         };
-        if env.source.is_some() {
-            stage("start");
-        }
         // ADR 0019：用戶變數只注入從儲存庫建置的服務
         let names: Vec<String> = env.vars.iter().filter(|v| v.user).map(|v| v.name.clone()).collect();
         let inject: Vec<(String, Vec<String>)> = built.into_iter().map(|s| (s, names.clone())).collect();
+        // ADR 0021：發布前任務以新設定執行，成功才切換；失敗時舊版繼續執行
+        if env.source.is_some() && !env.release.is_empty() {
+            stage("release");
+            let mut log = Log::new(tx, &env.id, "release").masking(&secrets);
+            let res = async {
+                self.prepare(env, &compose, &inject, true).await?;
+                self.run_release(env, true, &mut log).await
+            }
+            .await;
+            // 成功後由 try_deploy 寫入正式檔；next 檔不再需要
+            let (c, o) = self.files(&env.id, true);
+            let _ = tokio::fs::remove_file(c).await;
+            let _ = tokio::fs::remove_file(o).await;
+            if let Err(e) = res {
+                self.send_usage(tx, "deploy", &env.id, &env.id);
+                return failed_at(&env.id, Some("release"), build::mask(&short(&e.to_string()), &secrets));
+            }
+        }
+        if env.source.is_some() {
+            stage("start");
+        }
+        self.send_usage(tx, "deploy", &env.id, &env.id);
         match self.try_deploy(env, &compose, &inject).await {
             Ok(services) => {
                 if env.source.is_some() {
@@ -250,7 +303,8 @@ impl EnvRunner {
         log.line("完成");
 
         stage("build");
-        let (mut jobs, compose) = build::plan(&env.compose, &repo, src, &env.id).map_err(|e| ("build", e))?;
+        let keep: Vec<String> = env.release.iter().map(|r| r.service.clone()).collect();
+        let (mut jobs, compose) = build::plan(&env.compose, &repo, src, &env.id, &keep).map_err(|e| ("build", e))?;
         let mut log = Log::new(tx, &env.id, "build").for_verify(verify).masking(&secrets);
         // ADR 0019：build args 的 `${NAME}` 以秘密變數內插
         let values: std::collections::HashMap<String, String> = env.vars.iter().map(|v| (v.name.clone(), v.value.clone())).collect();
@@ -267,6 +321,8 @@ impl EnvRunner {
             }
         }
         let built: Vec<String> = jobs.iter().map(|j| j.service.clone()).collect();
+        let limits = env.build.unwrap_or_default();
+        let started = std::time::Instant::now();
         let job = async {
             let resolv = work.join("resolv.conf");
             tokio::fs::write(&resolv, sandbox::resolv_conf(&self.dns)).await?;
@@ -286,7 +342,7 @@ impl EnvRunner {
                     (None, Some((d, f))) => (d.clone(), f.clone()),
                     (None, None) => anyhow::bail!("service `{}` 沒有 Dockerfile", j.service),
                 };
-                let args = build::build_command(j, &env.id, &self.buildkit_image, &resolv, &df_dir, &df_name, &out);
+                let args = build::build_command(limits, j, &env.id, &self.buildkit_image, &resolv, &df_dir, &df_name, &out);
                 let mut cmd = Command::new(&self.docker_bin);
                 cmd.args(&args);
                 build::run_logged(cmd, &mut log).await?;
@@ -299,6 +355,7 @@ impl EnvRunner {
             anyhow::Ok(())
         };
         let res = tokio::time::timeout(BUILD_TIMEOUT, job).await;
+        self.add_usage(&env.id, started.elapsed());
         // 逾時時 docker CLI 已被終止，建置容器要另外移除
         if res.is_err() {
             for j in &jobs {
@@ -384,6 +441,61 @@ impl EnvRunner {
         compose_yaml: &str,
         inject: &[(String, Vec<String>)],
     ) -> anyhow::Result<Vec<EnvService>> {
+        let services = self.prepare(env, compose_yaml, inject, false).await?;
+        self.compose_env(&env.id, &["up", "-d", "--wait", "--remove-orphans"], DEPLOY_TIMEOUT, &env.vars)
+            .await?;
+        Ok(services)
+    }
+
+    /// 送出建置用量（ADR 0021）
+    pub(crate) fn send_usage(&self, tx: Option<&UnboundedSender<AgentMsg>>, kind: &str, env_id: &str, id: &str) {
+        let secs = self.take_usage(env_id);
+        if let (Some(tx), true) = (tx, secs > 0) {
+            let _ = tx.send(AgentMsg::BuildUsage {
+                kind: kind.into(),
+                id: id.into(),
+                secs,
+            });
+        }
+    }
+
+    /// 發布前任務：`docker compose run --rm -T <service> [sh -c <command>]`，逾時 10 分鐘（ADR 0021）
+    pub(crate) async fn run_release(&self, env: &EnvSpec, next: bool, log: &mut Log<'_>) -> anyhow::Result<()> {
+        let dir = self.dir.join(&env.id);
+        let project = sandbox::project(&env.id);
+        let (c, o) = self.files(&env.id, next);
+        for t in &env.release {
+            log.line(&format!(
+                "▶ {}{}",
+                t.service,
+                t.command.as_deref().map(|c| format!("：{c}")).unwrap_or_default()
+            ));
+            let mut cmd = Command::new(&self.docker_bin);
+            cmd.args(["compose", "-p", &project, "--project-directory"])
+                .arg(&dir)
+                .args(["-f", &c, "-f", &o, "run", "--rm", "-T", &t.service]);
+            if let Some(command) = &t.command {
+                cmd.args(["sh", "-c", command]);
+            }
+            for v in &env.vars {
+                cmd.env(&v.name, &v.value);
+            }
+            tokio::time::timeout(RELEASE_TIMEOUT, build::run_logged(cmd, log))
+                .await
+                .map_err(|_| anyhow::anyhow!("發布前任務 `{}` 超過 10 分鐘，已中止。", t.service))?
+                .map_err(|e| anyhow::anyhow!("發布前任務 `{}` 失敗：{e}", t.service))?;
+        }
+        Ok(())
+    }
+
+    /// 檢查並寫入 compose、override、resolv.conf；`next` 時寫到 `*.next.yml`
+    async fn prepare(
+        &self,
+        env: &EnvSpec,
+        compose_yaml: &str,
+        inject: &[(String, Vec<String>)],
+        next: bool,
+    ) -> anyhow::Result<Vec<EnvService>> {
         // 控制面已檢查過；agent 再以同一份平臺政策檢查一次（docs/07）
         let compose = validate_with(compose_yaml, Policy::platform(0)).map_err(|e| anyhow::anyhow!("{e}"))?;
         if !compose.services.contains(&env.public_service) {
@@ -393,11 +505,10 @@ impl EnvRunner {
         let overlay = sandbox::env_override_with(&env.id, &compose, &net, Limits::default(), inject).map_err(|e| anyhow::anyhow!(e))?;
         let dir = self.dir.join(&env.id);
         tokio::fs::create_dir_all(&dir).await?;
-        tokio::fs::write(dir.join("compose.yml"), compose_yaml).await?;
-        tokio::fs::write(dir.join("caloud.override.yml"), overlay).await?;
+        let (c, o) = self.files(&env.id, next);
+        tokio::fs::write(&c, compose_yaml).await?;
+        tokio::fs::write(&o, overlay).await?;
         tokio::fs::write(dir.join("resolv.conf"), sandbox::resolv_conf(&self.dns)).await?;
-        self.compose_env(&env.id, &["up", "-d", "--wait", "--remove-orphans"], DEPLOY_TIMEOUT, &env.vars)
-            .await?;
         Ok(sandbox::service_ips(&compose, &net)
             .into_iter()
             .map(|(name, ip)| EnvService { name, ip: ip.to_string() })
@@ -494,6 +605,8 @@ mod tests {
             subnet_index: idx,
             public_service: "web".into(),
             source: None,
+            build: None,
+            release: vec![],
             vars: vec![],
         };
         let ok = "services:\n  web:\n    image: nginx:1.27\n  db:\n    image: postgres:16\n";
@@ -595,6 +708,8 @@ mod tests {
             compose: "services:\n  web:\n    build: {context: ./app, args: {A: '${NEXT_PUBLIC_X}', B: '${NOPE}'}}\n  db:\n    image: postgres:16\n    environment: {POSTGRES_PASSWORD: '${CALOUD_DB_PASSWORD}'}\n".into(),
             subnet_index: 5,
             public_service: "web".into(),
+            build: None,
+            release: vec![],
             vars: vec![
                 EnvValue {
                     name: "SESSION_SECRET".into(),
@@ -625,13 +740,19 @@ mod tests {
         assert!(matches!(&res, AgentMsg::EnvStatus { status, .. } if status == "running"), "{res:?}");
         let mut stages = Vec::new();
         let mut logs = Vec::new();
+        let mut usage = 0;
         while let Ok(m) = rx.try_recv() {
             match m {
                 AgentMsg::EnvStatus { stage: Some(s), .. } => stages.push(s),
                 AgentMsg::EnvLog { stage, line, .. } => logs.push(format!("{stage}: {line}")),
+                AgentMsg::BuildUsage { kind, id, secs } => {
+                    assert_eq!((kind.as_str(), id.as_str()), ("deploy", "k2m9xq7a"));
+                    usage += secs;
+                }
                 m => panic!("{m:?}"),
             }
         }
+        assert!(usage >= 1, "ADR 0021：回報建置秒數");
         assert_eq!(stages, ["fetch", "build", "start"]);
         assert!(logs.iter().any(|l| l == "build: #5 RUN make"), "{logs:?}");
         let compose = std::fs::read_to_string(base.join("state/envs/k2m9xq7a/compose.yml")).unwrap();
@@ -686,6 +807,99 @@ mod tests {
             }
             m => panic!("{m:?}"),
         }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ADR 0021：發布前任務以 next 設定執行，成功才 up；失敗時不動到正在執行的版本
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn release_runs_before_switch() {
+        use caloud_core::agent::ReleaseTask;
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("caloud-envs-rel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("Dockerfile"), "FROM alpine\n").unwrap();
+        let git = base.join("git.sh");
+        std::fs::write(
+            &git,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in *' checkout '*) cp -R '{repo}/.' \"$2\";; *' rev-parse '*) echo 98b705d0123456789abcdef0123456789abcdef0;; esac\nexit 0\n",
+                repo = repo.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let docker = fake_docker(
+            &base,
+            &format!(
+                "case \"$*\" in *' run --rm -T migrate'*) echo \"migrating S=$S\"; [ -f '{f}' ] && {{ echo 'migration failed' >&2; exit 1; }};; esac",
+                f = base.join("REL_FAIL").display()
+            ),
+        );
+        let mut r = EnvRunner::new(docker, base.join("state"), vec!["1.1.1.1".into()]);
+        r.git_bin = git.display().to_string();
+        let spec = EnvSpec {
+            id: "r1r2r3r4".into(),
+            kind: "production".into(),
+            compose: "services:\n  web:\n    build: .\n  migrate:\n    build: .\n    profiles: [tools]\n  debug:\n    image: busybox\n    profiles: [debug]\n".into(),
+            subnet_index: 9,
+            public_service: "web".into(),
+            source: Some(EnvSource {
+                repo_url: "https://github.com/a/b".into(),
+                commit: "98b705d0123456789abcdef0123456789abcdef0".into(),
+                git_ref: None,
+                compose_dir: String::new(),
+                auth_header: None,
+            }),
+            build: Some(caloud_core::agent::BuildLimits { cpus: 2, memory_mb: 3072 }),
+            release: vec![ReleaseTask { service: "migrate".into(), command: None }],
+            vars: vec![EnvValue {
+                name: "S".into(),
+                value: "secret-value".into(),
+                user: true,
+            }],
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let res = r.deploy_with(&spec, Some(&tx)).await;
+        assert!(matches!(&res, AgentMsg::EnvStatus { status, .. } if status == "running"), "{res:?}");
+        let log = std::fs::read_to_string(base.join("docker.log")).unwrap();
+        let run_at = log.find("run --rm -T migrate").expect("release run");
+        let up_at = log.find(" up -d --wait").expect("up");
+        assert!(run_at < up_at, "先執行任務再切換：{log}");
+        assert!(log.contains("compose.next.yml") && log.contains("--cpus 2 --memory 3072m"), "{log}");
+        let compose = std::fs::read_to_string(base.join("state/envs/r1r2r3r4/compose.yml")).unwrap();
+        assert!(
+            compose.contains("migrate:") && !compose.contains("debug:"),
+            "release 服務保留、其他 profiles 移除：{compose}"
+        );
+        assert!(!base.join("state/envs/r1r2r3r4/compose.next.yml").exists(), "next 檔已換成正式檔");
+        let mut stages = vec![];
+        let mut lines = vec![];
+        while let Ok(m) = rx.try_recv() {
+            match m {
+                AgentMsg::EnvStatus { stage: Some(s), .. } => stages.push(s),
+                AgentMsg::EnvLog { line, .. } => lines.push(line),
+                _ => {}
+            }
+        }
+        assert_eq!(stages, ["fetch", "build", "release", "start"]);
+        assert!(lines.iter().any(|l| l == "migrating S=***"), "{lines:?}");
+
+        // 失敗：不 up、回報 release、正式檔不變
+        std::fs::write(base.join("REL_FAIL"), "").unwrap();
+        std::fs::write(base.join("docker.log"), "").unwrap();
+        match r.deploy_with(&spec, None).await {
+            AgentMsg::EnvStatus { status, stage, error, .. } => {
+                assert_eq!((status.as_str(), stage.as_deref()), ("failed", Some("release")));
+                assert!(error.unwrap().contains("migration failed"));
+            }
+            m => panic!("{m:?}"),
+        }
+        let log = std::fs::read_to_string(base.join("docker.log")).unwrap();
+        assert!(!log.contains(" up -d"), "失敗時不切換：{log}");
+        assert!(!base.join("state/envs/r1r2r3r4/compose.next.yml").exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -40,6 +40,8 @@ type Tamper = Box<dyn FnOnce(&mut SignInMessage, &mut u64) + Send>;
 struct MockState {
     base: Arc<Mutex<String>>,
     txt: Arc<Mutex<HashMap<String, String>>>,
+    /// 替身 GitHub 收到的 Checks 與留言呼叫：(方法, 路徑, 內容)
+    gh: Arc<Mutex<Vec<(String, String, Value)>>>,
 }
 
 async fn spawn_mock() -> (String, MockState) {
@@ -135,6 +137,35 @@ async fn spawn_mock() -> (String, MockState) {
                     { "full_name": "CAFECA-IO/docs", "private": false, "default_branch": "trunk" } ] }))
             }),
         )
+        // Checks 與 PR 留言（ADR 0021）
+        .route(
+            "/gh/repos/{o}/{r}/check-runs",
+            post(|State(s): State<MockState>, uri: axum::http::Uri, Json(b): Json<Value>| async move {
+                s.gh.lock().unwrap().push(("POST".into(), uri.path().into(), b));
+                Json(json!({ "id": 7001 }))
+            }),
+        )
+        .route(
+            "/gh/repos/{o}/{r}/check-runs/{id}",
+            axum::routing::patch(|State(s): State<MockState>, uri: axum::http::Uri, Json(b): Json<Value>| async move {
+                s.gh.lock().unwrap().push(("PATCH".into(), uri.path().into(), b));
+                Json(json!({ "id": 7001 }))
+            }),
+        )
+        .route(
+            "/gh/repos/{o}/{r}/issues/{n}/comments",
+            post(|State(s): State<MockState>, uri: axum::http::Uri, Json(b): Json<Value>| async move {
+                s.gh.lock().unwrap().push(("POST".into(), uri.path().into(), b));
+                Json(json!({ "id": 9001 }))
+            }),
+        )
+        .route(
+            "/gh/repos/{o}/{r}/issues/comments/{id}",
+            axum::routing::patch(|State(s): State<MockState>, uri: axum::http::Uri, Json(b): Json<Value>| async move {
+                s.gh.lock().unwrap().push(("PATCH".into(), uri.path().into(), b));
+                Json(json!({ "id": 9001 }))
+            }),
+        )
         // TXT 寫入替身 DoH（同名多筆以換行分隔）
         .route(
             "/cf/zones/{zone}/dns_records",
@@ -219,11 +250,12 @@ impl Env {
             &docker,
             format!(
                 "#!/bin/sh\necho \"$*\" >> '{log}'\nif [ -f '{fail}' ]; then echo 'image pull failed: not found' >&2; exit 1; fi\n\
-                 case \"$*\" in *' ps '*) echo '{{\"Service\":\"web\",\"Name\":\"caloud-x-web-1\",\"State\":\"running\",\"Health\":\"\"}}';; \
+                 case \"$*\" in *' run --rm -T '*) echo \"RUNENV S=${{SESSION_SECRET:-}}\" >> '{log}'; [ -f '{rfail}' ] && {{ echo 'migration failed' >&2; exit 1; }};; *' ps '*) echo '{{\"Service\":\"web\",\"Name\":\"caloud-x-web-1\",\"State\":\"running\",\"Health\":\"\"}}';; \
                  *' logs '*) echo 'web-1 | ready';; *caloud-test-*) [ -f '{slow}' ] && sleep 5;; *' up '*) echo \"UPENV P=$3 S=${{SESSION_SECRET:-}} D=${{CALOUD_DB_PASSWORD:-}}\" >> '{log}';; esac\nexit 0\n",
                 log = dir.join("docker.log").display(),
                 fail = dir.join("docker.fail").display(),
-                slow = dir.join("docker.slow").display()
+                slow = dir.join("docker.slow").display(),
+                rfail = dir.join("release.fail").display()
             ),
         )
         .unwrap();
@@ -239,9 +271,10 @@ impl Env {
             &git,
             format!(
                 "#!/bin/sh\necho \"$* [auth=${{GIT_CONFIG_VALUE_0:-none}}]\" >> '{log}'\nsrc=$2\ncase \"$*\" in *missing*) echo 'repository not found' >&2; exit 128;; *' checkout '*) cp -R '{repo}/.' \"$src\";; \
-                 *' rev-parse '*) echo 98b705d0123456789abcdef0123456789abcdef0;; *' ls-remote '*) printf 'ref: refs/heads/main\\tHEAD\\n';; esac\nexit 0\n",
+                 *' rev-parse '*) cat '{head}' 2>/dev/null || echo 98b705d0123456789abcdef0123456789abcdef0;; *' ls-remote '*) printf 'ref: refs/heads/main\\tHEAD\\n';; esac\nexit 0\n",
                 log = dir.join("git.log").display(),
-                repo = dir.join("gitrepo").display()
+                repo = dir.join("gitrepo").display(),
+                head = dir.join("git.head").display()
             ),
         )
         .unwrap();
@@ -3485,4 +3518,313 @@ async fn public_console_guard() {
     let res = env.http.get(env.url("/api/me")).header("cookie", &admin).send().await.unwrap();
     assert!(res.headers().get("content-security-policy").is_none());
     assert_eq!(res.headers()["x-content-type-options"], "nosniff");
+}
+
+// ───────────────────────── Checks、PR 驗證、建置配額、發布前任務（ADR 0021） ─────────────────────────
+
+async fn wait_gh(env: &Env, n: usize) -> Vec<(String, String, Value)> {
+    for _ in 0..400 {
+        let v = env.mock.gh.lock().unwrap().clone();
+        if v.len() >= n {
+            return v;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("GitHub calls: {:?}", env.mock.gh.lock().unwrap());
+}
+
+// FR-GH-03、FR-CI-06、FR-CI-07、FR-ENV-08
+#[tokio::test]
+#[allow(clippy::async_yields_async)]
+async fn checks_pr_quota_and_release_tasks() {
+    use caloud_runner::client::{run_once, Options};
+    use caloud_runner::envs::EnvRunner;
+    use caloud_runner::selfcheck::SelfCheck;
+    let env = Env::new().await;
+    let (admin, member) = admin_and_member(&env).await;
+    env.call(
+        "POST",
+        "/api/admin/domain-pools",
+        &admin,
+        Some(json!({ "root": "caloud.tw", "purposes": ["production", "staging", "verify"] })),
+    )
+    .await;
+    // GitHub App 與安裝
+    let wh = "whsec-0123456789abcdef";
+    let body = json!({ "app_id": 5826601, "client_id": "Iv23liTest", "client_secret": "cs-secret",
+        "private_key": include_str!("fixtures/github-app-test.pem"), "webhook_secret": wh });
+    assert_eq!(env.call("PUT", "/api/admin/github-app", &admin, Some(body)).await.0, StatusCode::OK);
+    let (_, v) = env.call("GET", "/api/github/install", &member, None).await;
+    let state = v["url"].as_str().unwrap().split("state=").nth(1).unwrap().to_string();
+    let (st, inst) = env
+        .call(
+            "POST",
+            "/api/github/complete",
+            &member,
+            Some(json!({ "code": "good-code", "installation_id": 42, "state": state })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{inst}");
+
+    // Prisma 且有 migrations → 發布前任務
+    set_repo(
+        &env,
+        &[
+            (
+                "package.json",
+                "{\n  \"scripts\": { \"build\": \"next build\", \"start\": \"next start\" },\n  \"dependencies\": { \"next\": \"15\", \"@prisma/client\": \"6\" }\n}\n",
+            ),
+            ("package-lock.json", "{}"),
+            ("prisma/schema.prisma", "datasource db {\n  provider = \"postgresql\"\n  url = env(\"PG_URL\")\n}\n"),
+            ("prisma/migrations/0001_init/migration.sql", "CREATE TABLE a (id int);\n"),
+            ("src/a.ts", "const s = process.env.SESSION_SECRET;\n"),
+        ],
+    );
+    let (st, p) = env
+        .call(
+            "POST",
+            "/api/projects",
+            &member,
+            Some(json!({ "installation_id": 42, "repo_full_name": "CAFECA-IO/secret-app" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{p}");
+    let id = p["id"].as_str().unwrap().to_string();
+    let v = wait_project(&env, &member, &id).await;
+    let release = &v["analysis"]["result"]["verify"]["release"];
+    assert_eq!(release[0]["command"], "npx prisma migrate deploy", "{release}");
+    let lows: Vec<usize> = v["analysis"]["result"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f["confidence"] == "low")
+        .map(|(i, _)| i)
+        .collect();
+    let (st, e) = env
+        .call(
+            "PUT",
+            &format!("/api/projects/{id}/analysis"),
+            &member,
+            Some(json!({ "public_service": "web", "acknowledged": lows })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    let (st, l) = env
+        .call(
+            "PUT",
+            &format!("/api/projects/{id}/vars"),
+            &member,
+            Some(json!({ "set": { "SESSION_SECRET": "supersecret-pr-guard" } })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{l}");
+
+    let (_, jt) = env.call("POST", "/api/admin/nodes/join-tokens", &admin, Some(json!({}))).await;
+    let mut runner = EnvRunner::new(
+        env.dir.join("fake-docker.sh").display().to_string(),
+        env.dir.join("runner-c"),
+        vec!["1.1.1.1".into()],
+    );
+    runner.git_bin = env.dir.join("fake-git.sh").display().to_string();
+    runner.smoke_target = Some(smoke_server().await);
+    let opts = Options {
+        server: env.base.clone(),
+        join_token: Some(jt["token"].as_str().unwrap().to_string()),
+        name: "runner-c".into(),
+        state_dir: env.dir.join("runner-c"),
+        envs: runner,
+        check: SelfCheck {
+            gvisor: true,
+            isolation: true,
+            buildkit: true,
+            reason: None,
+        },
+    };
+    let agent = tokio::spawn(async move { run_once(&opts).await });
+    wait_node(&env, &admin, "runner-c", "active").await;
+
+    // 1. 專案分支驗證 → 建立並完成 Check；驗證時執行發布前任務（含用戶變數）
+    let verify = format!("/api/projects/{id}/verify");
+    let (st, v1) = env.call("POST", &verify, &member, None).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v1}");
+    let vid1 = v1["id"].as_str().unwrap().to_string();
+    let d1 = wait_verification(&env, &member, &vid1).await;
+    assert_eq!(d1["verification"]["status"], "passed", "{d1}");
+    let calls = wait_gh(&env, 2).await;
+    assert_eq!(calls[0].0, "POST");
+    assert_eq!(calls[0].1, "/gh/repos/CAFECA-IO/secret-app/check-runs");
+    assert_eq!(
+        (
+            calls[0].2["name"].as_str(),
+            calls[0].2["status"].as_str(),
+            calls[0].2["external_id"].as_str()
+        ),
+        (Some("Caloud 驗證"), Some("in_progress"), Some(vid1.as_str()))
+    );
+    assert!(calls[0].2["details_url"]
+        .as_str()
+        .unwrap()
+        .ends_with(&format!("/verifications/{vid1}")));
+    assert_eq!(
+        (calls[1].0.as_str(), calls[1].1.as_str()),
+        ("PATCH", "/gh/repos/CAFECA-IO/secret-app/check-runs/7001")
+    );
+    assert_eq!(calls[1].2["conclusion"], "success", "{:?}", calls[1]);
+    let log = env.docker_log();
+    assert!(
+        log.contains("run --rm -T web sh -c npx prisma migrate deploy") && log.contains("RUNENV S=supersecret-pr-guard"),
+        "{log}"
+    );
+
+    // 2. 部署：先以 next 設定執行發布前任務，成功才 up
+    let deploy = format!("/api/projects/{id}/deploy");
+    let (st, d) = env.call("POST", &deploy, &member, None).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    wait_deploy(&env, &member, &id, |d| d["stage"] == "done").await;
+    let log = env.docker_log();
+    let lines: Vec<&str> = log.lines().collect();
+    let run = lines
+        .iter()
+        .rposition(|l| l.contains("compose.next.yml") && l.contains(" run --rm -T web"))
+        .expect("release with next files");
+    let up = lines.iter().rposition(|l| l.contains(" up ")).unwrap();
+    assert!(run < up, "{log}");
+    // 發布前任務失敗 → 回報 release 階段失敗，不 up，舊版繼續執行
+    std::fs::write(env.dir.join("release.fail"), "").unwrap();
+    let ups = env.docker_log().lines().filter(|l| l.contains(" up ")).count();
+    let (st, _) = env.call("POST", &deploy, &member, None).await;
+    assert_eq!(st, StatusCode::ACCEPTED);
+    let d = wait_deploy(&env, &member, &id, |d| {
+        d["stage"] == "release" && d["error"].is_string() && d["in_progress"] == false
+    })
+    .await;
+    assert_eq!(d["status"], "running", "舊版繼續執行：{d}");
+    assert!(d["error"].as_str().unwrap().contains("發布前任務"), "{d}");
+    assert_eq!(env.docker_log().lines().filter(|l| l.contains(" up ")).count(), ups);
+    let prod: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM environments WHERE project = ? AND kind = 'production' AND status = 'running'")
+            .bind(&id)
+            .fetch_one(&env.db)
+            .await
+            .unwrap();
+    assert_eq!(prod, 1, "舊版保留");
+    std::fs::remove_file(env.dir.join("release.fail")).unwrap();
+
+    // 3. PR webhook：base 為專案分支 → PR 驗證；不注入用戶變數、不部署；留言只新增一次
+    let deploys: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deploy_logs")
+        .fetch_one(&env.db)
+        .await
+        .unwrap();
+    let before = env.docker_log().len();
+    let pr = |action: &str, sha: &str, base: &str| {
+        json!({ "action": action, "number": 5, "installation": { "id": 42 },
+            "repository": { "full_name": "CAFECA-IO/secret-app", "default_branch": "main" },
+            "pull_request": { "number": 5, "head": { "sha": sha, "ref": "feature" }, "base": { "ref": base } } })
+    };
+    let sha1 = "1".repeat(40);
+    // 其他 base 不觸發
+    assert_eq!(
+        env.webhook("pull_request", "p-0", &pr("opened", &sha1, "dev"), wh).await,
+        StatusCode::OK
+    );
+    std::fs::write(env.dir.join("git.head"), &sha1).unwrap();
+    assert_eq!(
+        env.webhook("pull_request", "p-1", &pr("opened", &sha1, "main"), wh).await,
+        StatusCode::OK
+    );
+    let pr_run = |n: usize| {
+        let env = &env;
+        let member = member.clone();
+        let id = id.clone();
+        async move {
+            for _ in 0..400 {
+                let (_, l) = env.call("GET", &format!("/api/projects/{id}/verifications"), &member, None).await;
+                let runs: Vec<Value> = l.as_array().unwrap().iter().filter(|r| r["trigger"] == "pr").cloned().collect();
+                if runs.len() >= n {
+                    return runs[0].clone();
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            panic!("no PR verification");
+        }
+    };
+    let r = pr_run(1).await;
+    assert_eq!(r["branch"], "pr/5");
+    assert_eq!(r["pr_number"], 5);
+    assert_eq!(r["commit"], sha1.as_str());
+    assert_eq!(r["deploy_after"], false);
+    let dr = wait_verification(&env, &member, r["id"].as_str().unwrap()).await;
+    assert_eq!(dr["verification"]["status"], "passed", "{dr}");
+    let calls = wait_gh(&env, 5).await;
+    let comment = calls.iter().find(|c| c.1.ends_with("/issues/5/comments")).expect("PR comment");
+    assert_eq!(comment.0, "POST");
+    assert!(
+        comment.2["body"].as_str().unwrap().contains(r["id"].as_str().unwrap()),
+        "{:?}",
+        comment.2
+    );
+    let pr_log = env.docker_log()[before..].to_string();
+    assert!(pr_log.contains("RUNENV S=\n"), "PR 驗證也執行發布前任務：{pr_log}");
+    assert!(!pr_log.contains("supersecret-pr-guard"), "PR 驗證不注入用戶變數：{pr_log}");
+    // 新 commit：更新同一則留言
+    let sha2 = "2".repeat(40);
+    std::fs::write(env.dir.join("git.head"), &sha2).unwrap();
+    assert_eq!(
+        env.webhook("pull_request", "p-2", &pr("synchronize", &sha2, "main"), wh).await,
+        StatusCode::OK
+    );
+    let r2 = pr_run(2).await;
+    assert_eq!(r2["commit"], sha2.as_str());
+    wait_verification(&env, &member, r2["id"].as_str().unwrap()).await;
+    let calls = wait_gh(&env, 8).await;
+    let comments: Vec<_> = calls.iter().filter(|c| c.1.contains("/issues/")).collect();
+    assert_eq!(comments.iter().filter(|c| c.0 == "POST").count(), 1, "{comments:?}");
+    assert!(comments.iter().any(|c| c.0 == "PATCH" && c.1.ends_with("/issues/comments/9001")));
+    let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deploy_logs")
+        .fetch_one(&env.db)
+        .await
+        .unwrap();
+    assert_eq!(after, deploys, "PR 驗證不部署");
+
+    // 4. 建置配額：member 不能改；達上限 → verify、deploy 回 409
+    let settings = json!({ "cpus": 2, "memory_mb": 4096, "minutes_monthly": 1 });
+    assert_eq!(
+        env.call("PUT", "/api/admin/build-settings", &member, Some(settings.clone()))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let (st, _) = env
+        .call(
+            "PUT",
+            "/api/admin/build-settings",
+            &admin,
+            Some(json!({ "cpus": 99, "memory_mb": 4096, "minutes_monthly": 1 })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, b) = env.call("PUT", "/api/admin/build-settings", &admin, Some(settings)).await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    let owner: String = sqlx::query_scalar("SELECT owner FROM projects WHERE id = ?")
+        .bind(&id)
+        .fetch_one(&env.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO build_usage (account, project, kind, ref_id, secs, at) VALUES (?, ?, 'verify', 'x', 90, strftime('%s','now'))",
+    )
+    .bind(&owner)
+    .bind(&id)
+    .execute(&env.db)
+    .await
+    .unwrap();
+    let (_, pv) = env.call("GET", &format!("/api/projects/{id}"), &member, None).await;
+    assert_eq!(pv["build_usage"]["limit"], 1);
+    assert!(pv["build_usage"]["minutes"].as_i64().unwrap() >= 2, "{}", pv["build_usage"]);
+    let (_, b) = env.call("GET", "/api/admin/build-settings", &admin, None).await;
+    assert!(b["usage"].as_array().unwrap().iter().any(|u| u["account"] == owner.as_str()), "{b}");
+    assert_eq!(env.call("POST", &verify, &member, None).await.0, StatusCode::CONFLICT);
+    assert_eq!(env.call("POST", &deploy, &member, None).await.0, StatusCode::CONFLICT);
+    agent.abort();
 }

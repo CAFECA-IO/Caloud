@@ -627,7 +627,7 @@ async function renderProject(id) {
 }
 
 /** FR-ENV-12（ADR 0018）：部署卡片；部署中每 3 秒只更新這張卡片 */
-const DEPLOY_STAGES = [["fetch", "取得原始碼"], ["build", "建置"], ["start", "啟動"], ["health", "健康檢查"]];
+const DEPLOY_STAGES = [["fetch", "取得原始碼"], ["build", "建置"], ["release", "發布前任務"], ["start", "啟動"], ["health", "健康檢查"]];
 let deployTimer = null;
 function drawDeploy(id, data) {
   const box = $("#pj-deploy"); if (!box) return;
@@ -740,7 +740,8 @@ async function pollDeploy(id) {
 
 /** M6（ADR 0020）：驗證卡片；執行中每 3 秒更新 */
 const VERIFY_STAGES = [["fetch", "取得"], ["analyze", "解析"], ["build", "建置"], ["static", "靜態檢查"], ["start", "啟動"], ["test", "測試"], ["smoke", "煙霧測試"], ["logs", "日誌"], ["report", "彙整"], ["destroy", "銷毀"]];
-const TRIGGER_LABEL = { manual: "手動", push: "push", deploy: "部署前" };
+const TRIGGER_LABEL = { manual: "手動", push: "push", deploy: "部署前", pr: "PR" };
+const triggerLabel = (v) => (v.trigger === "pr" && v.pr_number ? `PR #${v.pr_number}` : TRIGGER_LABEL[v.trigger] || v.trigger);
 let verifyTimer = null;
 function stageBadges(stages) {
   const cls = { passed: "c-badge--success", failed: "c-badge--danger", running: "c-badge--accent c-badge--pulse", skipped: "", pending: "" };
@@ -762,12 +763,15 @@ function drawVerify(id, data) {
       ${running ? `<button class="c-btn c-btn--sm" id="pj-verify-cancel">${icon("stop")}<span>取消</span></button>`
         : `<label class="c-check"><input type="checkbox" id="pj-verify-keep"><span class="u-small">失敗時保留環境 30 分鐘</span></label><button class="c-btn c-btn--sm" id="pj-verify-btn">${icon("play")}<span>驗證</span></button>`}</div>
     <div class="c-card__body l-stack">
-      ${v ? `<p class="u-small">版本 <span class="u-mono">${esc(v.commit.slice(0, 7))}</span>（${esc(v.branch)}）· ${esc(TRIGGER_LABEL[v.trigger] || v.trigger)} · ${relTime(v.created_at)}${v.deploy_after ? " · 通過後自動部署" : ""}</p>
+      ${v ? `<p class="u-small">版本 <span class="u-mono">${esc(v.commit.slice(0, 7))}</span>（${esc(v.branch)}）· ${esc(triggerLabel(v))} · ${relTime(v.created_at)}${v.deploy_after ? " · 通過後自動部署" : ""}</p>
         ${stageBadges(v.stages)}
         <div class="l-row">${countBadges(v.counts)}<span class="l-spacer"></span><a class="c-btn c-btn--sm" href="#projects/${esc(id)}/verifications/${esc(v.id)}">${icon("search")}<span>查看報告</span></a></div>
         ${v.error ? `<div class="c-banner ${v.status === "canceled" ? "" : "c-banner--danger"}">${icon("info")}<div class="c-banner__body"><span class="u-small">${esc(v.error)}</span></div></div>` : ""}`
         : `<p class="u-small u-muted">在隔離的驗證環境中建置、檢查（秘密外洩、相依套件漏洞、lint）、執行專案測試與煙霧測試，結束後銷毀。有 Blocker 或 High 問題即未通過；通過的版本才能部署。</p>`}
+      ${data.build_usage ? `<p class="u-small u-muted">本月建置 ${data.build_usage.minutes} 分鐘${data.build_usage.limit ? `／上限 ${data.build_usage.limit} 分鐘` : ""}</p>` : ""}
+      <div id="pj-verify-runs"></div>
       <span class="c-field__error" id="pj-verify-err" role="alert"></span></div></section>`;
+  if (v) drawRuns(id);
   $("#pj-verify-btn", box)?.addEventListener("click", async (e) => {
     showMsg($("#pj-verify-err"), null);
     try { await busy(e.currentTarget, api(`/api/projects/${encodeURIComponent(id)}/verify`, { method: "POST", body: { keep_on_failure: $("#pj-verify-keep").checked } })); toast("已開始驗證"); pollDeploy(id); }
@@ -778,6 +782,18 @@ function drawVerify(id, data) {
     catch (err) { toast(err.message, "danger"); }
   });
   if (running) verifyTimer = setTimeout(() => pollDeploy(id), 3000);
+}
+
+/** 最近的驗證執行（含 PR，ADR 0021） */
+async function drawRuns(id) {
+  let runs;
+  try { runs = await api(`/api/projects/${encodeURIComponent(id)}/verifications`); } catch { return; }
+  const box = $("#pj-verify-runs"); if (!box || runs.length < 2) return;
+  box.innerHTML = `<details><summary class="u-small">最近 ${Math.min(runs.length, 10)} 次執行</summary><div class="c-table-wrap"><table class="c-table">
+    <thead><tr><th>版本</th><th>來源</th><th>狀態</th><th>問題</th><th>時間</th></tr></thead><tbody>${runs.slice(0, 10).map((r) => `<tr>
+      <td><a class="u-mono" href="#projects/${esc(id)}/verifications/${esc(r.id)}">${esc(r.commit.slice(0, 7))}</a><div class="c-table__secondary">${esc(r.branch)}</div></td>
+      <td class="u-small">${esc(triggerLabel(r))}</td><td>${statusPill("verify", r.status)}</td>
+      <td class="u-small u-nowrap">${countBadges(r.counts)}</td><td class="u-small u-nowrap">${relTime(r.created_at)}</td></tr>`).join("")}</tbody></table></div></details>`;
 }
 
 /** 驗證報告頁（FR-RPT-01～03） */
@@ -791,7 +807,7 @@ async function renderReport(pid, vid) {
   const v = d.verification, p = project.project;
   document.title = `驗證報告 · ${p.name} · Caloud`;
   const base = `/api/verifications/${encodeURIComponent(vid)}/report`;
-  $("#page").innerHTML = pageHeader(`驗證報告：${p.name}`, `${v.commit.slice(0, 7)}（${v.branch}）· ${TRIGGER_LABEL[v.trigger] || v.trigger} · ${new Date(v.created_at * 1000).toLocaleString("zh-TW", { hour12: false })}`,
+  $("#page").innerHTML = pageHeader(`驗證報告：${p.name}`, `${v.commit.slice(0, 7)}（${v.branch}）· ${triggerLabel(v)} · ${new Date(v.created_at * 1000).toLocaleString("zh-TW", { hour12: false })}`,
     `<a class="c-btn" href="#projects/${esc(pid)}">回到專案</a><a class="c-btn" href="${base}?format=md" download>${icon("upload")}<span>匯出 Markdown</span></a><a class="c-btn" href="${base}?format=json" download>${icon("upload")}<span>匯出 JSON</span></a>`) +
     `<section class="c-card"><div class="c-card__header"><h2 class="c-card__title">摘要</h2>${statusPill("verify", v.status)}</div><div class="c-card__body l-stack">
        ${stageBadges(v.stages)}<div class="l-row">${countBadges(v.counts)}</div>
@@ -977,8 +993,10 @@ async function renderNodes() {
     `<section class="c-card"><div class="c-card__body c-card__body--flush"><div class="c-table-wrap"><table class="c-table">
       <thead><tr><th>節點</th><th>狀態</th><th>自我檢查</th><th>已配置／可配置</th><th>最後回報</th><th><span class="u-sr-only">操作</span></th></tr></thead>
       <tbody id="nodes">${skeletonRows(6)}</tbody></table></div></div></section>
-    <p class="c-msg c-msg--danger" id="nodes-msg" role="alert"></p>`;
+    <p class="c-msg c-msg--danger" id="nodes-msg" role="alert"></p>
+    <section class="c-card"><div class="c-card__header"><h2 class="c-card__title">建置資源</h2></div><div class="c-card__body l-stack" id="build-settings"><span class="c-skeleton"></span></div></section>`;
   $("#new-node").addEventListener("click", openJoin);
+  drawBuildSettings();
   let nodes;
   try { nodes = await api("/api/admin/nodes"); showMsg($("#nodes-msg"), null); }
   catch (err) { return showMsg($("#nodes-msg"), err); }
@@ -1071,6 +1089,27 @@ function openPool(p) {
   });
 }
 
+/** 建置資源與本月建置分鐘（FR-CI-06，ADR 0021） */
+async function drawBuildSettings() {
+  const box = $("#build-settings"); if (!box) return;
+  let b;
+  try { b = await api("/api/admin/build-settings"); } catch (err) { return showMsg(box, err); }
+  box.innerHTML = `<p class="u-small u-muted">用在建置、測試、lint 與漏洞掃描沙箱；執行期的資源上限不變。每月建置分鐘依專案擁有者計算，自 UTC 月初起算，0 表示不限。</p>
+    <div class="l-grid">
+      <label class="c-field"><span class="c-field__label">CPU（核）</span><input class="c-input u-mono" id="bs-cpus" type="number" min="1" max="16" value="${b.cpus}"></label>
+      <label class="c-field"><span class="c-field__label">記憶體（MB）</span><input class="c-input u-mono" id="bs-mem" type="number" min="1024" max="32768" step="512" value="${b.memory_mb}"></label>
+      <label class="c-field"><span class="c-field__label">每月建置分鐘（每位用戶）</span><input class="c-input u-mono" id="bs-min" type="number" min="0" value="${b.minutes_monthly}"></label>
+    </div>
+    <span class="c-field__error" id="bs-err" role="alert"></span>
+    <div><button class="c-btn c-btn--primary" id="bs-save">${icon("check")}<span>儲存</span></button></div>
+    <div class="c-table-wrap"><table class="c-table"><thead><tr><th>用戶</th><th>本月建置分鐘</th></tr></thead><tbody>${b.usage.map((u) => `<tr><td><div class="c-table__primary">${esc(u.handle || "")}</div><div class="c-table__secondary u-mono">${esc(u.account)}</div></td><td class="u-mono">${u.minutes}</td></tr>`).join("") || `<tr><td colspan="2" class="u-small u-muted">本月還沒有建置用量</td></tr>`}</tbody></table></div>`;
+  $("#bs-save").addEventListener("click", async (e) => {
+    showMsg($("#bs-err"), null);
+    const n = (id) => Number($(id).value);
+    try { await busy(e.currentTarget, api("/api/admin/build-settings", { method: "PUT", body: { cpus: n("#bs-cpus"), memory_mb: n("#bs-mem"), minutes_monthly: n("#bs-min") } })); toast("已儲存建置資源"); drawBuildSettings(); }
+    catch (err) { showMsg($("#bs-err"), err); }
+  });
+}
 // ─────────────── GitHub App FR-GH-05（ADR 0017） ───────────────
 async function renderGithubApp() {
   $("#page").innerHTML = pageHeader("GitHub App", "Caloud 以 GitHub App 讀取用戶授權的儲存庫並接收 push 事件。機密以主金鑰加密保存，只顯示末 4 碼。") +
@@ -1084,7 +1123,7 @@ async function renderGithubApp() {
     <div class="c-field"><span class="c-label">在 GitHub App 設定頁填入</span>
       <div class="c-field"><span class="c-label">Callback URL</span>${copyField(`${origin}/api/github/callback`, "Callback URL")}</div>
       <div class="c-field"><span class="c-label">Webhook URL</span>${copyField(`${origin}/api/github/webhook`, "Webhook URL")}</div>
-      <span class="c-field__hint">勾選「Request user authorization (OAuth) during installation」；權限只需 Contents、Metadata 讀取與 Checks、Pull requests 讀寫；事件訂閱 Push、Create、Pull request。</span></div>
+      <span class="c-field__hint">勾選「Request user authorization (OAuth) during installation」；權限只需 Contents、Metadata 讀取與 Checks、Pull requests 讀寫；事件訂閱 Push、Create、Pull request。新增 Checks、Pull requests 權限後，各安裝需在 GitHub 接受新權限，驗證結果才會出現在 commit 與 PR 上。</span></div>
     <div class="l-grid">
       <label class="c-field"><span class="c-field__label">App ID</span><input class="c-input u-mono" id="gh-app-id" inputmode="numeric" value="${esc(info.app_id ?? "")}"></label>
       <label class="c-field"><span class="c-field__label">Client ID</span><input class="c-input u-mono" id="gh-client-id" value="${esc(info.client_id ?? "")}" autocomplete="off" spellcheck="false"></label>

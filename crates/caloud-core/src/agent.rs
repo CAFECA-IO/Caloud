@@ -52,6 +52,33 @@ pub struct EnvSpec {
     /// 秘密變數（ADR 0019）：`docker compose up` 時放進行程環境變數；Debug 輸出遮蔽值
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vars: Vec<EnvValue>,
+    /// 建置與沙箱資源（ADR 0021）；None 時用預設 4 核、8 GB
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildLimits>,
+    /// 發布前任務（ADR 0021）：以新設定 `docker compose run` 成功後才 `up`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub release: Vec<ReleaseTask>,
+}
+
+/// 建置資源（FR-CI-06）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildLimits {
+    pub cpus: u32,
+    pub memory_mb: u32,
+}
+
+impl Default for BuildLimits {
+    fn default() -> Self {
+        Self { cpus: 4, memory_mb: 8192 }
+    }
+}
+
+/// 發布前任務（FR-ENV-08）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseTask {
+    pub service: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 /// 一個秘密變數；`user` 為用戶變數（注入從儲存庫建置的服務），否則為平臺產生（只供 compose 內插）
@@ -102,7 +129,7 @@ impl std::fmt::Debug for EnvSource {
 }
 
 /// 部署階段（ADR 0018）
-pub const STAGES: [&str; 4] = ["fetch", "build", "start", "health"];
+pub const STAGES: [&str; 5] = ["fetch", "build", "release", "start", "health"];
 
 /// 環境中服務的固定 IP
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,6 +189,12 @@ pub enum AgentMsg {
         id: String,
         stage: String,
         line: String,
+    },
+    /// 建置與沙箱的累計秒數（ADR 0021）：`kind` 為 `deploy`（`id` 為環境）或 `verify`（`id` 為驗證）
+    BuildUsage {
+        kind: String,
+        id: String,
+        secs: u64,
     },
     VerifyDone {
         id: String,

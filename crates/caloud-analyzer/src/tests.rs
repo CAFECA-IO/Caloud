@@ -792,3 +792,61 @@ fn verify_file_overrides() {
     let a = r.analyze("");
     assert!(a.findings.iter().any(|f| f.key == "verify_file" && f.confidence == Confidence::Low));
 }
+
+// ADR 0021：發布前任務的偵測與 verify.yml
+#[test]
+fn release_tasks() {
+    let compose = "services:\n  web:\n    build: .\n    expose: [3000]\n  migrate:\n    build: .\n    command: npx prisma migrate deploy\n    profiles: [tools]\n  tools:\n    image: busybox\n    profiles: [debug]\n";
+    let r = Repo::new(
+        "rel-compose",
+        &[("docker-compose.yml", compose), ("Dockerfile", "FROM node:22\nEXPOSE 3000\n")],
+    );
+    let a = r.analyze("");
+    assert_eq!(
+        a.verify.release,
+        vec![ReleaseTask {
+            service: "migrate".into(),
+            command: None
+        }]
+    );
+    assert!(a.findings.iter().any(|f| f.key == "release"));
+
+    let r = Repo::new(
+        "rel-prisma",
+        &[
+            (
+                "package.json",
+                "{\"scripts\":{\"start\":\"next start\"},\"dependencies\":{\"next\":\"15\",\"@prisma/client\":\"6\"}}",
+            ),
+            (
+                "prisma/schema.prisma",
+                "datasource db {\n  provider = \"postgresql\"\n  url = env(\"DATABASE_URL\")\n}\n",
+            ),
+            ("prisma/migrations/0001_init/migration.sql", "CREATE TABLE a (id int);\n"),
+        ],
+    );
+    let a = r.analyze("");
+    assert_eq!(a.verify.release.len(), 1);
+    assert_eq!(a.verify.release[0].command.as_deref(), Some("npx prisma migrate deploy"));
+
+    let r = Repo::new(
+        "rel-file",
+        &[
+            ("docker-compose.yml", compose),
+            ("Dockerfile", "FROM node:22\nEXPOSE 3000\n"),
+            (
+                ".caloud/verify.yml",
+                "release:\n  - service: web\n    command: npm run seed\n  - service: nope\n",
+            ),
+        ],
+    );
+    let a = r.analyze("");
+    assert_eq!(
+        a.verify.release,
+        vec![ReleaseTask {
+            service: "web".into(),
+            command: Some("npm run seed".into())
+        }],
+        "不存在的服務略過"
+    );
+}

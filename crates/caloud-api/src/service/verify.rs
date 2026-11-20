@@ -9,7 +9,7 @@ use super::environments as envs;
 use super::projects::owned;
 use crate::error::{ApiError, ApiResult};
 use crate::{AppState, CurrentUser};
-use caloud_core::agent::{EnvSource, EnvSpec, Issue, ServerMsg, VerifyCmd, VerifySpec, SEVERITIES, VERIFY_STAGES};
+use caloud_core::agent::{EnvSource, EnvSpec, Issue, ReleaseTask, ServerMsg, VerifyCmd, VerifySpec, SEVERITIES, VERIFY_STAGES};
 use caloud_core::db::audit;
 use caloud_core::model::Project;
 use caloud_core::now;
@@ -62,6 +62,10 @@ pub struct Verification {
     pub created_at: i64,
     pub started_at: Option<i64>,
     pub finished_at: Option<i64>,
+    #[serde(skip)]
+    pub check_run_id: Option<i64>,
+    pub pr_number: Option<i64>,
+    pub build_secs: i64,
 }
 
 fn as_json<S: serde::Serializer>(v: &str, s: S) -> Result<S::Ok, S::Error> {
@@ -127,7 +131,7 @@ async fn owned_run(s: &AppState, me: &CurrentUser, id: &str) -> ApiResult<Verifi
 /// 部署關卡：這個 commit 在這份確認的設定下已通過驗證
 pub(crate) async fn passed(s: &AppState, project: &str, commit: &str, analysis: &str) -> ApiResult<bool> {
     let n: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM verifications WHERE project = ? AND commit_sha = ? AND analysis = ? AND status = 'passed'",
+        "SELECT COUNT(*) FROM verifications WHERE project = ? AND commit_sha = ? AND analysis = ? AND status = 'passed' AND trigger != 'pr'",
     )
     .bind(project)
     .bind(commit)
@@ -148,6 +152,7 @@ pub async fn manual(s: &AppState, me: &CurrentUser, id: &str, keep: bool) -> Api
         keep,
         Some(&me.0.account),
         &me.audit_detail(None).unwrap_or_default(),
+        None,
     )
     .await
 }
@@ -164,6 +169,7 @@ async fn cancel_run(s: &AppState, v: &Verification, why: &str) -> ApiResult<()> 
     .await?
     .rows_affected();
     if n > 0 {
+        notify_github(s, &v.id).await;
         if let Some(node) = &v.node {
             if s.agents.is_connected(node) {
                 s.agents.send(node, ServerMsg::CancelVerify { id: v.id.clone() });
@@ -176,6 +182,7 @@ async fn cancel_run(s: &AppState, v: &Verification, why: &str) -> ApiResult<()> 
 }
 
 /// 開始一次驗證；`via`：稽核來源（`via=web`、`via=github`…）
+#[allow(clippy::too_many_arguments)] // 觸發來源各自需要的參數；PR 另帶 (number, head)
 pub(crate) async fn start(
     s: &AppState,
     p: &Project,
@@ -184,12 +191,29 @@ pub(crate) async fn start(
     keep: bool,
     actor: Option<&str>,
     via: &str,
+    pr: Option<(i64, String)>,
 ) -> ApiResult<Verification> {
-    let t = deploy::target(s, p).await.map_err(|e| match e {
+    let mut t = deploy::target(s, p).await.map_err(|e| match e {
         ApiError::Conflict(m) => ApiError::Conflict(m.replace("部署", "驗證")),
         other => other,
     })?;
-    let branch = p.git_ref.clone().or_else(|| p.branch.clone()).unwrap_or_else(|| "HEAD".into());
+    // ADR 0021：建置分鐘上限
+    super::build::check_quota(s, &p.owner).await?;
+    let build = super::build::limits(s).await?;
+    // PR 驗證：以確認的設定驗證 head commit；不部署、不注入用戶變數
+    let (branch, git_ref, pr_number) = match &pr {
+        Some((n, head)) => {
+            t.commit = head.clone();
+            t.pending_changes = false;
+            (format!("pr/{n}"), Some(format!("refs/pull/{n}/head")), Some(*n))
+        }
+        None => (
+            p.git_ref.clone().or_else(|| p.branch.clone()).unwrap_or_else(|| "HEAD".into()),
+            p.git_ref.clone().or_else(|| p.branch.clone()),
+            None,
+        ),
+    };
+    let deploy_after = deploy_after && pr.is_none();
     // FR-CI-04：同分支的舊執行取消
     let running: Vec<Verification> =
         sqlx::query_as("SELECT * FROM verifications WHERE project = ? AND branch = ? AND status IN ('queued', 'running')")
@@ -204,7 +228,7 @@ pub(crate) async fn start(
     let need = envs::need_for(t.services);
     let (node, index) = envs::place(s, need, None, true).await?;
     let (subdomain, hostname) = super::admin::new_env_id(s, EnvKind::Verify).await?;
-    let vars = super::vars::for_verify(s, &p.id, &t.compose).await?;
+    let vars = super::vars::for_verify(s, &p.id, &t.compose, pr.is_none()).await?;
     let auth_header = match p.installation_id {
         Some(inst) => {
             let token = crate::github::app::installation_token(s, inst)
@@ -247,8 +271,8 @@ pub(crate) async fn start(
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "INSERT INTO verifications (id, project, analysis, commit_sha, branch, trigger, status, stage, stages, counts, env, node, deploy_after, keep, created_by, created_at, started_at) \
-         VALUES (?, ?, ?, ?, ?, ?, 'running', 'fetch', ?, '{}', ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO verifications (id, project, analysis, commit_sha, branch, trigger, status, stage, stages, counts, env, node, deploy_after, keep, created_by, created_at, started_at, pr_number) \
+         VALUES (?, ?, ?, ?, ?, ?, 'running', 'fetch', ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&p.id)
@@ -264,6 +288,7 @@ pub(crate) async fn start(
     .bind(actor)
     .bind(ts)
     .bind(ts)
+    .bind(pr_number)
     .execute(&mut *tx)
     .await?;
     if t.pending_changes {
@@ -304,10 +329,20 @@ pub(crate) async fn start(
                     source: Some(EnvSource {
                         repo_url: p.repo_url.clone(),
                         commit: t.commit.clone(),
-                        git_ref: p.git_ref.clone().or_else(|| p.branch.clone()),
+                        git_ref,
                         compose_dir: t.compose_dir,
                         auth_header,
                     }),
+                    build: Some(build),
+                    release: t
+                        .verify
+                        .release
+                        .iter()
+                        .map(|r| ReleaseTask {
+                            service: r.service.clone(),
+                            command: r.command.clone(),
+                        })
+                        .collect(),
                     vars,
                 },
                 public_port: t.public_port as u16,
@@ -324,7 +359,21 @@ pub(crate) async fn start(
     );
     let detail = format!("{via}; {trigger} {} {}", branch, t.commit.chars().take(12).collect::<String>());
     audit(&s.db, actor, "project_verify", Some(&p.id), Some(detail.trim_start_matches("; "))).await;
-    get(s, &id).await
+    let v = get(s, &id).await?;
+    // ADR 0021：GitHub check run（背景，失敗只記 log）
+    if p.installation_id.is_some() {
+        let (s2, p2, v2) = (s.clone(), p.clone(), v.clone());
+        tokio::spawn(async move {
+            if let Some(cid) = crate::github::checks::create(&s2, &p2, &v2).await {
+                let _ = sqlx::query("UPDATE verifications SET check_run_id = ? WHERE id = ?")
+                    .bind(cid)
+                    .bind(&v2.id)
+                    .execute(&s2.db)
+                    .await;
+            }
+        });
+    }
+    Ok(v)
 }
 
 async fn insert_issue(tx: &mut sqlx::SqliteConnection, run: &str, i: &Issue) -> ApiResult<()> {
@@ -460,6 +509,7 @@ pub(crate) async fn on_done(s: &AppState, node: &str, id: &str, error: Option<St
     .execute(&s.db)
     .await?;
     release_env(s, &v, kept).await?;
+    notify_github(s, id).await;
     audit(
         &s.db,
         None,
@@ -487,6 +537,29 @@ pub(crate) async fn on_done(s: &AppState, node: &str, id: &str, error: Option<St
         }
     }
     Ok(())
+}
+
+/// ADR 0021：完成 GitHub check run 與 PR 留言（背景）
+async fn notify_github(s: &AppState, id: &str) {
+    let Ok(v) = get(s, id).await else { return };
+    let Ok(p) = sqlx::query_as::<_, Project>("SELECT * FROM projects WHERE id = ?")
+        .bind(&v.project)
+        .fetch_one(&s.db)
+        .await
+    else {
+        return;
+    };
+    if p.installation_id.is_none() {
+        return;
+    }
+    let list: Vec<Value> = issues(s, id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|i| serde_json::to_value(i).ok())
+        .collect();
+    let s2 = s.clone();
+    tokio::spawn(async move { crate::github::checks::complete(&s2, &p, &v, &list).await });
 }
 
 /// `GET /api/projects/{id}/verifications`
