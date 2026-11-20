@@ -46,6 +46,7 @@ user token 只在記憶體使用一次，不保存。這樣可以防止他人以
 
 - 以 App 私鑰簽 RS256 JWT（`iat` 為現在減 60 秒，`exp` 為現在加 9 分鐘），呼叫 `POST /app/installations/{id}/access_tokens`。
 - 權杖只快取在記憶體，到過期前 5 分鐘為止；不寫入資料庫、log 或檔案。
+- 權杖的權限在簽發時就固定。收到 `installation` 的 `new_permissions_accepted`，或解析時 git 回 not found，就丟掉快取的權杖；後者以新權杖重試一次，仍失敗時提示檢查 Contents 權限與安裝的授權範圍。
 - 取得私有儲存庫時，git 以 `-c http.extraHeader=Authorization: Basic <base64(x-access-token:<token>)>` 帶入權杖。網址不含帳密，權杖不寫入 `.git/config`。其餘沿用 `git::fetch_repo` 的強化設定。
 
 ### 5. webhook（FR-GH-02）
