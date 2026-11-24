@@ -21,8 +21,8 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 
 ### 1.2 範圍
 
-- **範圍內**：單機 Docker 主機、HTTP/HTTPS 轉發、CAFECA 登入、Web 管理介面；M4 起：控制面＋多台 Runner 節點（含用戶自有設備）、GitHub 整合、自動驗證、映像建置、訂閱與配額
-- **範圍外（目前）**：Kubernetes、非 GitHub 的 Git 服務、GPU 工作負載、跨區域高可用、TCP/UDP 非 HTTP 轉發（TLS 直通與 App 自行對外的 UDP 除外）；需要 GPU 或 `docker.sock` 的服務只考慮未來在「信任的用戶自有設備」上執行
+- **範圍內**：單機 Docker 主機、HTTP/HTTPS 轉發、CAFECA 登入、Web 管理介面；M4 起：控制面＋多台 Runner 節點（含用戶自有設備）、GitHub 整合、自動驗證、映像建置、訂閱與配額；GPU 服務（平臺 GPU 節點以 gVisor nvproxy 執行，[ADR 0022](adr/0022-gpu.md)）
+- **範圍外（目前）**：Kubernetes、非 GitHub 的 Git 服務、跨區域高可用、TCP/UDP 非 HTTP 轉發（TLS 直通與 App 自行對外的 UDP 除外）；需要 `docker.sock` 的服務只考慮未來在「信任的用戶自有設備」上執行
 
 ## 2. 功能需求（FR）
 
@@ -189,6 +189,7 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-ENV-10 | 部署策略：預設藍綠；有以檔案為資料庫的 volume 或用戶指定時，改為「先停舊版再啟新版」，避免兩版同時寫入 | P1 | M7 |
 | FR-ENV-11 | 建置時變數隨環境不同時，依環境分別建置；發布記錄每個環境的映像 digest，報告註明 | P1 | M7 |
 | FR-ENV-12 | 專案確認後可一鍵部署到 production 環境（8 字元子網域）：在 Runner 以 gVisor 隔離的 BuildKit 建置、gVisor 執行、健康檢查通過後對外；顯示階段（取得原始碼、建置、啟動、健康檢查）與 log；以 GitHub 安裝匯入的專案 push 到該分支時自動重新部署。部署前須通過驗證（未驗證時先驗證再部署；admin 可強制並留稽核，ADR 0020）。M6／M7 完成前的簡化流程（[ADR 0018](adr/0018-minimal-deploy.md)） | P0 | M7 |
+| FR-ENV-13 | GPU 服務：compose 以 `deploy.resources.reservations.devices`（`capabilities: [gpu]`）宣告，或由解析器依 CUDA 基底映像與 GPU 依賴產生（低信心、須確認）；在 `gpu_ready` 的平臺節點以 gVisor nvproxy（runtime `runsc-gpu`）執行，多個環境分時共用、不隔離顯示記憶體；執行期與驗證（含測試沙箱）可用，建置不給（[ADR 0022](adr/0022-gpu.md)） | P1 | M7 |
 | FR-ENV-07 | 子網域 ID 由 a-z、0-9 組成，以字母開頭且同時含字母與數字；長度即環境種類（預設 8／12／16，後台可調）；以 CSPRNG 產生，排除使用中、保留字（含包含保留字者）與封鎖清單 | P0 | M4 |
 
 ### 2.12 平臺：驗證與報告 CI、RPT
@@ -222,7 +223,7 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-OPS-01 | 部署、權杖、秘密變更寫入稽核並標示來源（web、api、mcp、github） | P0 | M6 |
 | FR-OPS-02 | 維運者可看全部節點負載、暫停用戶、強制停止環境 | P1 | M8 |
 | FR-OPS-03 | 維運者在後台管理網域資源：網域池（根網域、用途、Cloudflare zone 與權杖、ID 長度）、保留字、封鎖清單；權杖設定時先經 Cloudflare 驗證，加密保存，只回傳末 4 碼 | P0 | M4 |
-| FR-OPS-04 | Runner agent 啟動時自動偵測 CPU 核心數與架構、記憶體、可用磁碟、gVisor 與 BuildKit，以一次性加入權杖註冊（1 小時有效、只存雜湊）；之後每 15 秒心跳；60 秒無心跳標為離線 | P0 | M4 |
+| FR-OPS-04 | Runner agent 啟動時自動偵測 CPU 核心數與架構、記憶體、可用磁碟、gVisor、BuildKit 與 NVIDIA GPU（ADR 0022），以一次性加入權杖註冊（1 小時有效、只存雜湊）；之後每 15 秒心跳；60 秒無心跳標為離線 | P0 | M4 |
 | FR-OPS-05 | 方案、價格與配額在後台設定，不需改程式 | P1 | M8 |
 | FR-OPS-06 | 節點可設為排空：不再接新工作，待驗證結束、環境搬移後才可移除；服務在線時即可加入或排空 | P0 | M4 |
 | FR-OPS-07 | 整體已配置量 > 80% 或驗證排隊 > 5 分鐘時告警；離線節點上的 production 於其他平臺節點重建 | P1 | M7 |

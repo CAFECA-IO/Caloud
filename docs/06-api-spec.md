@@ -254,7 +254,8 @@
 ```json
 { "id": "uuid", "name": "runner-tky-01", "owner": null, "status": "active",
   "specs": { "cpu_cores": 16, "arch": "x86_64", "memory_bytes": 68719476736, "disk_free_bytes": 1932735283200,
-             "os": "Ubuntu 24.04", "gvisor": true, "buildkit": true, "isolation": true, "self_check": null, "agent_version": "0.1.0" },
+             "os": "Ubuntu 24.04", "gvisor": true, "buildkit": true, "isolation": true, "self_check": null, "agent_version": "0.1.0",
+             "gpus": [ { "name": "NVIDIA GeForce RTX 4060 Ti", "memory_mb": 16380 } ], "gpu_driver": "580.178.04", "gpu_ready": true, "gpu_check": null },
   "allocatable": { "cpu_millis": 14400, "memory_bytes": 61847529062 },
   "allocated": { "cpu_millis": 0, "memory_bytes": 0 },
   "used": { "cpu_millis": 820, "memory_bytes": 2147483648 },
@@ -270,7 +271,7 @@
 
 **DELETE /api/admin/nodes/{id}** → `204`；只有 `draining` 或 `offline` 的節點可移除，否則 `409`。移除後該節點權杖失效。
 
-- `specs.isolation`：agent 自我檢查通過（FR-OPS-12，[ADR 0015](adr/0015-runner-sandbox.md)）；`specs.self_check` 為未通過的原因（通過時為 null）。平臺環境只調度到 `isolation: true` 的平臺節點。`specs.buildkit`：建置網路 `caloud-build` 與 BuildKit 映像就緒（ADR 0018），從原始碼部署只調度到這類節點。
+- `specs.isolation`：agent 自我檢查通過（FR-OPS-12，[ADR 0015](adr/0015-runner-sandbox.md)）；`specs.self_check` 為未通過的原因（通過時為 null）。平臺環境只調度到 `isolation: true` 的平臺節點。`specs.buildkit`：建置網路 `caloud-build` 與 BuildKit 映像就緒（ADR 0018），從原始碼部署只調度到這類節點。`specs.gpus`、`specs.gpu_driver`：偵測到的 NVIDIA GPU；`specs.gpu_ready`：GPU 自我檢查通過（驅動在 gVisor 支援清單、`runsc-gpu` 已註冊、探測容器看得到 GPU），`specs.gpu_check` 為未通過的原因；宣告 GPU 的環境只調度到 `gpu_ready: true` 的節點（FR-ENV-13，[ADR 0022](adr/0022-gpu.md)）。沒有舊欄位的 agent 視為沒有 GPU。
 
 **Environment**（FR-OPS-13）
 
@@ -333,7 +334,7 @@
 ```json
 { "id": "uuid", "git_ref": "HEAD", "commit": "98b705d…", "created_at": 0,
   "result": { "source": { "kind": "template", "template": "node/next" }, "root": "", "compose_dir": "",
-              "compose": "services: …", "services": [ { "name": "web", "role": "app", "port": 3000, "public": true } ],
+              "compose": "services: …", "services": [ { "name": "web", "role": "app", "port": 3000, "public": true, "gpu": false } ],
               "env": [ { "name": "PORT", "provider": "platform", "evidence": [], "build_time": false, "varies_by_env": false } ],
               "findings": [ { "key": "port", "message": "…", "confidence": "high", "evidence": [ { "file": "package.json", "line": 23 } ] } ],
               "errors": [], "needs_confirmation": false },
@@ -370,7 +371,7 @@
 - `status`：`deploying` → `running` | `failed`；`stage`：`fetch`、`build`、`start`、`health`，成功後為 `done`。`logs` 為最近 300 行。
 - 重新部署時，`fetch`、`build` 階段舊版仍在執行（`status` 維持 `running`）；這兩個階段失敗時 `status` 仍為 `running`，`error` 與 `stage` 指出失敗的階段。進入 `start` 後舊版停止，路由暫時移除，健康檢查通過後恢復。
 - `pending_changes`：最新解析的 compose 與確認版本不同；確認前部署仍使用確認時的 commit。設定相同時部署最新解析的 commit。
-- 需要有通過自我檢查且具備建置環境（`specs.buildkit`）的平臺節點。
+- 需要有通過自我檢查且具備建置環境（`specs.buildkit`）的平臺節點；compose 宣告 GPU 時另需 `specs.gpu_ready`，沒有時回 `409`「沒有可用 GPU 的 Runner 節點」（ADR 0022）。
 - `vars_pending`：秘密變數在上次部署後有變更，重新部署後生效；`missing_vars`：解析需要（provider `user`）但這個環境尚未設定的變數名稱，不阻擋部署。
 
 **部署關卡**（ADR 0020）：`POST /api/projects/{id}/deploy` 可帶 `{ "force": true }`（admin+，略過驗證，稽核記錄 `forced`；member 帶 `force` 回 `403`）。目標 commit 尚未通過驗證時不部署，改為啟動驗證並在通過後部署，回 `202 { "verification": Verification }`；已通過時回 `202 Deployment`。`deployment` 另有 `verified`（目標 commit 是否已通過驗證）。
