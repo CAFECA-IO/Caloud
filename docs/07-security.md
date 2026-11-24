@@ -36,7 +36,7 @@
 | Runner 自我檢查 | 未設定隔離的主機接到用戶環境 | 啟動時檢查 runsc、防火牆 chain、磁碟，並以兩個探測環境實際驗證；未通過的節點不被調度平臺環境 | FR-OPS-12 |
 | 建置用戶程式碼 | Dockerfile 的 RUN 步驟打主機、內網或其他用戶的建置 | 每次建置一個 gVisor 臨時容器，不共用 daemon；`cldbuild` 網路套用環境防火牆；快取以環境分開；資源上限（ADR 0018） | FR-ENV-12、FR-OPS-11 |
 | GPU 環境（[ADR 0022](adr/0022-gpu.md)） | 經 GPU 驅動逃逸到主機；環境之間互相窺探或擠爆顯示記憶體 | 只有宣告 GPU 的服務用 `runsc-gpu`（gVisor nvproxy，只放行支援清單內的驅動 ioctl，只開 compute、utility 能力，只暴露 `/dev/nvidiactl`、`/dev/nvidia-uvm`、`/dev/nvidia#`）；驅動須在 gVisor 支援清單內且保持更新；自我檢查未通過不調度。已知殘餘風險：驅動漏洞不受 gVisor 保護、DMA 不驗證、分時共用不隔離顯示記憶體；所有 member 可用，M8 改依方案 | FR-ENV-13、FR-OPS-12 |
-| Runner 主機設定 | 設定腳本破壞主機上其他服務 | `runner-setup.sh` 只新增 Caloud 自己的 chain、檔案與 daemon.json 的 `runtimes.runsc`（有 GPU 時另加 `runtimes.runsc-gpu` 並安裝 NVIDIA 官方簽章的 nvidia-container-toolkit），預設 runtime 不變，以 reload 生效不重啟容器；`uninstall` 完整移除 | FR-OPS-11 |
+| Runner 主機設定 | 設定腳本破壞主機上其他服務 | `runner-setup.sh` 只新增 Caloud 自己的 chain、檔案與 daemon.json 的 `runtimes.runsc`（有 GPU 時另加 `runtimes.runsc-gpu`、`/etc/cdi/caloud-gpu.json`，並安裝 NVIDIA 官方簽章的 nvidia-container-toolkit），預設 runtime 不變，以 reload 生效不重啟容器；`uninstall` 完整移除 | FR-OPS-11 |
 | Edge TLS 與憑證（[ADR 0016](adr/0016-edge-tls.md)） | 替他人網域簽發憑證；終結錯誤網域的流量 | HTTP-01 只對 TXT 驗證通過、非直通且綁定運作中 App 的網域申請；DNS-01 只對設有權杖的網域池根網域；SNI 沒有直通設定也沒有憑證即關閉連線；wildcard 只配對一層 | FR-DOM-05、FR-OPS-10 |
 | GitHub webhook（[ADR 0017](adr/0017-github-app-public-console.md)） | 偽造事件觸發大量解析；重放 | HMAC-SHA256 驗簽（常數時間比較）、delivery 去重、本體 5 MB 上限、每 IP 速率限制 | FR-GH-02 |
 | GitHub 安裝綁定 | 以他人的 `installation_id` 冒領安裝，讀取他人私有儲存庫 | 安裝時一次性 OAuth，確認安裝屬於該 GitHub 使用者；state 一次性、綁 session、10 分鐘；已綁定他人的安裝回錯誤 | FR-GH-01 |
@@ -167,7 +167,7 @@
 | `network_mode`、`pid`、`ipc`、`uts`、`cgroup` | 禁止 | 禁止 | 只允許 `network_mode: host` |
 | 主機路徑掛載、`docker.sock` | 禁止 | 禁止；需要持久化的路徑改為具名 volume（FR-AN-07） | 禁止 |
 | `profiles` | 允許 | 允許；`profiles` 中的一次性 service（例如 `migrate`）可指定為發布前任務（FR-ENV-08） | 允許 |
-| `deploy.resources.reservations.devices`（GPU） | 禁止 | 只允許 `capabilities: [gpu]`（`driver` 只能是 `nvidia`）；改寫為 `count: all`，以 `runsc-gpu` 執行（ADR 0022） | 禁止 |
+| `deploy.resources.reservations.devices`（GPU） | 禁止 | 只允許 `capabilities: [gpu]`（`driver` 只能是 `nvidia`）；改以 CDI 裝置 `caloud.dev/gpu=all` 掛入，以 `runsc-gpu` 執行（ADR 0022） | 禁止 |
 | 資源上限 | 1g、512 pids | 依方案（FR-CI-06 另計建置資源） | 不設 |
 
 建置在 Runner 上以 rootless BuildKit 執行，不使用主機 Docker 的建置；建置可連外網但封鎖雲端 metadata 與平臺內網。實作（[ADR 0018](adr/0018-minimal-deploy.md)）：每次建置一個 gVisor（runsc）臨時容器（`buildctl-daemonless.sh`），接在介面名稱 `cldbuild` 的網路上而受 ADR 0015 防火牆規則管控；限 4 CPU、8 GB、4096 pids；快取只在同一環境的 volume 內共用。
