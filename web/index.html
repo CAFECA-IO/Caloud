@@ -538,7 +538,7 @@ async function renderProject(id) {
 
   if (r) {
     const svcRows = r.services.map((s) => `<tr>
-        <td class="c-table__primary u-mono">${esc(s.name)}</td><td>${esc(ROLE_LABEL[s.role] || s.role)}</td><td class="u-mono">${s.port ?? '<span class="u-muted">—</span>'}</td>
+        <td class="c-table__primary u-mono">${esc(s.name)}${s.gpu ? ' <span class="c-badge c-badge--accent" title="以 GPU 節點執行；GPU 由同一節點上的環境分時共用，顯示記憶體不隔離">GPU</span>' : ""}</td><td>${esc(ROLE_LABEL[s.role] || s.role)}</td><td class="u-mono">${s.port ?? '<span class="u-muted">—</span>'}</td>
         <td>${s.role === "database" || s.role === "cache" ? '<span class="u-muted u-small">僅內部</span>' : `<label class="c-check"><input type="radio" name="pj-public" value="${esc(s.name)}" ${s.name === publicDefault ? "checked" : ""}><span class="u-sr-only">以 ${esc(s.name)} 為對外服務</span><span>路徑 /</span></label>`}</td></tr>`).join("");
     const pubFinding = r.findings.find((f) => f.key === "public_service");
     const findingRows = r.findings.map((f, i) => `<tr>
@@ -1005,10 +1005,16 @@ async function renderNodes() {
     const check = sp.isolation
       ? `<span class="c-badge c-badge--success">隔離通過</span> ${sp.buildkit ? '<span class="c-badge c-badge--success">可建置</span>' : '<span class="c-badge c-badge--warning">未安裝建置環境</span>'}`
       : `<span class="c-badge c-badge--danger">未通過</span><div class="c-table__secondary">${esc(sp.self_check || "")}</div>`;
+    // ADR 0022：GPU
+    const gpus = sp.gpus || [];
+    const gpu = !gpus.length ? ""
+      : sp.gpu_ready
+        ? ` <span class="c-badge c-badge--success" title="驅動 ${esc(sp.gpu_driver || "")}，以 gVisor nvproxy 執行">GPU 就緒</span><div class="c-table__secondary">${gpus.map((g) => `${esc(g.name)} · ${Math.round(g.memory_mb / 1024)} GB`).join("、")}</div>`
+        : ` <span class="c-badge c-badge--warning">GPU 未就緒</span><div class="c-table__secondary">${esc(gpus.map((g) => g.name).join("、"))}：${esc(sp.gpu_check || "")}</div>`;
     return `<tr data-node="${esc(n.id)}">
       <td><div class="c-table__primary">${esc(n.name)}</div><div class="c-table__secondary u-mono">${esc(n.id)} · ${sp.cpu_cores} 核 · ${(sp.memory_bytes / GB).toFixed(0)} GB · 磁碟剩 ${(sp.disk_free_bytes / GB).toFixed(0)} GB · agent ${esc(sp.agent_version)}</div></td>
       <td>${statusPill("node", n.status)}</td>
-      <td class="u-small">${check}</td>
+      <td class="u-small">${check}${gpu}</td>
       <td class="u-small u-nowrap u-mono">${n.allocated.cpu_millis}m / ${n.allocatable.cpu_millis}m<br>${(n.allocated.memory_bytes / GB).toFixed(1)} / ${(n.allocatable.memory_bytes / GB).toFixed(1)} GB</td>
       <td class="u-small u-nowrap">${relTime(n.last_seen)}</td>
       <td><div class="c-table__actions">${n.status === "draining" ? `<button class="c-btn c-btn--sm" data-node-act="activate">${icon("play")}<span>啟用</span></button>` : `<button class="c-btn c-btn--sm" data-node-act="drain">${icon("stop")}<span>排空</span></button>`}</div></td></tr>`;

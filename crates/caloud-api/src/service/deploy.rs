@@ -61,6 +61,8 @@ pub(crate) struct Target {
     pub analysis: String,
     /// 驗證計畫（ADR 0020）
     pub verify: caloud_analyzer::VerifyPlan,
+    /// 有服務宣告 GPU（ADR 0022）
+    pub gpu: bool,
 }
 
 pub(crate) async fn target(s: &AppState, p: &Project) -> ApiResult<Target> {
@@ -107,6 +109,7 @@ pub(crate) async fn target(s: &AppState, p: &Project) -> ApiResult<Target> {
         public_service,
         public_port: i64::from(public_port),
         services: v.services.len(),
+        gpu: caloud_orchestrator::sandbox::needs_gpu(&v),
         commit,
         pending_changes,
     })
@@ -240,6 +243,9 @@ pub(crate) async fn start(s: &AppState, p: &Project) -> ApiResult<Environment> {
             if !s.agents.is_connected(&e.node) {
                 return Err(conflict("環境所在的 Runner 節點離線，請稍後再試。"));
             }
+            if t.gpu && !envs::gpu_ready(s, &e.node).await? {
+                return Err(conflict("服務宣告了 GPU，但這個環境所在的 Runner 節點沒有可用的 GPU。"));
+            }
             sqlx::query(
                 "UPDATE environments SET compose = ?, public_service = ?, public_port = ?, cpu_millis = ?, memory_bytes = ?, commit_sha = ?, \
                  stage = 'fetch', error = NULL, status = CASE WHEN status = 'running' THEN 'running' ELSE 'deploying' END, updated_at = ?, vars_rev = ? \
@@ -259,7 +265,7 @@ pub(crate) async fn start(s: &AppState, p: &Project) -> ApiResult<Environment> {
             e
         }
         None => {
-            let (node, index) = envs::place(s, need, None, true).await?;
+            let (node, index) = envs::place(s, need, None, true, t.gpu).await?;
             let (subdomain, hostname) = super::admin::new_env_id(s, EnvKind::Production).await?;
             sqlx::query(
                 "INSERT INTO environments (subdomain, hostname, kind, node, subnet_index, compose, public_service, public_port, cpu_millis, memory_bytes, \

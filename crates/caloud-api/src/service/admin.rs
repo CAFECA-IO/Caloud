@@ -616,7 +616,11 @@ fn check_specs(specs: &NodeSpecs) -> ApiResult<()> {
         && specs.memory_bytes > 0
         && specs.arch.len() <= 32
         && specs.os.len() <= 128
-        && specs.agent_version.len() <= 32;
+        && specs.agent_version.len() <= 32
+        && specs.gpus.len() <= 16
+        && specs.gpus.iter().all(|g| g.name.len() <= 100)
+        && specs.gpu_driver.as_ref().is_none_or(|d| d.len() <= 32)
+        && specs.gpu_check.as_ref().is_none_or(|d| d.len() <= 500);
     ok.then_some(()).ok_or_else(|| bad("節點規格格式錯誤。"))
 }
 

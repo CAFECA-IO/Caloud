@@ -1,5 +1,5 @@
 //! FR-OPS-04：偵測節點規格與目前用量。
-use caloud_core::agent::NodeSpecs;
+use caloud_core::agent::{GpuInfo, NodeSpecs};
 use caloud_core::placement::Resources;
 use std::path::{Path, PathBuf};
 use sysinfo::{Disks, System};
@@ -20,6 +20,7 @@ pub fn detect() -> NodeSpecs {
         .iter()
         .map(|d| (d.mount_point().to_path_buf(), d.available_space()))
         .collect();
+    let (gpus, gpu_driver) = detect_gpus();
     NodeSpecs {
         cpu_cores: std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1),
         arch: std::env::consts::ARCH.to_string(),
@@ -32,7 +33,44 @@ pub fn detect() -> NodeSpecs {
         isolation: false,
         self_check: None,
         agent_version: env!("CARGO_PKG_VERSION").to_string(),
+        gpus,
+        gpu_driver,
+        // 由自我檢查填入（ADR 0022）
+        gpu_ready: false,
+        gpu_check: None,
     }
+}
+
+/// ADR 0022：以 `nvidia-smi` 偵測 NVIDIA GPU；沒有 nvidia-smi 或執行失敗時視為沒有 GPU
+pub fn detect_gpus() -> (Vec<GpuInfo>, Option<String>) {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => parse_nvidia_smi(&String::from_utf8_lossy(&o.stdout)),
+        _ => (vec![], None),
+    }
+}
+
+/// `NVIDIA GeForce RTX 4060 Ti, 16380, 580.178.04` 每行一張
+pub fn parse_nvidia_smi(out: &str) -> (Vec<GpuInfo>, Option<String>) {
+    let mut gpus = Vec::new();
+    let mut driver = None;
+    for line in out.lines() {
+        let f: Vec<&str> = line.split(',').map(str::trim).collect();
+        if f.len() != 3 || f[0].is_empty() {
+            continue;
+        }
+        let Ok(memory_mb) = f[1].parse::<u64>() else { continue };
+        gpus.push(GpuInfo {
+            name: f[0].chars().take(100).collect(),
+            memory_mb,
+        });
+        if driver.is_none() && f[2].chars().all(|c| c.is_ascii_digit() || c == '.') && !f[2].is_empty() {
+            driver = Some(f[2].to_string());
+        }
+    }
+    (gpus, driver)
 }
 
 /// 目前用量：CPU（millicores）與記憶體
@@ -98,6 +136,23 @@ mod tests {
         assert_eq!(disk_free(&mounts, Path::new("/var/lib/docker")), 30);
         assert_eq!(disk_free(&mounts[..2], Path::new("/var/lib/docker")), 20);
         assert_eq!(disk_free(&[], Path::new("/var/lib/docker")), 0);
+    }
+
+    // ADR 0022
+    #[test]
+    fn parses_nvidia_smi() {
+        let (g, d) = parse_nvidia_smi("NVIDIA GeForce RTX 4060 Ti, 16380, 580.178.04\nNVIDIA A10, 23028, 580.178.04\n\n");
+        assert_eq!(g.len(), 2);
+        assert_eq!(
+            g[0],
+            GpuInfo {
+                name: "NVIDIA GeForce RTX 4060 Ti".into(),
+                memory_mb: 16380
+            }
+        );
+        assert_eq!(d.as_deref(), Some("580.178.04"));
+        assert_eq!(parse_nvidia_smi("No devices were found\n"), (vec![], None));
+        assert_eq!(parse_nvidia_smi("x, [N/A], 1\n").0, vec![]);
     }
 
     // FR-OPS-04

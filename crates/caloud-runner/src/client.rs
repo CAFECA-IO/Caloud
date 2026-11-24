@@ -70,6 +70,9 @@ pub async fn run_once(opts: &Options) -> anyhow::Result<Outcome> {
             // ADR 0018：建置網路與 BuildKit 映像就緒
             s.buildkit = opts.check.buildkit;
             s.self_check = opts.check.reason.clone();
+            // ADR 0022
+            s.gpu_ready = opts.check.gpu_ready;
+            s.gpu_check = opts.check.gpu_check.clone();
             s
         },
     };

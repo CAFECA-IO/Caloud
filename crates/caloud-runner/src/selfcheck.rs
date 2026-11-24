@@ -4,6 +4,8 @@
 //! 2. 防火牆 chain `CALOUD-ENV-FWD`／`CALOUD-ENV-IN` 已建立並掛上
 //! 3. 磁碟剩餘 ≥ 10 GB
 //! 4. 兩個探測環境實際驗證：gVisor、同環境名稱解析、跨環境不通、主機閘道被丟棄
+//!
+//! 另外有 GPU 時檢查 nvproxy（ADR 0022）：未就緒只影響 GPU 環境的調度。
 use crate::envs::EnvRunner;
 use caloud_core::agent::{AgentMsg, EnvSpec};
 use caloud_orchestrator::sandbox::{EnvNet, PROBE_INDEXES};
@@ -27,6 +29,10 @@ pub struct SelfCheck {
     pub buildkit: bool,
     /// 未通過的原因
     pub reason: Option<String>,
+    /// GPU 就緒（ADR 0022）
+    pub gpu_ready: bool,
+    /// GPU 未就緒的原因（沒有 GPU 時為 None）
+    pub gpu_check: Option<String>,
 }
 
 impl SelfCheck {
@@ -36,6 +42,7 @@ impl SelfCheck {
             isolation: false,
             buildkit: false,
             reason: Some(reason.into()),
+            ..Self::default()
         }
     }
 }
@@ -118,8 +125,62 @@ pub async fn check(env: &EnvRunner, iptables: &str, disk_free: u64) -> SelfCheck
             isolation: true,
             buildkit: buildkit_ready(env).await,
             reason: None,
+            ..SelfCheck::default()
         },
         Err(e) => SelfCheck::fail(true, format!("探測環境未通過：{e}")),
+    }
+}
+
+/// GPU 探測：nvproxy 只暴露這些裝置；看得到即表示 hook 與 nvproxy 都生效
+const GPU_PROBE: &str = "test -e /dev/nvidiactl && test -e /dev/nvidia0";
+
+/// ADR 0022：GPU 自我檢查。`driver` 為偵測到的驅動版本（沒有 GPU 時為 None）；
+/// `runsc` 為 gVisor 執行檔，用來查詢 nvproxy 支援的驅動。回傳（就緒、未就緒原因）
+pub async fn gpu(env: &EnvRunner, runsc: &str, driver: Option<&str>) -> (bool, Option<String>) {
+    let Some(driver) = driver else { return (false, None) };
+    let fail = |r: String| (false, Some(r));
+    let supported = run(runsc, &["nvproxy", "list-supported-drivers"]).await.unwrap_or_default();
+    if !supported.lines().any(|l| l.trim() == driver) {
+        return fail(format!("驅動 {driver} 不在 gVisor nvproxy 支援清單，請更新驅動或 gVisor。"));
+    }
+    let runtimes = env
+        .docker(&["info", "--format", "{{json .Runtimes}}"], Duration::from_secs(30))
+        .await
+        .unwrap_or_default();
+    if !runtimes.contains(&format!("\"{}\"", caloud_orchestrator::sandbox::RUNTIME_GPU)) {
+        return fail("Docker 沒有 runsc-gpu runtime，請執行 scripts/runner-setup.sh install。".into());
+    }
+    let probe = env
+        .docker(
+            &[
+                "run",
+                "--rm",
+                "--runtime",
+                caloud_orchestrator::sandbox::RUNTIME_GPU,
+                "--gpus",
+                "all",
+                "--network",
+                "none",
+                PROBE_IMAGE,
+                "sh",
+                "-c",
+                GPU_PROBE,
+            ],
+            Duration::from_secs(120),
+        )
+        .await;
+    match probe {
+        Ok(_) => (true, None),
+        Err(e) => fail(format!(
+            "GPU 探測容器失敗：{}",
+            e.to_string()
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(200)
+                .collect::<String>()
+        )),
     }
 }
 
@@ -259,7 +320,8 @@ mod tests {
                 gvisor: true,
                 isolation: true,
                 buildkit: true,
-                reason: None
+                reason: None,
+                ..SelfCheck::default()
             }
         );
         let log = std::fs::read_to_string(base.join("docker.log")).unwrap();
@@ -277,6 +339,43 @@ mod tests {
             reason.contains("gVisor") && reason.contains("其他環境") && reason.contains("Runner 主機"),
             "{reason}"
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ADR 0022：GPU 檢查依序看驅動支援、runsc-gpu、探測容器
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn gpu_check_requires_driver_runtime_and_probe() {
+        let base = std::env::temp_dir().join(format!("caloud-gpucheck-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let runsc = script(&base, "runsc.sh", "printf '575.57.08\\n580.178.04\\n'");
+        let docker = |name: &str, runtimes: &str, probe_ok: bool| {
+            let body = format!(
+                "echo \"$*\" >> {log}\ncase \"$*\" in 'info '*) echo '{runtimes}';; 'run '*) {probe};; esac; exit 0",
+                log = base.join("docker.log").display(),
+                probe = if probe_ok {
+                    "exit 0"
+                } else {
+                    "echo 'nvidia-container-cli: initialization error' >&2; exit 1"
+                }
+            );
+            script(&base, name, &body)
+        };
+        let ok = EnvRunner::new(docker("g1.sh", "{\"runsc\":{},\"runsc-gpu\":{}}", true), base.join("s1"), vec![]);
+        assert_eq!(gpu(&ok, &runsc, None).await, (false, None), "沒有 GPU");
+        assert_eq!(gpu(&ok, &runsc, Some("580.178.04")).await, (true, None));
+        let log = std::fs::read_to_string(base.join("docker.log")).unwrap();
+        assert!(
+            log.contains("run --rm --runtime runsc-gpu --gpus all --network none busybox:1.36"),
+            "{log}"
+        );
+        let (r, why) = gpu(&ok, &runsc, Some("590.1.1")).await;
+        assert!(!r && why.unwrap().contains("支援清單"));
+        let no_rt = EnvRunner::new(docker("g2.sh", "{\"runsc\":{}}", true), base.join("s2"), vec![]);
+        assert!(gpu(&no_rt, &runsc, Some("580.178.04")).await.1.unwrap().contains("runsc-gpu"));
+        let bad = EnvRunner::new(docker("g3.sh", "{\"runsc-gpu\":{}}", false), base.join("s3"), vec![]);
+        assert!(gpu(&bad, &runsc, Some("580.178.04")).await.1.unwrap().contains("initialization"));
         let _ = std::fs::remove_dir_all(&base);
     }
 }

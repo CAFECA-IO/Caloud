@@ -7,6 +7,7 @@
 mod compose;
 mod deps;
 pub mod fs;
+mod gpu;
 mod links;
 mod runtime;
 mod templates;
@@ -77,6 +78,9 @@ pub struct ServiceInfo {
     pub port: Option<u16>,
     /// 對外服務（Edge 路由到這個服務）
     pub public: bool,
+    /// 宣告 GPU（ADR 0022）
+    #[serde(default)]
+    pub gpu: bool,
 }
 
 /// 環境變數由誰提供
@@ -207,6 +211,8 @@ pub fn analyze(repo: &Path, opts: &Options) -> Analysis {
     // FR-AN-11：連到其他服務的本機位址改為服務名稱（ports 移除前，才知道服務提供哪些 port）
     if let Some(doc) = doc.as_mut() {
         app_env.extend(links::apply(&mut cx, doc));
+        // ADR 0022：GPU 宣告與偵測
+        gpu::apply(&mut cx, doc, &source, &compose_dir);
     }
 
     // 平臺政策（07 §3.6）：ports、env_file 轉換後檢查
@@ -476,6 +482,7 @@ fn describe_services(cx: &Ctx, doc: &Value, removed_ports: &[(String, String)], 
             role,
             port,
             public: false,
+            gpu: gpu::declared(svc),
         });
     }
     out

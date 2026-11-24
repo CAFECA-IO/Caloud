@@ -32,6 +32,24 @@ pub struct NodeSpecs {
     #[serde(default)]
     pub self_check: Option<String>,
     pub agent_version: String,
+    /// 偵測到的 NVIDIA GPU（ADR 0022）
+    #[serde(default)]
+    pub gpus: Vec<GpuInfo>,
+    #[serde(default)]
+    pub gpu_driver: Option<String>,
+    /// GPU 自我檢查通過：驅動在 gVisor 支援清單、`runsc-gpu` 已註冊、探測容器看得到 GPU
+    #[serde(default)]
+    pub gpu_ready: bool,
+    /// GPU 未就緒的原因（有 GPU 時才有意義）
+    #[serde(default)]
+    pub gpu_check: Option<String>,
+}
+
+/// 一張 GPU（ADR 0022）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GpuInfo {
+    pub name: String,
+    pub memory_mb: u64,
 }
 
 /// 控制面送給 agent 的環境（FR-OPS-13，ADR 0015）

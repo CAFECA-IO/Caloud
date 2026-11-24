@@ -2254,6 +2254,7 @@ async fn admin_opens_environment_on_isolated_runner() {
             isolation: false,
             buildkit: false,
             reason: Some("防火牆不完整".into()),
+            ..Default::default()
         },
     )
     .await;
@@ -2269,6 +2270,7 @@ async fn admin_opens_environment_on_isolated_runner() {
             isolation: true,
             buildkit: false,
             reason: None,
+            ..Default::default()
         },
     )
     .await;
@@ -2438,6 +2440,7 @@ async fn project_deploys_to_production_through_runner() {
                     isolation: true,
                     buildkit,
                     reason: None,
+                    ..Default::default()
                 },
             };
             let agent = tokio::spawn(async move { run_once(&opts).await });
@@ -2635,6 +2638,7 @@ async fn project_vars_are_encrypted_and_injected() {
             isolation: true,
             buildkit: true,
             reason: None,
+            ..Default::default()
         },
     };
     let agent = tokio::spawn(async move { run_once(&opts).await });
@@ -2822,6 +2826,7 @@ async fn verification_reports_gate_and_compare() {
             isolation: true,
             buildkit: true,
             reason: None,
+            ..Default::default()
         },
     };
     let agent = tokio::spawn(async move { run_once(&opts).await });
@@ -3639,6 +3644,7 @@ async fn checks_pr_quota_and_release_tasks() {
             isolation: true,
             buildkit: true,
             reason: None,
+            ..Default::default()
         },
     };
     let agent = tokio::spawn(async move { run_once(&opts).await });
@@ -3827,4 +3833,124 @@ async fn checks_pr_quota_and_release_tasks() {
     assert_eq!(env.call("POST", &verify, &member, None).await.0, StatusCode::CONFLICT);
     assert_eq!(env.call("POST", &deploy, &member, None).await.0, StatusCode::CONFLICT);
     agent.abort();
+}
+
+// ───────────────────────── GPU（ADR 0022） ─────────────────────────
+
+// FR-ENV-13：宣告 GPU 的專案只排到 GPU 就緒的節點，服務以 runsc-gpu 執行
+#[tokio::test]
+#[allow(clippy::async_yields_async)]
+async fn gpu_projects_only_go_to_gpu_ready_nodes() {
+    use caloud_runner::client::{run_once, Options};
+    use caloud_runner::envs::EnvRunner;
+    use caloud_runner::selfcheck::SelfCheck;
+    let env = Env::new().await;
+    let (admin, member) = admin_and_member(&env).await;
+    env.call(
+        "POST",
+        "/api/admin/domain-pools",
+        &admin,
+        Some(json!({ "root": "caloud.tw", "purposes": ["production", "staging", "verify"] })),
+    )
+    .await;
+    set_repo(
+        &env,
+        &[(
+            "Dockerfile",
+            "FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04\nEXPOSE 8000\nCMD [\"python3\", \"-m\", \"http.server\"]\n",
+        )],
+    );
+    let (_, p) = env
+        .call(
+            "POST",
+            "/api/projects",
+            &member,
+            Some(json!({ "repo_url": "https://github.com/CAFECA-IO/infer" })),
+        )
+        .await;
+    let id = p["id"].as_str().unwrap().to_string();
+    let v = wait_project(&env, &member, &id).await;
+    let a = &v["analysis"]["result"];
+    assert_eq!(a["services"][0]["gpu"], true, "{a}");
+    let lows: Vec<usize> = a["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f["confidence"] == "low")
+        .map(|(i, _)| i)
+        .collect();
+    let public = a["services"][0]["name"].as_str().unwrap().to_string();
+    let (st, e) = env
+        .call(
+            "PUT",
+            &format!("/api/projects/{id}/analysis"),
+            &member,
+            Some(json!({ "public_service": public, "acknowledged": lows })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+
+    let start = |name: &'static str, gpu_ready: bool| {
+        let env_ref = &env;
+        let admin = admin.clone();
+        async move {
+            let (_, jt) = env_ref.call("POST", "/api/admin/nodes/join-tokens", &admin, Some(json!({}))).await;
+            let mut runner = EnvRunner::new(
+                env_ref.dir.join("fake-docker.sh").display().to_string(),
+                env_ref.dir.join(name),
+                vec!["1.1.1.1".into()],
+            );
+            runner.git_bin = env_ref.dir.join("fake-git.sh").display().to_string();
+            runner.smoke_target = Some(smoke_server().await);
+            let opts = Options {
+                server: env_ref.base.clone(),
+                join_token: Some(jt["token"].as_str().unwrap().to_string()),
+                name: name.into(),
+                state_dir: env_ref.dir.join(name),
+                envs: runner,
+                check: SelfCheck {
+                    gvisor: true,
+                    isolation: true,
+                    buildkit: true,
+                    reason: None,
+                    gpu_ready,
+                    gpu_check: (!gpu_ready).then(|| "Docker 沒有 runsc-gpu runtime".into()),
+                },
+            };
+            let agent = tokio::spawn(async move { run_once(&opts).await });
+            wait_node(env_ref, &admin, name, "active").await;
+            agent
+        }
+    };
+    // 只有 CPU 節點 → 409
+    let cpu = start("runner-cpu", false).await;
+    let deploy = format!("/api/projects/{id}/deploy");
+    let (st, d) = env.call("POST", &deploy, &member, None).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{d}");
+    assert!(d.to_string().contains("GPU"), "{d}");
+    let (_, nodes) = env.call("GET", "/api/admin/nodes", &admin, None).await;
+    let n = nodes.as_array().unwrap().iter().find(|n| n["name"] == "runner-cpu").unwrap();
+    assert_eq!(n["specs"]["gpu_ready"], false);
+    assert!(n["specs"]["gpu_check"].as_str().unwrap().contains("runsc-gpu"));
+
+    // GPU 就緒的節點 → 驗證與部署都排到它，服務以 runsc-gpu 執行
+    let gpu = start("runner-gpu", true).await;
+    let (st, d) = env.call("POST", &deploy, &member, None).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    let vid = d["verification"]["id"].as_str().unwrap().to_string();
+    let r = wait_verification(&env, &member, &vid).await;
+    assert_eq!(r["verification"]["status"], "passed", "{r}");
+    let d = wait_deploy(&env, &member, &id, |d| d["stage"] == "done").await;
+    let sub = d["subdomain"].as_str().unwrap();
+    let node: String = sqlx::query_scalar("SELECT n.name FROM environments e JOIN nodes n ON n.id = e.node WHERE e.subdomain = ?")
+        .bind(sub)
+        .fetch_one(&env.db)
+        .await
+        .unwrap();
+    assert_eq!(node, "runner-gpu");
+    let o = std::fs::read_to_string(env.dir.join(format!("runner-gpu/envs/{sub}/caloud.override.yml"))).unwrap();
+    assert!(o.contains("runtime: runsc-gpu") && o.contains("count: all"), "{o}");
+    cpu.abort();
+    gpu.abort();
 }

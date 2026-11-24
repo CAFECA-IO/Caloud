@@ -14,7 +14,7 @@ pub enum PolicyError {
     NoImage(String),
     #[error("service `{service}`：{msg}")]
     Privileged { service: String, msg: String },
-    #[error("service `{0}`：不支援 GPU（deploy.resources.reservations.devices）。")]
+    #[error("service `{0}`：GPU 只支援 `deploy.resources.reservations.devices: [{{ capabilities: [gpu] }}]`（driver 只能是 nvidia），且只限從儲存庫部署的專案。")]
     Gpu(String),
     #[error("頂層 `{0}` 不可引用主機檔案或外部資源，請移除相關設定。")]
     HostFile(String),
@@ -29,6 +29,8 @@ pub enum PolicyError {
 pub struct ValidatedCompose {
     pub doc: Value,
     pub services: Vec<String>,
+    /// 宣告 GPU 的服務（ADR 0022）
+    pub gpu_services: Vec<String>,
 }
 
 /// 會讓容器取得主機權限或與其他租戶衝突的鍵
@@ -162,11 +164,14 @@ pub fn validate_with(yaml: &str, policy: Policy) -> Result<ValidatedCompose, Pol
     }
     let services = doc.get("services").and_then(Value::as_mapping).ok_or(PolicyError::NoServices)?;
     let mut names = Vec::new();
+    let mut gpu_services = Vec::new();
 
     for (name, svc) in services {
         let name = name.as_str().unwrap_or_default().to_string();
         let svc = svc.as_mapping().cloned().unwrap_or_default();
-        check_service(&name, &svc, policy)?;
+        if check_service(&name, &svc, policy)? {
+            gpu_services.push(name.clone());
+        }
         names.push(name);
     }
 
@@ -194,7 +199,11 @@ pub fn validate_with(yaml: &str, policy: Policy) -> Result<ValidatedCompose, Pol
         return Err(PolicyError::HostFile("include".into()));
     }
 
-    Ok(ValidatedCompose { doc, services: names })
+    Ok(ValidatedCompose {
+        doc,
+        services: names,
+        gpu_services,
+    })
 }
 
 /// 找出文件中的第一個 YAML tag（`!reset`、`!override` 會改變型別而繞過檢查）
@@ -299,7 +308,8 @@ fn check_privileged(name: &str, svc: &Mapping, policy: Policy) -> Result<(), Pol
     Ok(())
 }
 
-fn check_service(name: &str, svc: &Mapping, policy: Policy) -> Result<(), PolicyError> {
+/// 回傳這個服務是否宣告 GPU
+fn check_service(name: &str, svc: &Mapping, policy: Policy) -> Result<bool, PolicyError> {
     let forbid = |key: &str| PolicyError::Forbidden {
         service: name.into(),
         key: key.into(),
@@ -320,16 +330,17 @@ fn check_service(name: &str, svc: &Mapping, policy: Policy) -> Result<(), Policy
     } else if let Some(build) = svc.get("build").filter(|_| policy.platform) {
         check_build(name, build, policy)?;
     }
-    // GPU 不給任何 App（docs/07 §3.6）
-    if svc
+    // GPU 只給平臺 App，且只接受 capabilities: [gpu]（ADR 0022，docs/07 §3.6）
+    let gpu = match svc
         .get("deploy")
         .and_then(|d| d.get("resources"))
         .and_then(|r| r.get("reservations"))
         .and_then(|r| r.get("devices"))
-        .is_some()
     {
-        return Err(PolicyError::Gpu(name.into()));
-    }
+        None => false,
+        Some(d) if policy.platform && !policy.privileged && gpu_devices_ok(d) => true,
+        Some(_) => return Err(PolicyError::Gpu(name.into())),
+    };
     if svc.get("image").and_then(Value::as_str).is_none() && !svc.contains_key("build") {
         return Err(PolicyError::NoImage(name.into()));
     }
@@ -366,7 +377,27 @@ fn check_service(name: &str, svc: &Mapping, policy: Policy) -> Result<(), Policy
             }
         }
     }
-    Ok(())
+    Ok(gpu)
+}
+
+/// GPU 宣告：每一項都只能是 `capabilities: [gpu]`（可另帶 `driver: nvidia`、`count`、`device_ids`、`options`，
+/// 後三者在 override 中一律改寫為 `count: all`，ADR 0022）
+fn gpu_devices_ok(d: &Value) -> bool {
+    let Some(list) = d.as_sequence().filter(|l| !l.is_empty()) else {
+        return false;
+    };
+    list.iter().all(|item| {
+        let Some(m) = item.as_mapping() else { return false };
+        let caps_ok = m
+            .get("capabilities")
+            .and_then(Value::as_sequence)
+            .is_some_and(|c| !c.is_empty() && c.iter().all(|v| v.as_str() == Some("gpu")));
+        let driver_ok = m.get("driver").is_none_or(|v| v.as_str() == Some("nvidia"));
+        let keys_ok = m
+            .keys()
+            .all(|k| matches!(k.as_str(), Some("capabilities" | "driver" | "count" | "device_ids" | "options")));
+        caps_ok && driver_ok && keys_ok
+    })
 }
 
 #[cfg(test)]
@@ -535,9 +566,22 @@ mod tests {
         ] {
             assert!(prepare_platform(y, 0).is_err(), "should reject: {y}");
         }
-        let gpu = "services:\n  a:\n    image: x\n    deploy: {resources: {reservations: {devices: [{capabilities: [gpu]}]}}}\n";
-        assert!(matches!(prepare_platform(gpu, 0), Err(PolicyError::Gpu(_))));
+        // GPU（ADR 0022）：平臺 App 只接受 capabilities: [gpu]；一般 App 仍拒絕
+        let gpu = "services:\n  a:\n    image: x\n    deploy: {resources: {reservations: {devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]}}}\n  b:\n    image: y\n";
+        let c = prepare_platform(gpu, 0).unwrap();
+        assert_eq!(c.compose.gpu_services, vec!["a".to_string()]);
         assert!(matches!(validate(gpu), Err(PolicyError::Gpu(_))));
+        for bad in [
+            "{capabilities: [gpu, utility]}",
+            "{capabilities: [tpu]}",
+            "{driver: amd, capabilities: [gpu]}",
+            "{capabilities: [gpu], foo: 1}",
+            "{}",
+        ] {
+            let y = format!("services:\n  a:\n    image: x\n    deploy: {{resources: {{reservations: {{devices: [{bad}]}}}}}}\n");
+            assert!(matches!(prepare_platform(&y, 0), Err(PolicyError::Gpu(_))), "{bad}");
+        }
+        assert!(prepare_platform("services: {a: {image: x, devices: ['/dev/nvidia0']}}", 0).is_err());
         // 一般 App 與上傳的 compose 仍不能 build
         assert!(validate("services: {a: {build: .}}").is_err());
         // 未轉換就直接以平臺政策檢查：ports 仍被拒

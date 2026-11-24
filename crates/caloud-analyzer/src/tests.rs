@@ -850,3 +850,70 @@ fn release_tasks() {
         "不存在的服務略過"
     );
 }
+
+// FR-ENV-13（ADR 0022）：GPU 宣告與偵測
+#[test]
+fn gpu_detection() {
+    // 用戶 compose 已宣告：保留並標記
+    let compose = "services:\n  infer:\n    build: .\n    expose: [8000]\n    deploy: {resources: {reservations: {devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]}}}\n";
+    let r = Repo::new(
+        "gpu-compose",
+        &[
+            ("docker-compose.yml", compose),
+            ("Dockerfile", "FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04\nEXPOSE 8000\n"),
+        ],
+    );
+    let a = r.analyze("");
+    assert!(a.errors.is_empty(), "{:?}", a.errors);
+    assert!(a.services[0].gpu);
+    assert!(a.compose.as_deref().unwrap().contains("capabilities"));
+    assert!(a.findings.iter().any(|f| f.key == "gpu" && f.confidence == Confidence::High));
+
+    // 只有 Dockerfile：CUDA 基底映像 → 自動加上宣告，低信心待確認
+    let r = Repo::new(
+        "gpu-dockerfile",
+        &[(
+            "Dockerfile",
+            "# syntax=docker/dockerfile:1\nFROM --platform=linux/amd64 pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime\nEXPOSE 8000\n",
+        )],
+    );
+    let a = r.analyze("");
+    assert!(a.services[0].gpu, "{:?}", a.services);
+    let f = a.findings.iter().find(|f| f.key == "gpu").unwrap();
+    assert_eq!(f.confidence, Confidence::Low);
+    assert_eq!(f.evidence[0].line, Some(2));
+    assert!(a.needs_confirmation);
+    assert!(a.compose.as_deref().unwrap().contains("gpu"));
+
+    // 用戶 compose 沒宣告但有 GPU 依賴：只建議，不修改
+    let r = Repo::new(
+        "gpu-hint",
+        &[
+            ("docker-compose.yml", "services:\n  web:\n    build: .\n    expose: [3000]\n"),
+            ("Dockerfile", "FROM node:22\nEXPOSE 3000\n"),
+            (
+                "package.json",
+                "{\"scripts\":{\"start\":\"node a.js\"},\"dependencies\":{\"onnxruntime-node-gpu\":\"1\"}}",
+            ),
+        ],
+    );
+    let a = r.analyze("");
+    assert!(!a.services[0].gpu);
+    assert!(a.findings.iter().any(|f| f.key == "gpu" && f.confidence == Confidence::Medium));
+    assert!(!a.compose.as_deref().unwrap().contains("capabilities"));
+
+    // 一般映像不算
+    for l in [
+        "FROM node:22",
+        "FROM tensorflow/tensorflow:2.17.0",
+        "FROM pytorch/pytorch:2.5.1-cpu",
+    ] {
+        assert!(!crate::gpu::cuda_base(l), "{l}");
+    }
+    for l in [
+        "FROM nvcr.io/nvidia/pytorch:24.10-py3",
+        "from tensorflow/tensorflow:2.17.0-gpu AS base",
+    ] {
+        assert!(crate::gpu::cuda_base(l), "{l}");
+    }
+}

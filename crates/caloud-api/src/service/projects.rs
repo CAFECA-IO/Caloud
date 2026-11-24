@@ -371,10 +371,12 @@ async fn run_analysis(s: &AppState, p: &Project) -> Result<(), String> {
                         s.github.forget_token(inst);
                         tries += 1;
                     }
-                    Err(e) if e.to_string().contains("not found") => break Err(anyhow::anyhow!(
+                    Err(e) if e.to_string().contains("not found") => {
+                        break Err(anyhow::anyhow!(
                         "{}（GitHub App 需要 Contents 讀取權限，且這個儲存庫要在安裝的授權範圍內；變更權限後，組織需在 GitHub 接受新權限）",
                         e.to_string().lines().next().unwrap_or_default()
-                    )),
+                    ))
+                    }
                     r => break r,
                 }
             }

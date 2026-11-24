@@ -226,7 +226,7 @@ pub(crate) async fn start(
     }
 
     let need = envs::need_for(t.services);
-    let (node, index) = envs::place(s, need, None, true).await?;
+    let (node, index) = envs::place(s, need, None, true, t.gpu).await?;
     let (subdomain, hostname) = super::admin::new_env_id(s, EnvKind::Verify).await?;
     let vars = super::vars::for_verify(s, &p.id, &t.compose, pr.is_none()).await?;
     let auth_header = match p.installation_id {

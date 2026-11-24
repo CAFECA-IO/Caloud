@@ -9,6 +9,44 @@ use std::net::Ipv4Addr;
 
 /// gVisor runtime 在 daemon.json 的名稱
 pub const RUNTIME: &str = "runsc";
+/// GPU 服務的 runtime：同一個 runsc，帶 `--nvproxy`（ADR 0022）
+pub const RUNTIME_GPU: &str = "runsc-gpu";
+
+/// 是否有服務宣告 GPU（ADR 0022）
+pub fn needs_gpu(compose: &ValidatedCompose) -> bool {
+    !compose.gpu_services.is_empty()
+}
+
+/// 未經政策檢查的 compose 是否有服務宣告 GPU（agent 端用；compose 已由控制面檢查過）
+pub fn declares_gpu(yaml: &str) -> bool {
+    serde_yaml::from_str::<Value>(yaml)
+        .ok()
+        .and_then(|d| d.get("services").and_then(Value::as_mapping).cloned())
+        .is_some_and(|svcs| {
+            svcs.values().any(|v| {
+                v.get("deploy")
+                    .and_then(|d| d.get("resources"))
+                    .and_then(|r| r.get("reservations"))
+                    .and_then(|r| r.get("devices"))
+                    .is_some()
+            })
+        })
+}
+
+/// GPU 宣告一律改寫為使用節點上所有 GPU（分時共用）
+fn gpu_reservation() -> Value {
+    let mut dev = Mapping::new();
+    dev.insert("driver".into(), "nvidia".into());
+    dev.insert("count".into(), "all".into());
+    dev.insert("capabilities".into(), Value::Sequence(vec!["gpu".into()]));
+    let mut reservations = Mapping::new();
+    reservations.insert("devices".into(), overriding(Value::Sequence(vec![Value::Mapping(dev)])));
+    let mut resources = Mapping::new();
+    resources.insert("reservations".into(), Value::Mapping(reservations));
+    let mut deploy = Mapping::new();
+    deploy.insert("resources".into(), Value::Mapping(resources));
+    Value::Mapping(deploy)
+}
 /// 環境網段的索引上限（`10.240.0.0/12` 共 4096 個 /24）
 pub const MAX_INDEX: u16 = 4095;
 /// 保留給自我檢查探測環境的索引（控制面不配置）
@@ -140,7 +178,12 @@ pub fn env_override_with(
     for (name, ip) in &ips {
         let orig = compose.doc["services"][name.as_str()].as_mapping().cloned().unwrap_or_default();
         let mut svc = Mapping::new();
-        svc.insert("runtime".into(), RUNTIME.into());
+        if compose.gpu_services.contains(name) {
+            svc.insert("runtime".into(), RUNTIME_GPU.into());
+            svc.insert("deploy".into(), gpu_reservation());
+        } else {
+            svc.insert("runtime".into(), RUNTIME.into());
+        }
         let mut addr = Mapping::new();
         addr.insert("ipv4_address".into(), ip.to_string().into());
         let mut nets = Mapping::new();
@@ -268,5 +311,28 @@ mod tests {
             .unwrap_err()
             .contains("image"));
         assert_eq!(resolv_conf(&["1.1.1.1".into()]), "nameserver 1.1.1.1\noptions ndots:0\n");
+        assert!(!needs_gpu(&c));
+    }
+
+    // ADR 0022：只有宣告 GPU 的服務用 runsc-gpu，宣告改寫為 count: all
+    #[test]
+    fn gpu_services_use_nvproxy_runtime() {
+        let y = "services:\n  infer:\n    image: x\n    deploy: {resources: {limits: {cpus: '2'}, reservations: {devices: [{capabilities: [gpu], device_ids: ['3']}]}}}\n  web:\n    image: y\n";
+        let c = validate_with(y, Policy::platform(0)).unwrap();
+        assert!(needs_gpu(&c));
+        let o = env_override("g1g1g1g1", &c, &EnvNet::new(1).unwrap(), Limits::default()).unwrap();
+        let d: Value = serde_yaml::from_str(&o).unwrap();
+        assert_eq!(d["services"]["infer"]["runtime"], RUNTIME_GPU);
+        assert_eq!(d["services"]["web"]["runtime"], RUNTIME);
+        assert!(d["services"]["web"].get("deploy").is_none());
+        assert!(o.contains("devices: !override"), "{o}");
+        let dev = match &d["services"]["infer"]["deploy"]["resources"]["reservations"]["devices"] {
+            Value::Tagged(t) => t.value[0].clone(),
+            v => panic!("{v:?}"),
+        };
+        assert_eq!(dev["count"], "all");
+        assert_eq!(dev["driver"], "nvidia");
+        assert!(dev.get("device_ids").is_none());
+        assert!(declares_gpu(y) && !declares_gpu("services: {web: {image: y}}") && !declares_gpu("::"));
     }
 }

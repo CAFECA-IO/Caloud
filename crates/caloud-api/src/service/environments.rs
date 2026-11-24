@@ -129,7 +129,7 @@ pub(crate) async fn refresh_assigned(s: &AppState, node: &str) -> ApiResult<()> 
 }
 
 /// 平臺節點中通過自我檢查者（FR-OPS-12）；可限定節點；`build` 時另需建置環境（ADR 0018）
-async fn candidates(s: &AppState, only: Option<&str>, build: bool) -> ApiResult<Vec<Candidate>> {
+async fn candidates(s: &AppState, only: Option<&str>, build: bool, gpu: bool) -> ApiResult<Vec<Candidate>> {
     let rows: Vec<(String,)> = sqlx::query_as("SELECT id FROM nodes WHERE owner IS NULL ORDER BY id")
         .fetch_all(&s.db)
         .await?;
@@ -139,7 +139,7 @@ async fn candidates(s: &AppState, only: Option<&str>, build: bool) -> ApiResult<
             continue;
         }
         let n = get_node(s, &id).await?;
-        if !n.specs.isolation || (build && !n.specs.buildkit) || !s.agents.is_connected(&n.id) {
+        if !n.specs.isolation || (build && !n.specs.buildkit) || (gpu && !n.specs.gpu_ready) || !s.agents.is_connected(&n.id) {
             continue;
         }
         out.push(Candidate {
@@ -162,12 +162,19 @@ pub(crate) fn need_for(services: usize) -> Resources {
     }
 }
 
-/// 選節點並配置網段索引（M4-10）
-pub(crate) async fn place(s: &AppState, need: Resources, only: Option<&str>, build: bool) -> ApiResult<(String, i64)> {
-    let nodes = candidates(s, only, build).await?;
+/// 節點的 GPU 是否就緒（ADR 0022）
+pub(crate) async fn gpu_ready(s: &AppState, node: &str) -> ApiResult<bool> {
+    Ok(get_node(s, node).await?.specs.gpu_ready)
+}
+
+/// 選節點並配置網段索引（M4-10）；`gpu`：只選 GPU 就緒的節點（ADR 0022）
+pub(crate) async fn place(s: &AppState, need: Resources, only: Option<&str>, build: bool, gpu: bool) -> ApiResult<(String, i64)> {
+    let nodes = candidates(s, only, build, gpu).await?;
     let node = choose_node(&nodes, need, Target::Platform)
         .ok_or_else(|| {
-            ApiError::Conflict(if build {
+            ApiError::Conflict(if gpu {
+                "沒有可用 GPU 的 Runner 節點：需要在線、通過自我檢查（含 GPU 檢查）且容量足夠的平臺節點。".into()
+            } else if build {
                 "沒有可用的 Runner 節點：需要在線、通過自我檢查、已安裝建置環境且容量足夠的平臺節點。".into()
             } else {
                 "沒有可用的 Runner 節點：需要在線、通過自我檢查且容量足夠的平臺節點。".into()
@@ -201,7 +208,7 @@ pub async fn create(s: &AppState, me: &CurrentUser, input: EnvInput) -> ApiResul
         return Err(bad("public_port 需介於 1 到 65535。"));
     }
     let need = need_for(compose.services.len());
-    let (node, index) = place(s, need, input.node_id.as_deref(), false).await?;
+    let (node, index) = place(s, need, input.node_id.as_deref(), false, sandbox::needs_gpu(&compose)).await?;
     let (subdomain, hostname) = new_env_id(s, kind).await?;
     let t = now();
     sqlx::query(

@@ -645,14 +645,15 @@ impl EnvRunner {
         } else {
             format!("{} && {}", cmd.setup, cmd.command)
         };
+        // ADR 0022：專案有 GPU 服務時，測試與 lint 沙箱也可用 GPU
+        let gpu = sandbox::declares_gpu(&spec.env.compose);
+        let runtime = if gpu { sandbox::RUNTIME_GPU } else { sandbox::RUNTIME };
         let mut c = Command::new(&self.docker_bin);
+        c.args(["run", "--rm", "--name", &name, "--runtime", runtime]);
+        if gpu {
+            c.args(["--gpus", "all"]);
+        }
         c.args([
-            "run",
-            "--rm",
-            "--name",
-            &name,
-            "--runtime",
-            "runsc",
             "--network",
             build::BUILD_NETWORK,
             "--cpus",
@@ -923,6 +924,18 @@ mod tests {
         }
         assert!(!std::fs::read_to_string(&log).unwrap().contains("down -v"), "保留時不銷毀");
         std::fs::remove_file(base.join("BUILD_FAIL")).unwrap();
+
+        // ADR 0022：GPU 服務 → 環境用 runsc-gpu，測試沙箱帶 --gpus all
+        let mut g = spec("run4");
+        g.env.compose =
+            "services:\n  web:\n    build: ./app\n    deploy: {resources: {reservations: {devices: [{capabilities: [gpu]}]}}}\n".into();
+        std::fs::write(&log, "").unwrap();
+        r.verify(&g, &tx).await;
+        let _ = collect(&mut rx);
+        let d = std::fs::read_to_string(&log).unwrap();
+        assert!(d.contains("--runtime runsc-gpu --gpus all --network caloud-build"), "{d}");
+        let o = std::fs::read_to_string(base.join("state/envs/v1v2v3v4v5v6v7v8/caloud.override.yml")).unwrap_or_default();
+        assert!(o.is_empty() || o.contains("runtime: runsc-gpu"), "{o}");
         let _ = std::fs::remove_dir_all(&base);
     }
 

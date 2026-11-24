@@ -9,7 +9,8 @@
 # 函式名稱以 do_ 開頭，避免遮蔽同名指令（例如 install）。
 # 只動 Caloud 自己的檔案與 chain：
 #   /usr/local/lib/caloud/gvisor/            runsc 與 gvisor-bin/
-#   /etc/docker/daemon.json                  只合併 runtimes.runsc（預設 runtime 不變）
+#   /etc/docker/daemon.json                  只合併 runtimes.runsc 與（有 GPU 時）runtimes.runsc-gpu（預設 runtime 不變）
+#   有 NVIDIA GPU 時（ADR 0022）：NVIDIA 官方 apt 套件 nvidia-container-toolkit（提供 Docker --gpus 的 hook）
 #   iptables CALOUD-ENV-FWD（DOCKER-USER）、CALOUD-ENV-IN（INPUT）
 #   /etc/systemd/system/caloud-firewall.service  開機還原規則
 #   docker 網路 caloud-build（bridge cldbuild，10.239.0.0/24）與 BuildKit 映像（ADR 0018）
@@ -60,7 +61,7 @@ firewall_down() {
 }
 
 # ---------------------------------------------------------------- daemon.json
-# 合併或移除 runtimes.runsc；其他設定原樣保留
+# 合併或移除 runtimes.runsc／runsc-gpu；其他設定原樣保留
 daemon_json() {
   python3 - "$1" "$DAEMON_JSON" "$RUNSC" <<'PY'
 import json, os, sys
@@ -73,14 +74,52 @@ if os.path.exists(path):
 rt = cfg.setdefault("runtimes", {})
 if action == "add":
     rt["runsc"] = {"path": runsc}
+elif action == "add-gpu":
+    # ADR 0022：同一個 runsc，帶 --nvproxy；只給宣告 GPU 的服務使用
+    rt["runsc-gpu"] = {"path": runsc, "runtimeArgs": ["--nvproxy"]}
+elif action == "remove-gpu":
+    rt.pop("runsc-gpu", None)
 else:
     rt.pop("runsc", None)
+    rt.pop("runsc-gpu", None)
 tmp = path + ".caloud-tmp"
 with open(tmp, "w") as f:
     json.dump(cfg, f, indent=2)
     f.write("\n")
 os.replace(tmp, path)
 PY
+}
+
+# ---------------------------------------------------------------- GPU（ADR 0022）
+NV_KEYRING=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+NV_LIST=/etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+gpu_driver() { nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | tr -d ' '; }
+
+# 有 NVIDIA GPU 時：安裝 nvidia-container-toolkit、註冊 runsc-gpu；驅動不在 gVisor 支援清單時略過
+gpu_setup() {
+  if ! command -v nvidia-smi >/dev/null || [ -z "$(gpu_driver)" ]; then
+    echo "▸ GPU：未偵測到 NVIDIA GPU，略過"
+    daemon_json remove-gpu
+    return 0
+  fi
+  local driver; driver=$(gpu_driver)
+  if ! "$RUNSC" nvproxy list-supported-drivers 2>/dev/null | grep -qx "$driver"; then
+    echo "▸ GPU：驅動 $driver 不在 gVisor ${GVISOR_VERSION} 的 nvproxy 支援清單，略過（請更新驅動或 gVisor）" >&2
+    daemon_json remove-gpu
+    return 0
+  fi
+  if ! command -v nvidia-container-runtime-hook >/dev/null; then
+    echo "▸ GPU：安裝 nvidia-container-toolkit（NVIDIA 官方 apt 套件庫，以其簽章金鑰驗證）"
+    command -v apt-get >/dev/null || { echo "只支援以 apt 安裝 nvidia-container-toolkit。" >&2; exit 1; }
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor --yes -o "$NV_KEYRING"
+    curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+      | sed "s#deb https://#deb [signed-by=$NV_KEYRING] https://#g" > "$NV_LIST"
+    apt-get update -q -o Dir::Etc::sourcelist="$NV_LIST" -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 >/dev/null
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q nvidia-container-toolkit >/dev/null
+  fi
+  echo "▸ GPU：註冊 Docker runtime runsc-gpu（nvproxy，驅動 $driver）"
+  daemon_json add-gpu
 }
 
 do_install() {
@@ -102,6 +141,7 @@ do_install() {
   mkdir -p "$(dirname "$DAEMON_JSON")"
   [ -e "$DAEMON_JSON" ] || touch "$MARKER"
   daemon_json add
+  gpu_setup
   systemctl reload docker
   echo "▸ 環境防火牆"
   firewall_up
@@ -196,6 +236,11 @@ do_status() {
   echo "建置網路:      $(docker network inspect "$BUILD_NET" --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || echo 未建立)"
   echo "BuildKit:     $(docker image inspect --format '{{.Id}}' "$BUILDKIT_IMAGE" >/dev/null 2>&1 && echo 已拉取 || echo 未拉取)"
   echo "agent 服務:    $(systemctl is-active caloud-agent.service 2>/dev/null || echo 未安裝)"
+  if command -v nvidia-smi >/dev/null; then
+    echo "GPU:          $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | paste -sd ';') 驅動 $(gpu_driver)"
+    echo "nvproxy 支援:  $("$RUNSC" nvproxy list-supported-drivers 2>/dev/null | grep -qx "$(gpu_driver)" && echo 是 || echo 否)"
+    echo "GPU hook:     $(command -v nvidia-container-runtime-hook >/dev/null && echo 已安裝 || echo 未安裝)"
+  fi
 }
 
 AGENT_BIN="" SERVER="" JOIN=""

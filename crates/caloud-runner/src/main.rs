@@ -57,13 +57,33 @@ async fn main() -> anyhow::Result<()> {
     }
     let state_dir = dir.unwrap_or_else(state::default_dir);
     let envs = EnvRunner::new(docker, state_dir.clone(), dns);
-    let check = selfcheck::check(&envs, &iptables, specs::detect().disk_free_bytes).await;
+    let sp = specs::detect();
+    let mut check = selfcheck::check(&envs, &iptables, sp.disk_free_bytes).await;
     match &check.reason {
         None => tracing::info!("self-check passed: gVisor and environment isolation verified"),
         Some(r) => tracing::warn!(reason = %r, "self-check failed; this node will not accept platform environments"),
     }
+    // ADR 0022：GPU 只在隔離通過時檢查
+    if check.isolation && sp.gpu_driver.is_some() {
+        let runsc = if std::path::Path::new(specs::GVISOR_RUNSC).exists() {
+            specs::GVISOR_RUNSC
+        } else {
+            "runsc"
+        };
+        (check.gpu_ready, check.gpu_check) = selfcheck::gpu(&envs, runsc, sp.gpu_driver.as_deref()).await;
+        match &check.gpu_check {
+            None => tracing::info!(gpus = sp.gpus.len(), "GPU self-check passed (nvproxy)"),
+            Some(r) => tracing::warn!(reason = %r, "GPU self-check failed; GPU environments will not be scheduled here"),
+        }
+    }
     if self_check_only {
-        println!("gvisor={} isolation={}", check.gvisor, check.isolation);
+        println!(
+            "gvisor={} isolation={} gpu_ready={}",
+            check.gvisor, check.isolation, check.gpu_ready
+        );
+        if let Some(r) = &check.gpu_check {
+            println!("gpu_check={r}");
+        }
         if let Some(r) = &check.reason {
             println!("reason={r}");
         }
