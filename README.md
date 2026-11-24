@@ -15,6 +15,7 @@
 - [運作原理](#運作原理)
 - [部署](#部署)
 - [操作](#操作)
+- [GPU 支援](#gpu-支援)
 - [設定](#設定)
 - [疑難排解](#疑難排解)
 - [專案結構與開發](#專案結構與開發)
@@ -38,6 +39,7 @@
 | MCP 介面 | AI 助手以個人 API 權杖經 `POST /mcp` 操作 16 個工具 | ✅ |
 | 稽核紀錄 | 登入、部署、網域、角色、權杖變更皆有紀錄，標示來源（網頁／MCP） | ✅ |
 | HTTPS 自動憑證 | Let's Encrypt：網域池 wildcard（Cloudflare DNS-01）與已驗證網域（HTTP-01），`:80` 轉 HTTPS | ✅ |
+| GPU 服務 | 從 GitHub 匯入的專案可使用 NVIDIA GPU，在 gVisor 中以 nvproxy 執行，多個環境分時共用（見 [GPU 支援](#gpu-支援)） | ✅ |
 | WebSocket 轉發、即時 log、資源配額 | | M2–M3 規劃中 |
 
 ## 運作原理
@@ -217,6 +219,77 @@ volumes:
 
 完整規格見 [API 規格 §5](docs/06-api-spec.md#5-mcp-介面)。不再使用的權杖請在「API 權杖」頁撤銷。
 
+## GPU 支援
+
+從 GitHub 匯入的**專案**可以使用 NVIDIA GPU：例如模型推論、影像與影片處理、向量運算。設計與風險見 [ADR 0022](docs/adr/0022-gpu.md)。
+
+### 目前狀況
+
+| 項目 | 狀況 |
+| --- | --- |
+| 可用的 GPU 節點 | `cafeca-dev-004`：1 張 NVIDIA GeForce RTX 4060 Ti 16 GB，驅動 580.178.04 |
+| 執行方式 | gVisor（`runsc --nvproxy`）隔離，GPU 以 CDI 裝置 `caloud.dev/gpu=all` 掛入；已實測 CUDA 範例在 gVisor 中通過 |
+| 誰可以用 | 所有 Member（之後依方案開放） |
+| 適用範圍 | production、staging、驗證環境，以及驗證的測試與 lint 沙箱 |
+| 不支援 | 上傳 compose 建立的 App、建置過程（Dockerfile 的 `RUN`）、漏洞掃描；graphics 與 video 能力（Vulkan、OpenGL、NVENC／NVDEC） |
+
+GPU 是否就緒，可在「Runner 節點」頁的自我檢查欄查看：顯示「GPU 就緒」，或「GPU 未就緒」加上原因。
+
+### 如何使用
+
+在 compose 中，替需要 GPU 的服務加上宣告：
+
+```yaml
+services:
+  infer:
+    build: .
+    expose: [8000]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+```
+
+儲存庫沒有 compose，只有 Dockerfile 或語言範本時，解析器偵測到下列訊號會自動加上宣告：
+
+- CUDA 基底映像：`nvidia/cuda`、`nvcr.io/nvidia/…`、含 `cuda` 的 `pytorch/pytorch`、含 `gpu` 的 `tensorflow/tensorflow`；
+- GPU 套件：`onnxruntime-gpu`、`onnxruntime-node-gpu`、`@tensorflow/tfjs-node-gpu`、`cupy-cuda*`。
+
+自動加上的宣告列為**低信心**，確認頁需要勾選；不需要 GPU 時，編輯 compose 刪掉即可。宣告 GPU 的服務在確認頁會顯示「GPU」徽章。
+
+### 使用規範
+
+1. **只能用標準宣告。**
+   - `devices` 每一項都必須是 `capabilities: [gpu]`，`driver` 只能是 `nvidia`。
+   - `count`、`device_ids`、`options` 會被忽略：一律使用節點上所有 GPU。
+   - 不可使用 `devices:`（主機裝置）、`runtime`、`privileged`。
+2. **GPU 是共用的，顯示記憶體不隔離。** 同一張卡上的其他環境可能把顯示記憶體用完，你的服務也可能看得到別人的用量。請做到：
+   - **限制自己的用量**：例如 PyTorch 的 `torch.cuda.set_per_process_memory_fraction()`、TensorFlow 的 memory growth，或推論伺服器的顯示記憶體上限設定。
+   - **能處理 CUDA OOM**：失敗時回錯誤或重試，不要讓整個服務崩潰。
+   - **閒置時釋放顯示記憶體**：不要預先佔滿整張卡。
+3. **只開放 compute 與 utility 能力**：CUDA、cuDNN、`nvidia-smi` 可以用；圖形 API 與硬體影音編解碼不能用。
+4. **映像**：
+   - 使用 CUDA **runtime** 映像，不要用 devel；CUDA 映像通常有數 GB，Runner 磁碟有限；
+   - 映像的 CUDA 版本不可高於節點驅動支援的版本，驅動版本見「Runner 節點」頁。
+5. **建置時沒有 GPU**：Dockerfile 的 `RUN` 不能執行需要 GPU 的步驟（例如模型量化、驗證 CUDA）。這些步驟請改在服務啟動時，或在發布前任務中執行。
+6. **其他資源上限不變**：CPU、記憶體、pids 與一般服務相同，GPU 不會讓服務多拿到主機記憶體。
+7. **安全責任**：
+   - nvproxy 會把驅動呼叫交給主機核心，GPU 驅動的漏洞可能影響主機；
+   - 不要部署來源不明的 CUDA 程式或映像；
+   - 平臺會保持驅動與 gVisor 更新。
+
+### 管理者
+
+- **啟用 GPU**：Runner 主機執行 `sudo scripts/runner-setup.sh install`。偵測到 NVIDIA GPU 時，腳本會：
+  1. 安裝 NVIDIA 官方的 nvidia-container-toolkit；
+  2. 產生 `/etc/cdi/caloud-gpu.json`；
+  3. 註冊 Docker runtime `runsc-gpu`；
+  4. 以 reload 生效，不重啟既有容器。
+- **前提**：驅動版本必須在 `runsc nvproxy list-supported-drivers` 中，否則略過 GPU 設定。
+- **更新驅動後**：重新執行 `runner-setup.sh install`，並重啟 `caloud-agent`。在這之前，GPU 自我檢查不會通過，平臺也不會排入 GPU 環境。
+- **查看狀態**：`sudo scripts/runner-setup.sh status` 列出 GPU、nvproxy 支援、nvidia-ctk 與 CDI 規格；`caloud-agent --self-check` 會輸出 `gpu_ready` 與原因。
+
 ## 設定
 
 所有設定皆為環境變數（前綴 `CALOUD_`），範例見 `deploy/.env.example`。
@@ -255,6 +328,9 @@ volumes:
 | 網域開啟顯示 404「尚未綁定運作中的 App」 | 網域未驗證、未綁定，或 App 不是運作中 |
 | 網域開啟顯示 502 | 綁定的 port 不是容器實際監聽的 port，或容器尚未就緒 |
 | MCP 回 401 | 權杖錯誤、已撤銷、已過期，或使用者被改為待核准／停用 |
+| 部署 GPU 專案回「沒有可用 GPU 的 Runner 節點」 | 沒有 GPU 自我檢查通過的節點：到「Runner 節點」頁看「GPU 未就緒」的原因，常見為驅動更新後未重新執行 `runner-setup.sh install` |
+| GPU 服務出現 `CUDA out of memory` | 顯示記憶體由同一張卡上的環境共用；限制自己的用量，並在 OOM 時重試 |
+| 容器內 `cudaGetDeviceCount` 失敗或版本不符 | 映像的 CUDA 版本高於節點驅動支援的版本，請改用較舊的 CUDA runtime 映像 |
 
 ## 專案結構與開發
 
@@ -292,7 +368,7 @@ docs/images/src/build.sh      # 重新產生 README 圖示
 | [06 API 規格](docs/06-api-spec.md) | REST 與 MCP |
 | [07 安全規範](docs/07-security.md) | 威脅模型、權限矩陣、compose 政策 |
 | [08 開發規範](docs/08-coding-standards.md) | 程式風格、測試、Git |
-| [adr/](docs/adr/) | 架構決策紀錄 |
+| [adr/](docs/adr/) | 架構決策紀錄（GPU：[0022](docs/adr/0022-gpu.md)） |
 
 ## 目前限制與路線圖
 
