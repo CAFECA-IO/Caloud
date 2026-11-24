@@ -3950,7 +3950,10 @@ async fn gpu_projects_only_go_to_gpu_ready_nodes() {
         .unwrap();
     assert_eq!(node, "runner-gpu");
     let o = std::fs::read_to_string(env.dir.join(format!("runner-gpu/envs/{sub}/caloud.override.yml"))).unwrap();
-    assert!(o.contains("runtime: runsc-gpu") && o.contains("count: all"), "{o}");
+    assert!(
+        o.contains("runtime: runsc-gpu") && o.contains("caloud.dev/gpu=all") && o.contains("devices: !reset []"),
+        "{o}"
+    );
     cpu.abort();
     gpu.abort();
 }

@@ -381,7 +381,7 @@ fn check_service(name: &str, svc: &Mapping, policy: Policy) -> Result<bool, Poli
 }
 
 /// GPU 宣告：每一項都只能是 `capabilities: [gpu]`（可另帶 `driver: nvidia`、`count`、`device_ids`、`options`，
-/// 後三者在 override 中一律改寫為 `count: all`，ADR 0022）
+/// override 一律清掉宣告、改以 CDI 裝置 `caloud.dev/gpu=all` 掛入，ADR 0022）
 fn gpu_devices_ok(d: &Value) -> bool {
     let Some(list) = d.as_sequence().filter(|l| !l.is_empty()) else {
         return false;

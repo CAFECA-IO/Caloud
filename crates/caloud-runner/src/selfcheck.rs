@@ -157,8 +157,8 @@ pub async fn gpu(env: &EnvRunner, runsc: &str, driver: Option<&str>) -> (bool, O
                 "--rm",
                 "--runtime",
                 caloud_orchestrator::sandbox::RUNTIME_GPU,
-                "--gpus",
-                "all",
+                "--device",
+                caloud_orchestrator::sandbox::GPU_DEVICE,
                 "--network",
                 "none",
                 PROBE_IMAGE,
@@ -367,7 +367,7 @@ mod tests {
         assert_eq!(gpu(&ok, &runsc, Some("580.178.04")).await, (true, None));
         let log = std::fs::read_to_string(base.join("docker.log")).unwrap();
         assert!(
-            log.contains("run --rm --runtime runsc-gpu --gpus all --network none busybox:1.36"),
+            log.contains("run --rm --runtime runsc-gpu --device caloud.dev/gpu=all --network none busybox:1.36"),
             "{log}"
         );
         let (r, why) = gpu(&ok, &runsc, Some("590.1.1")).await;

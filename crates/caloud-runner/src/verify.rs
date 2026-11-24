@@ -651,7 +651,7 @@ impl EnvRunner {
         let mut c = Command::new(&self.docker_bin);
         c.args(["run", "--rm", "--name", &name, "--runtime", runtime]);
         if gpu {
-            c.args(["--gpus", "all"]);
+            c.args(["--device", sandbox::GPU_DEVICE]);
         }
         c.args([
             "--network",
@@ -925,7 +925,7 @@ mod tests {
         assert!(!std::fs::read_to_string(&log).unwrap().contains("down -v"), "保留時不銷毀");
         std::fs::remove_file(base.join("BUILD_FAIL")).unwrap();
 
-        // ADR 0022：GPU 服務 → 環境用 runsc-gpu，測試沙箱帶 --gpus all
+        // ADR 0022：GPU 服務 → 環境用 runsc-gpu，測試沙箱掛入 CDI 裝置
         let mut g = spec("run4");
         g.env.compose =
             "services:\n  web:\n    build: ./app\n    deploy: {resources: {reservations: {devices: [{capabilities: [gpu]}]}}}\n".into();
@@ -933,7 +933,10 @@ mod tests {
         r.verify(&g, &tx).await;
         let _ = collect(&mut rx);
         let d = std::fs::read_to_string(&log).unwrap();
-        assert!(d.contains("--runtime runsc-gpu --gpus all --network caloud-build"), "{d}");
+        assert!(
+            d.contains("--runtime runsc-gpu --device caloud.dev/gpu=all --network caloud-build"),
+            "{d}"
+        );
         let o = std::fs::read_to_string(base.join("state/envs/v1v2v3v4v5v6v7v8/caloud.override.yml")).unwrap_or_default();
         assert!(o.is_empty() || o.contains("runtime: runsc-gpu"), "{o}");
         let _ = std::fs::remove_dir_all(&base);

@@ -11,6 +11,8 @@ use std::net::Ipv4Addr;
 pub const RUNTIME: &str = "runsc";
 /// GPU 服務的 runtime：同一個 runsc，帶 `--nvproxy`（ADR 0022）
 pub const RUNTIME_GPU: &str = "runsc-gpu";
+/// GPU 以 CDI 裝置掛入（`runner-setup.sh` 產生 `/etc/cdi/caloud-gpu.json`，ADR 0022）
+pub const GPU_DEVICE: &str = "caloud.dev/gpu=all";
 
 /// 是否有服務宣告 GPU（ADR 0022）
 pub fn needs_gpu(compose: &ValidatedCompose) -> bool {
@@ -33,14 +35,16 @@ pub fn declares_gpu(yaml: &str) -> bool {
         })
 }
 
-/// GPU 宣告一律改寫為使用節點上所有 GPU（分時共用）
+/// 清掉用戶的 GPU 宣告（Docker 的 `--gpus` 要重啟 daemon 才能用），改由 CDI 裝置掛入所有 GPU（分時共用）
 fn gpu_reservation() -> Value {
-    let mut dev = Mapping::new();
-    dev.insert("driver".into(), "nvidia".into());
-    dev.insert("count".into(), "all".into());
-    dev.insert("capabilities".into(), Value::Sequence(vec!["gpu".into()]));
     let mut reservations = Mapping::new();
-    reservations.insert("devices".into(), overriding(Value::Sequence(vec![Value::Mapping(dev)])));
+    reservations.insert(
+        "devices".into(),
+        Value::Tagged(Box::new(TaggedValue {
+            tag: Tag::new("reset"),
+            value: Value::Sequence(vec![]),
+        })),
+    );
     let mut resources = Mapping::new();
     resources.insert("reservations".into(), Value::Mapping(reservations));
     let mut deploy = Mapping::new();
@@ -180,6 +184,7 @@ pub fn env_override_with(
         let mut svc = Mapping::new();
         if compose.gpu_services.contains(name) {
             svc.insert("runtime".into(), RUNTIME_GPU.into());
+            svc.insert("devices".into(), Value::Sequence(vec![GPU_DEVICE.into()]));
             svc.insert("deploy".into(), gpu_reservation());
         } else {
             svc.insert("runtime".into(), RUNTIME.into());
@@ -314,7 +319,7 @@ mod tests {
         assert!(!needs_gpu(&c));
     }
 
-    // ADR 0022：只有宣告 GPU 的服務用 runsc-gpu，宣告改寫為 count: all
+    // ADR 0022：只有宣告 GPU 的服務用 runsc-gpu，宣告改為 CDI 裝置
     #[test]
     fn gpu_services_use_nvproxy_runtime() {
         let y = "services:\n  infer:\n    image: x\n    deploy: {resources: {limits: {cpus: '2'}, reservations: {devices: [{capabilities: [gpu], device_ids: ['3']}]}}}\n  web:\n    image: y\n";
@@ -325,14 +330,9 @@ mod tests {
         assert_eq!(d["services"]["infer"]["runtime"], RUNTIME_GPU);
         assert_eq!(d["services"]["web"]["runtime"], RUNTIME);
         assert!(d["services"]["web"].get("deploy").is_none());
-        assert!(o.contains("devices: !override"), "{o}");
-        let dev = match &d["services"]["infer"]["deploy"]["resources"]["reservations"]["devices"] {
-            Value::Tagged(t) => t.value[0].clone(),
-            v => panic!("{v:?}"),
-        };
-        assert_eq!(dev["count"], "all");
-        assert_eq!(dev["driver"], "nvidia");
-        assert!(dev.get("device_ids").is_none());
+        assert!(o.contains("devices: !reset []"), "{o}");
+        assert_eq!(d["services"]["infer"]["devices"][0], GPU_DEVICE);
+        assert!(d["services"]["web"].get("devices").is_none());
         assert!(declares_gpu(y) && !declares_gpu("services: {web: {image: y}}") && !declares_gpu("::"));
     }
 }

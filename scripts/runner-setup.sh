@@ -10,7 +10,7 @@
 # 只動 Caloud 自己的檔案與 chain：
 #   /usr/local/lib/caloud/gvisor/            runsc 與 gvisor-bin/
 #   /etc/docker/daemon.json                  只合併 runtimes.runsc 與（有 GPU 時）runtimes.runsc-gpu（預設 runtime 不變）
-#   有 NVIDIA GPU 時（ADR 0022）：NVIDIA 官方 apt 套件 nvidia-container-toolkit（提供 Docker --gpus 的 hook）
+#   有 NVIDIA GPU 時（ADR 0022）：NVIDIA 官方 apt 套件 nvidia-container-toolkit、/etc/cdi/caloud-gpu.json
 #   iptables CALOUD-ENV-FWD（DOCKER-USER）、CALOUD-ENV-IN（INPUT）
 #   /etc/systemd/system/caloud-firewall.service  開機還原規則
 #   docker 網路 caloud-build（bridge cldbuild，10.239.0.0/24）與 BuildKit 映像（ADR 0018）
@@ -93,23 +93,49 @@ PY
 # ---------------------------------------------------------------- GPU（ADR 0022）
 NV_KEYRING=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
 NV_LIST=/etc/apt/sources.list.d/nvidia-container-toolkit.list
+CDI_SPEC=/etc/cdi/caloud-gpu.json
 
 gpu_driver() { nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | tr -d ' '; }
 
-# 有 NVIDIA GPU 時：安裝 nvidia-container-toolkit、註冊 runsc-gpu；驅動不在 gVisor 支援清單時略過
+# CDI 規格 caloud.dev/gpu：去掉 nvidia-persistenced 的 socket 與執行檔（gVisor 無法 bind mount Unix socket）
+gpu_cdi() {
+  local tmp; tmp=$(mktemp --suffix .json)
+  nvidia-ctk cdi generate --quiet --vendor caloud.dev --class gpu --format json --output "$tmp"
+  mkdir -p "$(dirname "$CDI_SPEC")"
+  python3 - "$tmp" "$CDI_SPEC" <<'PY'
+import json, os, sys
+src, dst = sys.argv[1], sys.argv[2]
+spec = json.load(open(src))
+def strip(edits):
+    if edits.get("mounts"):
+        edits["mounts"] = [m for m in edits["mounts"] if "nvidia-persistenced" not in m.get("hostPath", "")]
+strip(spec.get("containerEdits", {}))
+for d in spec.get("devices", []):
+    strip(d.get("containerEdits", {}))
+tmp = dst + ".caloud-tmp"
+with open(tmp, "w") as f:
+    json.dump(spec, f, indent=1)
+os.replace(tmp, dst)
+PY
+  rm -f "$tmp"
+}
+
+# 有 NVIDIA GPU 時：安裝 nvidia-container-toolkit、產生 CDI 規格、註冊 runsc-gpu；驅動不在 gVisor 支援清單時略過
 gpu_setup() {
   if ! command -v nvidia-smi >/dev/null || [ -z "$(gpu_driver)" ]; then
     echo "▸ GPU：未偵測到 NVIDIA GPU，略過"
     daemon_json remove-gpu
+    rm -f "$CDI_SPEC"
     return 0
   fi
   local driver; driver=$(gpu_driver)
   if ! "$RUNSC" nvproxy list-supported-drivers 2>/dev/null | grep -qx "$driver"; then
     echo "▸ GPU：驅動 $driver 不在 gVisor ${GVISOR_VERSION} 的 nvproxy 支援清單，略過（請更新驅動或 gVisor）" >&2
     daemon_json remove-gpu
+    rm -f "$CDI_SPEC"
     return 0
   fi
-  if ! command -v nvidia-container-runtime-hook >/dev/null; then
+  if ! command -v nvidia-ctk >/dev/null; then
     echo "▸ GPU：安裝 nvidia-container-toolkit（NVIDIA 官方 apt 套件庫，以其簽章金鑰驗證）"
     command -v apt-get >/dev/null || { echo "只支援以 apt 安裝 nvidia-container-toolkit。" >&2; exit 1; }
     curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor --yes -o "$NV_KEYRING"
@@ -118,6 +144,8 @@ gpu_setup() {
     apt-get update -q -o Dir::Etc::sourcelist="$NV_LIST" -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 >/dev/null
     DEBIAN_FRONTEND=noninteractive apt-get install -y -q nvidia-container-toolkit >/dev/null
   fi
+  echo "▸ GPU：產生 CDI 規格 $CDI_SPEC（caloud.dev/gpu）"
+  gpu_cdi
   echo "▸ GPU：註冊 Docker runtime runsc-gpu（nvproxy，驅動 $driver）"
   daemon_json add-gpu
 }
@@ -160,7 +188,7 @@ ExecStop=$PREFIX/runner-setup.sh firewall-down
 [Install]
 WantedBy=multi-user.target
 UNIT
-  install -m 755 "$0" "$PREFIX/runner-setup.sh"
+  [ "$0" -ef "$PREFIX/runner-setup.sh" ] || install -m 755 "$0" "$PREFIX/runner-setup.sh"
   systemctl daemon-reload
   systemctl enable caloud-firewall.service >/dev/null 2>&1
   echo "▸ 建置環境（網路 $BUILD_NET、BuildKit 映像）"
@@ -217,6 +245,7 @@ do_uninstall() {
   if [ -e "$DAEMON_JSON" ]; then
     # 先移除 runsc 並 reload（直接刪檔再 reload 不會清掉已註冊的 runtime）
     daemon_json remove
+    rm -f "$CDI_SPEC"
     systemctl reload docker
     if [ -e "$MARKER" ]; then
       python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); c.get("runtimes") == {} and c.pop("runtimes"); sys.exit(0 if c == {} else 1)' "$DAEMON_JSON" \
@@ -239,7 +268,8 @@ do_status() {
   if command -v nvidia-smi >/dev/null; then
     echo "GPU:          $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | paste -sd ';') 驅動 $(gpu_driver)"
     echo "nvproxy 支援:  $("$RUNSC" nvproxy list-supported-drivers 2>/dev/null | grep -qx "$(gpu_driver)" && echo 是 || echo 否)"
-    echo "GPU hook:     $(command -v nvidia-container-runtime-hook >/dev/null && echo 已安裝 || echo 未安裝)"
+    echo "nvidia-ctk:   $(command -v nvidia-ctk >/dev/null && echo 已安裝 || echo 未安裝)"
+    echo "CDI 規格:     $([ -f "$CDI_SPEC" ] && echo "$CDI_SPEC" || echo 未產生)"
   fi
 }
 
