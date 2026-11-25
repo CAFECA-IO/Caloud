@@ -96,7 +96,7 @@
 | POST | `/api/auth/logout` | 公開 | FR-AUTH-06 |
 | GET | `/api/me` | 登入 | — |
 
-**GET /api/auth/config** → `200 { "wallet": "https://cafeca.io", "domain": "<PUBLIC_ORIGIN>" }`
+**GET /api/auth/config** → `200 { "wallet": "https://cafeca.io", "domain": "<PUBLIC_ORIGIN>", "first_user": false }`；`first_user`：系統還沒有任何使用者（下一位登入者成為 Super Admin，ADR 0024）。
 
 **POST /api/auth/nonce** → `200 { "nonce": "22 字元 base64url" }`
 
@@ -322,6 +322,8 @@
 | GET | `/api/projects/{id}/vars` | 擁有者 | FR-ENV-05 |
 | PUT | `/api/projects/{id}/vars` | 擁有者 | FR-ENV-05 |
 | PUT | `/api/projects/{id}/analysis` | 擁有者 | FR-AN-03、FR-AN-04 |
+| GET | `/api/projects/{id}/volume-fix` | 擁有者 | FR-ENV-15 |
+| POST | `/api/projects/{id}/volume-fix` | 擁有者 | FR-ENV-15 |
 
 **Project**
 
@@ -344,21 +346,25 @@
 { "id": "uuid", "git_ref": "HEAD", "commit": "98b705d…", "created_at": 0,
   "result": { "source": { "kind": "template", "template": "node/next" }, "root": "", "compose_dir": "",
               "compose": "services: …", "services": [ { "name": "web", "role": "app", "port": 3000, "public": true, "gpu": false } ],
-              "env": [ { "name": "PORT", "provider": "platform", "evidence": [], "build_time": false, "varies_by_env": false } ],
-              "findings": [ { "key": "port", "message": "…", "confidence": "high", "evidence": [ { "file": "package.json", "line": 23 } ] } ],
+              "env": [ { "name": "PORT", "provider": "platform", "evidence": [], "build_time": false, "varies_by_env": false, "optional": false } ],
+              "findings": [ { "key": "port", "message": "…", "confidence": "high", "evidence": [ { "file": "package.json", "line": 23 } ] },
+                            { "key": "persistent_dir", "message": "…", "confidence": "medium", "evidence": [], "volume": { "service": "web", "target": "/app/.data" } } ],
               "errors": [], "needs_confirmation": false },
-  "compose": null, "public_service": null, "acknowledged": [], "confirmed_by": null, "confirmed_at": null }
+  "compose": null, "public_service": null, "acknowledged": [], "confirmed_by": null, "confirmed_at": null, "confirmed_via": null }
 ```
 
 - `result` 為 `caloud_analyzer::Analysis`；`compose` 為用戶編輯版（null 表示使用 `result.compose`）。
 - `env[].build_time`：建置時寫入前端的變數（FR-AN-09）；`env[].varies_by_env`：值隨環境不同（網址、origin 類），staging 與 production 需各自建置。舊紀錄缺少時視為 false。
 - M5-08 新增的 finding `key`：`persistent_dir`（FR-AN-07）、`system_package`、`native_module`（FR-AN-08）、`build_env`（FR-AN-09）。
+- ADR 0024：`env[].optional` 為程式中有預設值的變數（FR-AN-12）；`persistent_dir` 能確定容器內路徑時附 `volume: { service, target }`，可用 `volume-fix` 加上 volume。舊紀錄缺少時視為 false／無。
+- `confirmed_via`：`user`（用戶確認）或 `auto`（設定相同，沿用上一份確認，ADR 0024）。
+- 回應另有 `confirmed_diff`：最新解析未自動沿用確認時（設定有變動），最新與確認版本有效 compose 的差異 `{ "before", "after" }`；相同或沒有確認時為 null。
 
 **PATCH /api/projects/{id}** `{ "name"?, "git_ref"?, "root"?, "commit_header"? }` → `200 Project`；`commit_header`（布林，預設 true）控制專案環境的回應是否帶 `X-Caloud-Commit`（ADR 0023）；`git_ref` 或 `root` 改變時重新解析（`git_ref` 給空字串表示預設分支）。
 
 **DELETE /api/projects/{id}** → `204`；同時刪除解析紀錄與取得的原始碼。
 
-**POST /api/projects/{id}/analysis** → `202 Project`：以目前設定重新取得並解析；解析中回 `409`。新結果另存一筆，已確認的版本不變（FR-AN-10）。
+**POST /api/projects/{id}/analysis** → `202 Project`：以目前設定重新取得並解析；解析中回 `409`。新結果另存一筆，已確認的版本不變（FR-AN-10）；設定相同時自動沿用確認（ADR 0024）。
 
 **PUT /api/projects/{id}/analysis** `{ "compose"?, "public_service", "acknowledged": [0, 3] }` → `200 Project`（`confirmed`），確認最新一筆解析：
 
@@ -383,11 +389,13 @@
 - `status`：`deploying` → `running` | `failed`；`stage`：`fetch`、`build`、`release`、`start`、`health`，成功後為 `done`。
 - 版本（ADR 0023）：`target_commit`（同 `commit`）是本次部署的目標；`running_commit` 與 `deployed_at` 只在健康檢查通過時更新，部署失敗時仍是上一個成功的版本（從未成功為 null）；`services[].image` 是容器實際的映像，`commit` 由平臺映像標籤取得（現成映像為 null）；`branch_commit` 為最新解析的 commit，`branch_verify` 為它最近一次驗證的狀態（沒有時為 null）。`logs` 為最近 300 行。
 - 重新部署時，`fetch`、`build` 階段舊版仍在執行（`status` 維持 `running`）；這兩個階段失敗時 `status` 仍為 `running`，`error` 與 `stage` 指出失敗的階段。進入 `start` 後舊版停止，路由暫時移除，健康檢查通過後恢復。
-- `pending_changes`：最新解析的 compose 與確認版本不同；確認前部署仍使用確認時的 commit。設定相同時部署最新解析的 commit。
+- `pending_changes`：最新解析的設定與確認版本不同（未自動沿用確認，ADR 0024）；確認前部署仍使用確認時的 commit。設定相同時部署最新解析的 commit。
 - 需要有通過自我檢查且具備建置環境（`specs.buildkit`）的平臺節點；compose 宣告 GPU 時另需 `specs.gpu_ready`，沒有時回 `409`「沒有可用 GPU 的 Runner 節點」（ADR 0022）。
-- `vars_pending`：秘密變數在上次部署後有變更，重新部署後生效；`missing_vars`：解析需要（provider `user`）但這個環境尚未設定的變數名稱，不阻擋部署。
+- `vars_pending`：秘密變數在上次部署後有變更，重新部署後生效；`missing_vars`：必填（provider `user`、非 `optional`）、未設定、不是 compose 提供、沒有標為「不需要」的變數名稱，不阻擋部署（ADR 0024）。
 
-**部署關卡**（ADR 0020）：`POST /api/projects/{id}/deploy` 可帶 `{ "force": true }`（admin+，略過驗證，稽核記錄 `forced`；member 帶 `force` 回 `403`）。目標 commit 尚未通過驗證時不部署，改為啟動驗證並在通過後部署，回 `202 { "verification": Verification }`；已通過時回 `202 Deployment`。`deployment` 另有 `verified`（目標 commit 是否已通過驗證）。
+**部署關卡**（ADR 0020）：`POST /api/projects/{id}/deploy` 可帶 `{ "force": true }`（admin+，略過驗證，稽核記錄 `forced`；member 帶 `force` 回 `403`）。目標 commit 尚未在相同設定（設定指紋，ADR 0024）下通過驗證時不部署，改為啟動驗證並在通過後部署，回 `202 { "verification": Verification }`；已通過時回 `202 Deployment`。`deployment` 另有 `verified`（目標 commit 是否已通過驗證）。
+
+**部署指定版本**（FR-ENV-15，ADR 0024）：`POST /api/projects/{id}/deploy` 帶 `{ "commit": "<40 碼 sha>" }`。這個 commit 有非 PR 的通過驗證時，以那次驗證的設定部署；否則若曾成功部署，以那次部署的設定部署（回到這個版本）；都沒有回 `409`。不再經過部署關卡；不可與 `force` 併用（`400`）。回滾不還原 volume 資料與秘密變數。
 
 **驗證**（FR-CI-01～05、FR-RPT-01～04，[ADR 0020](adr/0020-verification.md)）
 
@@ -399,16 +407,19 @@
 { "id": "uuid", "project": "uuid", "commit": "98b705d…", "branch": "main", "trigger": "manual", "status": "running",
   "stage": "test", "stages": { "fetch": "passed", "analyze": "passed", "build": "passed", "static": "passed", "start": "passed",
   "test": "running", "smoke": "pending", "logs": "pending", "report": "pending", "destroy": "pending" },
-  "counts": { "blocker": 0, "high": 1, "medium": 2, "low": 0 }, "deploy_after": false, "keep_until": null,
+  "counts": { "blocker": 0, "high": 1, "medium": 2, "low": 0 }, "deploy_after": false, "deploy_note": null, "keep_until": null,
+  "stage_times": { "fetch": [0, 0], "build": [0, null] },
   "created_by": "0x…", "created_at": 0, "started_at": 0, "finished_at": null, "error": null }
 ```
 
 - `status`：`queued` → `running` → `passed` | `failed` | `canceled` | `error`；有 Blocker 或 High 即 `failed`。
 - 階段狀態：`pending`、`running`、`passed`、`failed`、`skipped`。
+- `deploy_note`：`deploy_after` 為 true 但通過後沒有部署時的原因（例：「驗證期間設定有變動」，ADR 0024）；`stage_times`：各階段的開始與結束時間（Unix 秒，未結束為 null）。
+- `GET /api/projects/{id}` 的 `verification` 為 `{ "latest": Verification | null, "verified": bool, "avg_secs": 1120 | null }`；`avg_secs` 為最近 3 次已結束（passed／failed）、非 PR 驗證的平均耗時。
 
 **GET /api/projects/{id}/verifications** → `200 [Verification]`（新到舊，最多 50 筆）。
 
-**GET /api/projects/{id}/deployments** → `200 [{ "id", "env", "commit", "trigger", "status", "stage", "error", "created_by", "created_at", "finished_at" }]`（新到舊，最多 20 筆，ADR 0023）。`trigger`：`manual`、`forced`、`push`；`status`：`in_progress`、`success`、`failure`；失敗時 `stage` 為失敗的階段。
+**GET /api/projects/{id}/deployments** → `200 [{ "id", "env", "commit", "trigger", "status", "stage", "error", "created_by", "created_at", "finished_at", "rollback" }]`（新到舊，最多 20 筆，ADR 0023）；`rollback`：可「回到這個版本」（成功、有記錄設定、不是目前執行中的版本，ADR 0024）。`trigger`：`manual`、`forced`、`push`；`status`：`in_progress`、`success`、`failure`；失敗時 `stage` 為失敗的階段。
 
 **GET /api/verifications/{id}** → `200 { "verification": Verification, "issues": [Issue], "fixed": [Issue], "previous": "uuid" | null, "logs": [ { "stage", "line", "at" } ] }`；`Issue`：
 
@@ -434,12 +445,19 @@
 ```json
 { "env": "production", "rev": 3, "items": [
   { "name": "SESSION_SECRET", "set": true, "hint": "…k3Zq", "source": "user", "needed": true, "build_time": false, "evidence": [ { "file": "src/lib/auth_session.ts", "line": 29 } ], "updated_at": 0 },
+  { "name": "LOG_LEVEL", "set": false, "hint": null, "source": "user", "needed": true, "optional": true, "ignored": false, "build_time": false, "evidence": [], "updated_at": null },
+  { "name": "DATA_DIR", "set": false, "hint": null, "source": "compose", "value": "/app/.data", "needed": true, "optional": false, "ignored": false, "build_time": false, "evidence": [], "updated_at": null },
   { "name": "CALOUD_DB_PASSWORD", "set": true, "hint": null, "source": "generated", "needed": false, "build_time": false, "evidence": [], "updated_at": 0 } ] }
 ```
 
 - 列出確認的解析中需要用戶提供的變數（未設定時 `set: false`）、已設定的變數與平臺產生的變數；`hint` 只在值長度 ≥ 12 時為末 4 碼。
+- ADR 0024（FR-AN-12）：`optional` 為程式中有預設值（選填）；確認的 compose 任一服務 `environment` 已提供值（不是 `${NAME}` 引用）且未設定秘密值時，`source` 為 `compose` 並附 `value`；`ignored` 為用戶標為「不需要」。
 
-**PUT /api/projects/{id}/vars** `{ "env": "production", "set": { "NAME": "value" }, "unset": ["NAME"] }` → `200`（同 GET）。名稱須為 `[A-Za-z_][A-Za-z0-9_]*`，`CALOUD_` 開頭保留給平臺（`400`）；值最長 32 KB、每個環境最多 200 個（`400`）；未設定主金鑰回 `409`。值不出現在回應、稽核與 log。
+**PUT /api/projects/{id}/vars** `{ "env": "production", "set": { "NAME": "value" }, "unset": ["NAME"] }` → `200`（同 GET）。名稱須為 `[A-Za-z_][A-Za-z0-9_]*`，`CALOUD_` 開頭保留給平臺（`400`）；值最長 32 KB、每個環境最多 200 個（`400`）；未設定主金鑰回 `409`。值不出現在回應、稽核與 log。另可帶 `"ignore": ["NAME"]`、`"unignore": ["NAME"]` 標記或取消「不需要」（不影響 `rev` 與部署注入）。
+
+**GET /api/projects/{id}/volume-fix?service=web&target=/app/.data** → `200 { "volume": "web-data", "before": "services: …", "after": "services: …" }`（FR-ENV-15，ADR 0024）：以確認的有效 compose 產生加上具名 volume 的修改；服務不存在、目標不是絕對路徑或已有掛載回 `400`；未確認回 `409`。
+
+**POST /api/projects/{id}/volume-fix** `{ "service": "web", "target": "/app/.data", "deploy": false }` → `200 { "volume": "web-data", "deployment": Deployment | null, "verification": Verification | null }`：以平臺政策檢查後寫入確認的解析（成為編輯過的 compose），稽核 `project_volume_fix`；`deploy: true` 時接著部署（與 `POST deploy` 相同，未驗證時先驗證）。不搬移現有資料。
 
 ### 3.8 GitHub（ADR 0017）
 

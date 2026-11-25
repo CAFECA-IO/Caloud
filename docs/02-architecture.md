@@ -179,12 +179,13 @@ MCP 用戶端 ──POST /mcp (Bearer cld_…)──► mcp.rs ──► service
 | `github_app` | `id`（固定 1） | GitHub App：App ID、slug、Client ID；client secret、私鑰、webhook secret 的密文與提示 | FR-GH-05 |
 | `github_installations` | `id`（GitHub installation id） | 擁有者（Caloud 帳號）、GitHub 帳號名稱與類型、是否暫停 | FR-GH-01 |
 | `github_deliveries` | `delivery_id` | webhook 去重：事件類型、收到時間（保留 7 天） | FR-GH-02 |
-| `analyses` | `id`（UUID） | 專案、ref、commit、解析結果（`caloud_analyzer::Analysis` JSON）、用戶編輯的 compose、對外服務、已確認的低信心項目、確認者與時間 | FR-AN-03、FR-AN-04、FR-AN-10 |
+| `analyses` | `id`（UUID） | 專案、ref、commit、解析結果（`caloud_analyzer::Analysis` JSON）、用戶編輯的 compose、對外服務、已確認的低信心項目、確認者與時間、確認方式（user／auto，ADR 0024） | FR-AN-03、FR-AN-04、FR-AN-10 |
 | `environments` | `subdomain` | 環境：所屬專案、本次部署的目標 commit 與階段（fetch／build／release／start／health／done）、執行中的 commit 與上線時間（健康檢查通過才更新，ADR 0023）、主機名稱、用途（production／staging／verify）、所在節點、節點內網段索引、compose、對外服務與 port、狀態（deploying／running／failed／destroying）、錯誤、服務 IP、建立者 | FR-OPS-13 |
-| `deployments` | `id`（UUID） | 部署紀錄：專案、環境、commit、觸發（manual／forced／push）、狀態（in_progress／success／failure）、失敗階段、錯誤、GitHub deployment ID、建立者、開始與結束時間（ADR 0023） | FR-ENV-14、FR-GH-06 |
+| `deployments` | `id`（UUID） | 部署紀錄：專案、環境、commit、使用的解析（回滾依據，ADR 0024）、觸發（manual／forced／push）、狀態（in_progress／success／failure）、失敗階段、錯誤、GitHub deployment ID、建立者、開始與結束時間（ADR 0023） | FR-ENV-14、FR-ENV-15、FR-GH-06 |
 | `deploy_logs` | 自增 `id` | 部署 log：環境、階段、內容、時間；每個環境保留最近 2000 行（ADR 0018） | FR-ENV-12 |
 | `project_vars` | `(project, env, name)` | 秘密變數：值以主金鑰加密、提示（末 4 碼）、是否平臺產生、更新者與時間；`projects.vars_rev` 每次變更加 1，`environments.vars_rev` 記錄部署時的版本（ADR 0019） | FR-ENV-05、FR-APP-11 |
-| `verifications` | `id`（UUID） | 驗證執行（另含 GitHub check run ID、PR 編號、建置秒數，ADR 0021）：專案、commit、分支、觸發（push／manual／deploy）、狀態（queued／running／passed／failed／canceled／error）、目前階段、各階段狀態、驗證環境與節點、驗證後部署、保留到期、問題計數、時間（ADR 0020） | FR-CI-01～05、FR-RPT-01 |
+| `project_var_ignores` | `(project, name)` | 用戶標為「不需要」的變數、標記者與時間（ADR 0024） | FR-AN-12 |
+| `verifications` | `id`（UUID） | 驗證執行（另含 GitHub check run ID、PR 編號、建置秒數，ADR 0021）：專案、commit、分支、觸發（push／manual／deploy）、狀態（queued／running／passed／failed／canceled／error）、目前階段、各階段狀態、驗證環境與節點、驗證後部署、設定指紋、未自動部署的原因、各階段起訖時間（ADR 0024）、保留到期、問題計數、時間（ADR 0020） | FR-CI-01～05、FR-RPT-01 |
 | `verification_issues` | 自增 `id` | 問題：驗證、指紋、等級、階段、規則、標題、說明、檔案與行號；同一執行內指紋唯一 | FR-RPT-01、FR-RPT-02 |
 | `verification_logs` | 自增 `id` | 驗證 log：驗證、階段、內容、時間；每次執行最多 2000 行 | FR-CI-02 |
 | `build_settings` | `id`（固定 1） | 建置資源：CPU、記憶體（MB）、每位用戶每月建置分鐘（0＝不限）（ADR 0021） | FR-CI-06 |

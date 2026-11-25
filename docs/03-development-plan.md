@@ -148,6 +148,7 @@
 | M7-18 | 建置識別與版本可見性：控制面與 agent 版本、主控台快取與更新提示、專案執行中版本、平臺變數、`X-Caloud-Commit`、部署紀錄（[ADR 0023](adr/0023-versions.md)） | FR-OPS-15、FR-ENV-14 | 🚧 |
 | M7-19 | GitHub Deployments（ADR 0023） | FR-GH-06 | 🚧 |
 | M7-17 | GPU 執行環境：`runsc-gpu`（nvproxy）、GPU 偵測與自我檢查、調度、解析器偵測（[ADR 0022](adr/0022-gpu.md)） | FR-ENV-13 | 🚧 |
+| M7-20 | 專案頁改版：分頁（概況／設定／環境變數／紀錄）、設定沿用與自動部署修正、部署指定版本與回滾、環境變數分類、加上 volume、驗證預估時間（[ADR 0024](adr/0024-project-page.md)）；提前 M7-01 的回滾 | FR-UI-14、FR-AN-12、FR-ENV-15 | 🚧 |
 
 ### M8 訂閱與上線
 

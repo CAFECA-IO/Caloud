@@ -50,7 +50,11 @@
 | Checkbox | `c-check` | 勾選項目（`<label class="c-check"><input type="checkbox">說明</label>`） | FR-APP-16、FR-DOM-09 |
 | Search | `c-search` | 帶圖示的搜尋框 | FR-UI-08 |
 | Segmented | `c-segmented`、`c-segmented__item` | 篩選切換（`aria-pressed`） | FR-UI-08 |
-| Tabs | `c-tabs`、`c-tabs__item` | Drawer 內分頁（`role="tab"`） | FR-UI-10 |
+| Tabs | `c-tabs`、`c-tabs__item`、`c-tabs__count` | Drawer 內分頁（`role="tab"`）；頁面分頁以連結（`aria-current="page"`），`__count` 標示待處理數 | FR-UI-10、FR-UI-14 |
+| Switch | `c-switch`、`c-switch__track`、`c-switch__text` | 開關設定（`<input type="checkbox" role="switch">`）；取代開關用途的 Checkbox | FR-UI-14 |
+| Diff | `c-diff`、`c-diff__line`、`c-diff__line--add`、`c-diff__line--del` | compose 等文字的逐行差異 | FR-UI-14、FR-ENV-15 |
+| Flow | `c-flow`、`c-flow__step`、`c-flow__label`、`c-flow__meta` | 驗證、部署的階段流程條；步驟加 `is-done`／`is-current`／`is-failed` | FR-UI-14 |
+| Menu | `c-menu`、`c-menu__list`、`c-menu__item`、`c-menu__item--danger` | 「更多」選單（`<details>`） | FR-UI-14 |
 | Card | `c-card`、`c-card__header`、`c-card__title`、`c-card__body`、`c-card__body--flush` | 內容分區；`--flush` 給表格 | — |
 | Stat | `c-stat`、`c-stat__label`、`c-stat__value`、`c-stat__meta` | 總覽數字卡，可為連結 | FR-UI-09 |
 | Table | `c-table-wrap`、`c-table`、`c-table__primary`、`c-table__secondary`、`c-table__actions` | 資料列表；可點擊列加 `is-clickable` | — |
@@ -64,12 +68,12 @@
 | KeyValue | `c-kv`、`c-kv__key`、`c-kv__value` | 詳細資料的欄位列表 | FR-UI-10 |
 | Stepper | `c-stepper`、`c-stepper__step`、`c-stepper__index`、`c-stepper__content`、`c-stepper__label` | 多步驟流程；步驟加 `is-done`／`is-current` | FR-UI-07 |
 | Drawer | `c-drawer`、`c-drawer__header`、`c-drawer__heading`、`c-drawer__title`、`c-drawer__body`、`c-drawer__footer` | 右側面板，檢視／編輯單一資源 | FR-UI-10 |
-| ConfirmDialog | `c-dialog`、`c-dialog__body`、`c-dialog__title`、`c-dialog__actions` | 破壞性操作確認 | FR-UI-03 |
+| ConfirmDialog | `c-dialog`、`c-dialog--wide`、`c-dialog__body`、`c-dialog__title`、`c-dialog__actions` | 破壞性操作確認；`--wide`（640px）放差異等較寬內容 | FR-UI-03 |
 | Toast | `c-toast-region`、`c-toast`、`c-toast--success`、`c-toast--danger` | 操作結果短暫回饋 | FR-UI-05 |
 | Login | `c-login`、`c-login__panel`、`c-login__mark`、`c-login__title`、`c-login__desc` | 登入與等待核准畫面；`__mark` 為品牌標誌圖（04 §4.1） | FR-AUTH-01、FR-USER-04 |
 | Layout | `l-stack`、`l-row`、`l-grid`、`l-spacer` | 垂直堆疊／水平排列／自動欄格／撐開空間 | — |
 | Utilities | `u-muted`、`u-small`、`u-mono`、`u-nowrap`、`u-truncate`、`u-hidden`、`u-sr-only` | 次要色／小字／等寬／不換行／截斷／隱藏／僅報讀器 | — |
-| States | `is-active`、`is-current`、`is-done`、`is-clickable`、`is-loading` | 由 JS 切換 | — |
+| States | `is-active`、`is-current`、`is-done`、`is-failed`、`is-clickable`、`is-loading` | 由 JS 切換 | — |
 
 ### A.3 元件規格
 
@@ -128,6 +132,50 @@
 
 由 `UI.drawer({ title, subtitle, onClose })` 建立，回傳 `{ el, body, footer, close }`。Footer 預設隱藏，需要時移除 `u-hidden`。Footer 排列：破壞性操作在左、`l-spacer`、次要、主要在右。
 
+#### Switch
+
+```html
+<label class="c-switch">
+  <span class="c-switch__text">確認後立即重新部署<span class="u-small u-muted">關閉時，下次部署才生效</span></span>
+  <input type="checkbox" role="switch"><span class="c-switch__track" aria-hidden="true"></span>
+</label>
+```
+
+- 開關型設定（立即生效或對話框內的選項）一律使用 Switch；Checkbox 只用於「我已確認」這類勾選與多選（ADR 0024）。
+- 軌道 44×24，開啟時 `--color-accent`；`:focus-visible` 顯示在軌道上；`:disabled` 0.55 透明。
+- 立即生效的開關：變更失敗時還原並以 Toast 顯示錯誤。
+
+#### Diff
+
+```html
+<pre class="c-diff" aria-label="compose 修改內容"><span class="c-diff__line">services:</span><span class="c-diff__line c-diff__line--add">+   - web-data:/app/.data</span></pre>
+```
+
+- 每行一個 `__line`；`--add` 為成功色淺底、`--del` 為危險色淺底，行首保留 `+`／`-`，不只靠顏色區分。
+- 等寬字、可水平捲動；由 `UI.diffLines(before, after)` 產生。
+
+#### Flow
+
+```html
+<ol class="c-flow" aria-label="驗證階段">
+  <li class="c-flow__step is-done"><span class="c-flow__label">取得</span><span class="c-flow__meta">0:12</span></li>
+  <li class="c-flow__step is-current" aria-current="step"><span class="c-flow__label">建置</span><span class="c-flow__meta">6:40</span></li>
+  <li class="c-flow__step"><span class="c-flow__label">測試</span></li>
+</ol>
+```
+
+- 水平排列、可換行；完成為成功色、進行中為強調色（`--pulse` 動畫遵守 reduced motion）、`is-failed` 為危險色。
+
+#### Menu
+
+```html
+<details class="c-menu"><summary class="c-btn">更多</summary>
+  <div class="c-menu__list" role="menu"><button class="c-menu__item" role="menuitem">重新解析</button><button class="c-menu__item c-menu__item--danger" role="menuitem">刪除專案</button></div>
+</details>
+```
+
+- 次要或危險的操作收在「更多」；點選項目後關閉選單。危險項目仍須 ConfirmDialog。
+
 #### Stepper（網域設定）
 
 ```html
@@ -163,7 +211,9 @@
 | `statusPill(kind, value)` | Badge HTML |
 | `showMsg(el, err)` | 顯示或清除 InlineMessage／欄位錯誤 |
 | `toast(message, tone)` | Toast；`tone` 為 `success`（預設）或 `danger` |
-| `confirmDialog({ title, body, confirmText, tone })` | 回傳 `Promise<boolean>`；不得使用 `window.confirm` |
+| `confirmDialog({ title, body, html, confirmText, tone, wide, setup })` | 回傳 `Promise<boolean>`；不得使用 `window.confirm`。`html` 為已轉義的內容（取代 `body`），`setup(dialog)` 可綁定事件（例：Switch 改按鈕文字），`wide` 使用 `c-dialog--wide` |
+| `switchHtml({ id, label, hint, checked })` | Switch HTML |
+| `diffLines(before, after)` | 逐行差異的 `c-diff` HTML（ADR 0024） |
 | `drawer({ title, subtitle, onClose })` | 開啟 Drawer |
 | `busy(button, promise)` | 處理中狀態 |
 | `copy(text, label)`、`copyField(value, label)` | 複製／CopyField HTML |

@@ -138,6 +138,7 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-UI-11 | 版面為側欄導覽＋內容；寬度 < 768px 時側欄改為頂部列；側欄顯示待核准人數 | P0 | M1 |
 | FR-UI-12 | 提供 `/styleguide` 元件總覽頁，列出所有元件與 Token | P1 | M1 |
 | FR-UI-13 | 採用單一正式介面風格「企業儀表板」，不保留其他風格與切換機制（[ADR 0007](adr/0007-ui-style-proposals.md)） | P0 | M1 |
+| FR-UI-14 | 專案頁分為「概況」（預設）、「設定」、「環境變數」、「紀錄」分頁：概況顯示線上版本、下一個版本與會不會自動部署、進行中的流程（耗時與預估）、需要處理的事項；開關一律使用 toggle switch（[ADR 0024](adr/0024-project-page.md)） | P0 | M7 |
 
 ### 2.8 平臺：帳號與訂閱 ACC
 
@@ -166,7 +167,7 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-AN-01 | 依序以 `.caloud/compose.yml`、compose 檔、Dockerfile、語言標記檔（package.json、Cargo.toml、go.mod、pyproject.toml）、靜態網站解析服務、port、依賴的資料庫與環境變數；compose 只含附加服務（沒有任何 `build`）而根目錄有語言標記檔時，以範本產生 App 服務並與 compose 合併（[ADR 0014](adr/0014-analyzer-crate.md)） | P0 | M5 |
 | FR-AN-02 | 產生專屬 compose，並通過 [07 §3](07-security.md#3-compose-政策) 的 compose 政策；主機 ports 移除改由平臺路由 | P0 | M5 |
 | FR-AN-03 | 用戶可編輯產生結果，或在儲存庫放 `.caloud/compose.yml` 覆寫 | P0 | M5 |
-| FR-AN-04 | 每個判斷標示信心度（高、中、低）與依據的檔案及行號；低信心項目在第一次驗證前需用戶確認 | P1 | M5 |
+| FR-AN-04 | 每個判斷標示信心度（高、中、低）與依據的檔案及行號；低信心項目在第一次驗證前需用戶確認；之後的解析若設定（有效 compose、compose 目錄、對外服務）相同且沒有新的低信心項目，自動沿用確認（[ADR 0024](adr/0024-project-page.md)） | P1 | M5 |
 | FR-AN-05 | 平臺 App 適用 [07 §3.6](07-security.md#36-平臺-app-政策)：允許儲存庫內的 `build`（context、dockerfile 不超出儲存庫）；仍禁止 host 網路、主機路徑、`docker.sock`、privileged、`ports`；儲存庫 compose 中的 `env_file` 轉為平臺注入的環境變數 | P0 | M5 |
 | FR-AN-06 | 專案可指定儲存庫子目錄作為根目錄（monorepo，例：`app/`） | P1 | M5 |
 | FR-AN-07 | 偵測持久化目錄（寫入工作目錄下的路徑，含 `path.join(process.cwd(), …)` 等組合寫法；`*_DIR`／`*_PATH` 變數，可設定時自動填入掛載路徑），建議具名 volume；寫入但未掛 volume 列為 Medium | P1 | M5 |
@@ -174,6 +175,7 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-AN-09 | 偵測建置時變數（`NEXT_PUBLIC_*`、`VITE_*` 等），標示其值是否隨環境不同（網址、origin 類） | P1 | M5 |
 | FR-AN-10 | 解析在背景執行，每次解析保存為一筆紀錄（ref、commit、結果、時間）；用戶確認的版本（含編輯過的 compose、對外服務、已確認的低信心項目）保留，不被之後的重新解析覆蓋；每位用戶最多 20 個專案 | P0 | M5 |
 | FR-AN-11 | 偵測服務之間的位址：程式或環境變數預設值以 `localhost`／`127.0.0.1` 連到同一份 compose 中其他服務的 port（例：`http://127.0.0.1:5001` 對應 `ipfs_bootstrap` 的 5001），可由環境變數設定時在產生的 compose 自動填入服務名稱位址（`http://ipfs_bootstrap:5001`），列為中信心需確認；寫死無法設定時列為 High 並附依據與修改建議 | P1 | M5 |
+| FR-AN-12 | 環境變數分類：呼叫形式（`os.getenv(`、`env::var(` 等）只接受字串字面量參數；程式中有預設值者為選填；compose `environment` 已提供者不需填寫；用戶可標為「不需要」；未設定提示只計算必填者（[ADR 0024](adr/0024-project-page.md)） | P1 | M7 |
 
 ### 2.11 平臺：環境 ENV
 
@@ -192,6 +194,7 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-ENV-12 | 專案確認後可一鍵部署到 production 環境（8 字元子網域）：在 Runner 以 gVisor 隔離的 BuildKit 建置、gVisor 執行、健康檢查通過後對外；顯示階段（取得原始碼、建置、啟動、健康檢查）與 log；以 GitHub 安裝匯入的專案 push 到該分支時自動重新部署。部署前須通過驗證（未驗證時先驗證再部署；admin 可強制並留稽核，ADR 0020）。M6／M7 完成前的簡化流程（[ADR 0018](adr/0018-minimal-deploy.md)） | P0 | M7 |
 | FR-ENV-13 | GPU 服務：compose 以 `deploy.resources.reservations.devices`（`capabilities: [gpu]`）宣告，或由解析器依 CUDA 基底映像與 GPU 依賴產生（低信心、須確認）；在 `gpu_ready` 的平臺節點以 gVisor nvproxy（runtime `runsc-gpu`）執行，多個環境分時共用、不隔離顯示記憶體；執行期與驗證（含測試沙箱）可用，建置不給（[ADR 0022](adr/0022-gpu.md)） | P1 | M7 |
 | FR-ENV-14 | 專案的版本可見性：分開「執行中」與「目標」版本（只在健康檢查通過後更新執行中版本）、以容器實際映像核對、注入 `CALOUD_COMMIT` 等平臺變數、Edge 回應帶 `X-Caloud-Commit`（可依專案關閉）、部署紀錄（[ADR 0023](adr/0023-versions.md)） | P0 | M7 |
+| FR-ENV-15 | 部署指定版本與回滾：已通過驗證的 commit 可直接部署，曾成功上線的 commit 可「回到這個版本」（以當時的設定，不還原資料與秘密變數）；持久化目錄未掛 volume 時，可預覽 compose 修改後一鍵加上具名 volume（[ADR 0024](adr/0024-project-page.md)） | P0 | M7 |
 | FR-ENV-07 | 子網域 ID 由 a-z、0-9 組成，以字母開頭且同時含字母與數字；長度即環境種類（預設 8／12／16，後台可調）；以 CSPRNG 產生，排除使用中、保留字（含包含保留字者）與封鎖清單 | P0 | M4 |
 
 ### 2.12 平臺：驗證與報告 CI、RPT
