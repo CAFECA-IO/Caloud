@@ -1,7 +1,12 @@
 # Caloud 本體部署：docker compose -f deploy/docker-compose.yml up -d
 services:
   caloud:
-    build: ..
+    build:
+      context: ..
+      # 建置識別（ADR 0023）：CALOUD_COMMIT=$(git rev-parse --short HEAD) docker compose … up -d --build
+      args:
+        CALOUD_COMMIT: ${CALOUD_COMMIT:-dev}
+        CALOUD_BUILT_AT: ${CALOUD_BUILT_AT:-dev}
     image: caloud:latest
     restart: unless-stopped
     ports:

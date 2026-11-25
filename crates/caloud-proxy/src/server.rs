@@ -106,7 +106,7 @@ async fn handle(mut req: Request<Incoming>, peer: SocketAddr, https: bool, p: Pr
     h.insert("x-forwarded-proto", HeaderValue::from_static(if https { "https" } else { "http" }));
 
     if up.node.is_some() || is_upgrade(&req) {
-        return Ok(forward_conn(req, &up, &p.tunnels).await);
+        return Ok(with_commit(forward_conn(req, &up, &p.tunnels).await, &up));
     }
 
     let path = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
@@ -115,12 +115,20 @@ async fn handle(mut req: Request<Incoming>, peer: SocketAddr, https: bool, p: Pr
     };
     *req.uri_mut() = uri;
     match p.client.request(req).await {
-        Ok(res) => Ok(res.map(|b| b.boxed())),
+        Ok(res) => Ok(with_commit(res.map(|b| b.boxed()), &up)),
         Err(e) => {
             tracing::warn!(error = %e, upstream = %up.target, "upstream error");
             Ok(bad_gateway())
         }
     }
+}
+
+/// ADR 0023：專案環境的回應帶執行中的 commit（覆寫 App 自己送的同名標頭）
+fn with_commit(mut res: Response<Body>, up: &Upstream) -> Response<Body> {
+    if let Some(v) = up.commit.as_deref().and_then(|c| HeaderValue::from_str(c).ok()) {
+        res.headers_mut().insert("x-caloud-commit", v);
+    }
+    res
 }
 
 /// 308 到 `https://<host 去掉 port><path>`
@@ -228,7 +236,22 @@ fn text(status: StatusCode, body: String) -> Response<Body> {
 
 #[cfg(test)]
 mod tests {
-    use super::host_port;
+    use super::{host_port, text, with_commit, StatusCode, Upstream};
+
+    // ADR 0023：專案環境的回應帶執行中版本
+    #[test]
+    fn adds_commit_header_for_project_environments() {
+        let up = |commit: Option<&str>| Upstream {
+            target: "http://x:80".into(),
+            node: None,
+            commit: commit.map(Into::into),
+        };
+        let res = with_commit(text(StatusCode::OK, "ok".into()), &up(Some("98b705d")));
+        assert_eq!(res.headers()["x-caloud-commit"], "98b705d");
+        assert!(!with_commit(text(StatusCode::OK, "ok".into()), &up(None))
+            .headers()
+            .contains_key("x-caloud-commit"));
+    }
 
     #[test]
     fn host_port_from_target() {

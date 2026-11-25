@@ -32,6 +32,9 @@ pub struct NodeSpecs {
     #[serde(default)]
     pub self_check: Option<String>,
     pub agent_version: String,
+    /// agent 的建置 commit（ADR 0023）；舊版 agent 沒有
+    #[serde(default)]
+    pub agent_commit: Option<String>,
     /// 偵測到的 NVIDIA GPU（ADR 0022）
     #[serde(default)]
     pub gpus: Vec<GpuInfo>,
@@ -76,6 +79,16 @@ pub struct EnvSpec {
     /// 發布前任務（ADR 0021）：以新設定 `docker compose run` 成功後才 `up`
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub release: Vec<ReleaseTask>,
+    /// 平臺提供的非秘密變數（ADR 0023）：建置的服務同時作為執行期環境變數與 build arg，不遮蔽
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platform_vars: Vec<PlatformVar>,
+}
+
+/// 平臺變數（`CALOUD_COMMIT` 等，ADR 0023）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformVar {
+    pub name: String,
+    pub value: String,
 }
 
 /// 建置資源（FR-CI-06）
@@ -154,6 +167,9 @@ pub const STAGES: [&str; 5] = ["fetch", "build", "release", "start", "health"];
 pub struct EnvService {
     pub name: String,
     pub ip: String,
+    /// `up` 之後容器實際的映像（ADR 0023）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
 }
 
 /// 環境 ID：小寫英數，6–32 字元（也作為目錄名稱）
@@ -293,7 +309,7 @@ pub enum ServerMsg {
         message: String,
     },
     Deploy {
-        env: EnvSpec,
+        env: Box<EnvSpec>,
     },
     Destroy {
         env_id: String,

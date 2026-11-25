@@ -75,6 +75,7 @@ pub async fn load_routes(db: &Db) -> anyhow::Result<Vec<Route>> {
                 hostname: r.hostname,
                 // 單機 App 直接在控制面主機上
                 node: None,
+                commit: None,
             }
         })
         .chain(load_env_routes(db).await?)
@@ -83,18 +84,21 @@ pub async fn load_routes(db: &Db) -> anyhow::Result<Vec<Route>> {
 
 /// FR-OPS-13：running 的平臺環境經所在節點的通道轉發到對外服務的固定 IP（ADR 0015）
 async fn load_env_routes(db: &Db) -> anyhow::Result<Vec<Route>> {
-    let rows: Vec<(String, String, i64, String)> = sqlx::query_as(
-        "SELECT hostname, public_ip, public_port, node FROM environments WHERE status = 'running' AND public_ip IS NOT NULL",
+    // ADR 0023：專案環境帶執行中的 commit（專案可關閉）
+    let rows: Vec<(String, String, i64, String, Option<String>)> = sqlx::query_as(
+        "SELECT e.hostname, e.public_ip, e.public_port, e.node, CASE WHEN p.commit_header = 1 THEN e.running_commit END \
+         FROM environments e LEFT JOIN projects p ON p.id = e.project WHERE e.status = 'running' AND e.public_ip IS NOT NULL",
     )
     .fetch_all(db)
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(hostname, ip, port, node)| Route {
+        .map(|(hostname, ip, port, node, commit)| Route {
             hostname,
             upstream: format!("http://{ip}:{port}"),
             passthrough: None,
             node: Some(node),
+            commit: commit.map(|c| c.chars().take(7).collect()),
         })
         .collect())
 }

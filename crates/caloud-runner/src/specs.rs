@@ -33,6 +33,8 @@ pub fn detect() -> NodeSpecs {
         isolation: false,
         self_check: None,
         agent_version: env!("CARGO_PKG_VERSION").to_string(),
+        // ADR 0023
+        agent_commit: Some(caloud_core::build::COMMIT.to_string()),
         gpus,
         gpu_driver,
         // 由自我檢查填入（ADR 0022）

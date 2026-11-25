@@ -145,8 +145,9 @@ mod tests {
         let port = l.local_addr().unwrap().port();
         assert!(connect_target(&format!("CONNECT 127.0.0.1:{port}"), &blocked).await.is_ok());
         drop(l);
+        // 不用剛釋放的埠：平行測試可能立刻重用它；port 1 沒有服務
         assert_eq!(
-            connect_target(&format!("CONNECT 127.0.0.1:{port}"), &blocked).await.unwrap_err(),
+            connect_target("CONNECT 127.0.0.1:1", &blocked).await.unwrap_err(),
             "connection refused"
         );
     }

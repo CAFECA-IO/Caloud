@@ -10,6 +10,8 @@ pub struct Upstream {
     pub target: String,
     /// 經此 Runner 節點的通道（FR-OPS-09）
     pub node: Option<String>,
+    /// 專案環境的執行中 commit：回應帶 `X-Caloud-Commit`（ADR 0023）
+    pub commit: Option<String>,
 }
 
 /// hostname → upstream，無鎖讀取
@@ -60,6 +62,7 @@ impl RouteTable {
                         Upstream {
                             target: p,
                             node: r.node.clone(),
+                            commit: None,
                         },
                     )
                 })
@@ -73,6 +76,7 @@ impl RouteTable {
                     Upstream {
                         target: r.upstream,
                         node: r.node,
+                        commit: r.commit,
                     },
                 )
             })
@@ -128,6 +132,7 @@ mod tests {
             upstream: "http://x:80".into(),
             passthrough: Some("relay:443".into()),
             node: Some("n1".into()),
+            commit: None,
         }]);
         assert_eq!(t.lookup("App.Example.com:443").as_deref(), Some("http://x:80"));
         assert_eq!(t.lookup("app.example.com.").as_deref(), Some("http://x:80"));
@@ -145,6 +150,7 @@ mod tests {
             upstream: "http://127.0.0.1:8080".into(),
             passthrough: None,
             node: None,
+            commit: None,
         }]);
         t.replace(vec![]);
         assert_eq!(t.lookup("caloud.cafeca.io").as_deref(), Some("http://127.0.0.1:8080"));
@@ -153,6 +159,7 @@ mod tests {
             upstream: "http://a:80".into(),
             passthrough: None,
             node: None,
+            commit: None,
         }]);
         assert!(t.lookup("caloud.cafeca.io").is_some() && t.lookup("a.example.com").is_some());
     }

@@ -93,7 +93,7 @@ async fn dispatch(s: &AppState, me: &CurrentUser, method: &str, params: &Value) 
             Ok(json!({
                 "protocolVersion": version,
                 "capabilities": { "tools": { "listChanged": false } },
-                "serverInfo": { "name": "caloud", "title": "Caloud", "version": env!("CARGO_PKG_VERSION") },
+                "serverInfo": { "name": "caloud", "title": "Caloud", "version": format!("{}+{}", caloud_core::build::VERSION, caloud_core::build::COMMIT) },
                 "instructions": INSTRUCTIONS,
             }))
         }

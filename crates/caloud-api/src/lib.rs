@@ -89,6 +89,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/{id}/vars", get(projects::vars).put(projects::set_vars))
         .route("/api/projects/{id}/verify", post(projects::verify))
         .route("/api/projects/{id}/verifications", get(projects::verifications))
+        .route("/api/projects/{id}/deployments", get(projects::deployments))
+        .route("/api/version", get(assets::version))
         .route("/api/verifications/{id}", get(projects::verification))
         .route("/api/verifications/{id}/cancel", post(projects::cancel_verification))
         .route("/api/verifications/{id}/report", get(projects::report))

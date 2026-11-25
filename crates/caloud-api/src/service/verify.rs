@@ -343,6 +343,7 @@ pub(crate) async fn start(
                             command: r.command.clone(),
                         })
                         .collect(),
+                    platform_vars: deploy::platform_vars(&t.commit, &branch, "verify"),
                     vars,
                 },
                 public_port: t.public_port as u16,
@@ -532,7 +533,7 @@ pub(crate) async fn on_done(s: &AppState, node: &str, id: &str, error: Option<St
             // 確認的設定在驗證期間沒有變
             if p.confirmed_analysis.as_deref() == Some(v.analysis.as_str()) {
                 let via = if v.trigger == "push" { "github" } else { "web" };
-                deploy::deploy_verified(s, &p, via).await;
+                deploy::deploy_verified(s, &p, via, v.created_by.as_deref()).await;
             }
         }
     }

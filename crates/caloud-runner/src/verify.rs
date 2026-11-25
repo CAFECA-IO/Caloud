@@ -384,7 +384,7 @@ impl EnvRunner {
         let started = match &compose {
             Some((yaml, built)) => {
                 rep.stage("start", "running");
-                let names: Vec<String> = env.vars.iter().filter(|v| v.user).map(|v| v.name.clone()).collect();
+                let names = crate::envs::inject_names(env);
                 let inject: Vec<(String, Vec<String>)> = built.iter().map(|s| (s.clone(), names.clone())).collect();
                 match self.try_deploy(env, yaml, &inject).await {
                     Ok(s) => {
@@ -786,6 +786,7 @@ mod tests {
                 }),
                 build: None,
                 release: vec![],
+                platform_vars: vec![],
                 vars: vec![EnvValue {
                     name: "S".into(),
                     value: "FATAL boom".into(),

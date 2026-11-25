@@ -11,7 +11,7 @@ pub const CHECK_NAME: &str = "Caloud 驗證";
 /// 留言中用來辨識自己的標記
 const MARKER: &str = "<!-- caloud-verification -->";
 
-async fn auth(s: &AppState, p: &Project) -> Option<(String, String)> {
+pub(crate) async fn auth(s: &AppState, p: &Project) -> Option<(String, String)> {
     let inst = p.installation_id?;
     let repo = p.repo_full_name.clone()?;
     let token = installation_token(s, inst)

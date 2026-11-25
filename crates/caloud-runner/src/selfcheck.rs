@@ -221,6 +221,7 @@ async fn probe(env: &EnvRunner) -> Result<(), String> {
         source: None,
         build: None,
         release: vec![],
+        platform_vars: vec![],
         vars: vec![],
     };
     let b = EnvSpec {

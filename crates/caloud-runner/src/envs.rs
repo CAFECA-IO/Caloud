@@ -79,6 +79,47 @@ pub(crate) fn short(err: &str) -> String {
     tail.chars().take(1000).collect()
 }
 
+/// 注入建置服務 `environment` 的變數名稱：用戶變數（ADR 0019）與平臺變數（ADR 0023）
+pub(crate) fn inject_names(env: &EnvSpec) -> Vec<String> {
+    env.vars
+        .iter()
+        .filter(|v| v.user)
+        .map(|v| v.name.clone())
+        .chain(env.platform_vars.iter().map(|v| v.name.clone()))
+        .collect()
+}
+
+/// `docker compose` 的行程環境變數：秘密變數與平臺變數
+pub(crate) fn proc_env(env: &EnvSpec) -> Vec<EnvValue> {
+    env.vars
+        .iter()
+        .cloned()
+        .chain(env.platform_vars.iter().map(|v| EnvValue {
+            name: v.name.clone(),
+            value: v.value.clone(),
+            user: false,
+        }))
+        .collect()
+}
+
+/// `docker compose ps --format json`（每行一個 JSON，或一個陣列）→ 服務 → 映像
+pub(crate) fn container_images(out: &str) -> std::collections::HashMap<String, String> {
+    let mut m = std::collections::HashMap::new();
+    let mut add = |v: &serde_json::Value| {
+        if let (Some(s), Some(i)) = (v["Service"].as_str(), v["Image"].as_str()) {
+            m.insert(s.to_string(), i.to_string());
+        }
+    };
+    for line in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(serde_json::Value::Array(list)) => list.iter().for_each(&mut add),
+            Ok(v) => add(&v),
+            Err(_) => {}
+        }
+    }
+    m
+}
+
 impl EnvRunner {
     pub fn new(docker_bin: String, state_dir: PathBuf, dns: Vec<String>) -> Self {
         Self {
@@ -229,8 +270,8 @@ impl EnvRunner {
                 }
             },
         };
-        // ADR 0019：用戶變數只注入從儲存庫建置的服務
-        let names: Vec<String> = env.vars.iter().filter(|v| v.user).map(|v| v.name.clone()).collect();
+        // ADR 0019：用戶變數只注入從儲存庫建置的服務；ADR 0023：平臺變數也一樣
+        let names = inject_names(env);
         let inject: Vec<(String, Vec<String>)> = built.into_iter().map(|s| (s, names.clone())).collect();
         // ADR 0021：發布前任務以新設定執行，成功才切換；失敗時舊版繼續執行
         if env.source.is_some() && !env.release.is_empty() {
@@ -318,6 +359,12 @@ impl EnvRunner {
                     ));
                 }
                 *v = out;
+            }
+            // ADR 0023：平臺變數作為 build arg（Dockerfile 沒有宣告 ARG 時不影響建置）
+            for pv in &env.platform_vars {
+                if !j.args.iter().any(|(k, _)| k == &pv.name) {
+                    j.args.push((pv.name.clone(), pv.value.clone()));
+                }
             }
         }
         let built: Vec<String> = jobs.iter().map(|j| j.service.clone()).collect();
@@ -441,9 +488,19 @@ impl EnvRunner {
         compose_yaml: &str,
         inject: &[(String, Vec<String>)],
     ) -> anyhow::Result<Vec<EnvService>> {
-        let services = self.prepare(env, compose_yaml, inject, false).await?;
-        self.compose_env(&env.id, &["up", "-d", "--wait", "--remove-orphans"], DEPLOY_TIMEOUT, &env.vars)
+        let mut services = self.prepare(env, compose_yaml, inject, false).await?;
+        self.compose_env(&env.id, &["up", "-d", "--wait", "--remove-orphans"], DEPLOY_TIMEOUT, &proc_env(env))
             .await?;
+        // ADR 0023：容器實際的映像
+        if let Ok(out) = self
+            .compose(&env.id, &["ps", "-a", "--format", "json"], Duration::from_secs(30))
+            .await
+        {
+            let images = container_images(&out);
+            for s in &mut services {
+                s.image = images.get(&s.name).cloned();
+            }
+        }
         Ok(services)
     }
 
@@ -477,7 +534,7 @@ impl EnvRunner {
             if let Some(command) = &t.command {
                 cmd.args(["sh", "-c", command]);
             }
-            for v in &env.vars {
+            for v in proc_env(env) {
                 cmd.env(&v.name, &v.value);
             }
             tokio::time::timeout(RELEASE_TIMEOUT, build::run_logged(cmd, log))
@@ -511,7 +568,11 @@ impl EnvRunner {
         tokio::fs::write(dir.join("resolv.conf"), sandbox::resolv_conf(&self.dns)).await?;
         Ok(sandbox::service_ips(&compose, &net)
             .into_iter()
-            .map(|(name, ip)| EnvService { name, ip: ip.to_string() })
+            .map(|(name, ip)| EnvService {
+                name,
+                ip: ip.to_string(),
+                image: None,
+            })
             .collect())
     }
 
@@ -591,6 +652,17 @@ mod tests {
         p.display().to_string()
     }
 
+    // ADR 0023：`docker compose ps --format json` 的兩種格式
+    #[test]
+    fn parses_container_images() {
+        let lines = "{\"Service\":\"web\",\"Image\":\"caloud-env/k1/web:98b705d01234\"}\n{\"Service\":\"db\",\"Image\":\"postgres:16\"}\nnot json\n";
+        let m = container_images(lines);
+        assert_eq!(m["web"], "caloud-env/k1/web:98b705d01234");
+        assert_eq!(m["db"], "postgres:16");
+        let arr = container_images("[{\"Service\":\"web\",\"Image\":\"x:1\"},{\"Service\":\"api\"}]");
+        assert_eq!((arr.len(), arr["web"].as_str()), (1, "x:1"));
+    }
+
     // FR-OPS-13、ADR 0015
     #[cfg(unix)]
     #[tokio::test]
@@ -607,6 +679,7 @@ mod tests {
             source: None,
             build: None,
             release: vec![],
+            platform_vars: vec![],
             vars: vec![],
         };
         let ok = "services:\n  web:\n    image: nginx:1.27\n  db:\n    image: postgres:16\n";
@@ -619,7 +692,8 @@ mod tests {
                     services[0],
                     EnvService {
                         name: "web".into(),
-                        ip: "10.240.3.10".into()
+                        ip: "10.240.3.10".into(),
+                        image: None
                     }
                 );
                 assert_eq!(services[1].ip, "10.240.3.11");
@@ -698,7 +772,7 @@ mod tests {
         // 建置失敗：buildctl 輸出含 boom
         let docker = fake_docker(
             &base,
-            "case \"$*\" in *buildctl-daemonless*) echo '#5 RUN make'; echo \"#6 token=$SESSION_SECRET arg=$(echo \"$*\" | grep -o 'build-arg:A=[^ ]*')\"; case \"$*\" in *fail-me*) echo 'boom' >&2; exit 1;; esac;; esac\ncase \"$*\" in *' up '*) echo \"UPENV S=$SESSION_SECRET D=$CALOUD_DB_PASSWORD\" >> '{log}';; esac".replace("{log}", &base.join("docker.log").display().to_string()).as_str(),
+            "case \"$*\" in *buildctl-daemonless*) echo '#5 RUN make'; echo \"#6 token=$SESSION_SECRET arg=$(echo \"$*\" | grep -o 'build-arg:A=[^ ]*')\"; case \"$*\" in *fail-me*) echo 'boom' >&2; exit 1;; esac;; esac\ncase \"$*\" in *' up '*) echo \"UPENV S=$SESSION_SECRET D=$CALOUD_DB_PASSWORD\" >> '{log}'; echo \"PLATFORM C=$CALOUD_COMMIT\" >> '{log}';; esac".replace("{log}", &base.join("docker.log").display().to_string()).as_str(),
         );
         let mut r = EnvRunner::new(docker, base.join("state"), vec!["1.1.1.1".into()]);
         r.git_bin = git.display().to_string();
@@ -710,6 +784,10 @@ mod tests {
             public_service: "web".into(),
             build: None,
             release: vec![],
+            platform_vars: vec![caloud_core::agent::PlatformVar {
+                name: "CALOUD_COMMIT".into(),
+                value: "98b705d0123456789abcdef0123456789abcdef0".into(),
+            }],
             vars: vec![
                 EnvValue {
                     name: "SESSION_SECRET".into(),
@@ -773,8 +851,14 @@ mod tests {
             serde_yaml::from_str(&std::fs::read_to_string(base.join("state/envs/k2m9xq7a/caloud.override.yml")).unwrap()).unwrap();
         assert_eq!(
             ov["services"]["web"]["environment"],
-            serde_yaml::from_str::<serde_yaml::Value>("[SESSION_SECRET, NEXT_PUBLIC_X]").unwrap()
+            serde_yaml::from_str::<serde_yaml::Value>("[SESSION_SECRET, NEXT_PUBLIC_X, CALOUD_COMMIT]").unwrap()
         );
+        // ADR 0023：平臺變數作為 build arg 與執行期變數，不遮蔽
+        assert!(
+            log.contains("--opt build-arg:CALOUD_COMMIT=98b705d0123456789abcdef0123456789abcdef0"),
+            "{log}"
+        );
+        assert!(log.contains("PLATFORM C=98b705d0123456789abcdef0123456789abcdef0"), "{log}");
         assert!(ov["services"]["db"].get("environment").is_none());
         for f in ["compose.yml", "caloud.override.yml"] {
             let t = std::fs::read_to_string(base.join("state/envs/k2m9xq7a").join(f)).unwrap();
@@ -855,6 +939,7 @@ mod tests {
             }),
             build: Some(caloud_core::agent::BuildLimits { cpus: 2, memory_mb: 3072 }),
             release: vec![ReleaseTask { service: "migrate".into(), command: None }],
+            platform_vars: vec![],
             vars: vec![EnvValue {
                 name: "S".into(),
                 value: "secret-value".into(),

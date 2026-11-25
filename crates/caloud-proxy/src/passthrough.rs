@@ -266,6 +266,7 @@ mod tests {
             upstream: "http://x".into(),
             passthrough: Some(up_addr.to_string()),
             node: None,
+            commit: None,
         }]);
         let front = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let front_addr = front.local_addr().unwrap();
@@ -356,6 +357,7 @@ mod tests {
             upstream: format!("http://{up}"),
             passthrough: None,
             node: None,
+            commit: None,
         }]);
         let certs = CertStore::default();
         let (cert, key) = self_signed(&["caloud.tw", "*.caloud.tw"]);

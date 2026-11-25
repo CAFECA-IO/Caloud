@@ -31,13 +31,14 @@
     <nav class="c-sidebar__nav" aria-label="主要導覽" id="nav"></nav>
     <div class="c-sidebar__footer">
       <div class="c-account" id="account"></div>
+      <p class="u-small u-muted" id="build-info"></p>
       <div class="l-row">
         <button class="c-btn c-btn--ghost c-btn--sm" id="theme-btn" aria-label="切換淺色／深色"></button>
         <button class="c-btn c-btn--ghost c-btn--sm" id="logout-btn"></button>
       </div>
     </div>
   </aside>
-  <main class="c-shell__main"><div class="c-page" id="page"></div></main>
+  <main class="c-shell__main"><div id="stale-banner"></div><div class="c-page" id="page"></div></main>
 </div>
 
 <script>
@@ -228,6 +229,17 @@ document.addEventListener("click", (e) => {
 });
 // 可點擊的表格列：Enter 開啟
 document.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.matches?.("tr.is-clickable")) e.target.click(); });
+
+// ─────────────── 版本（FR-OPS-15，ADR 0023） ───────────────
+const BUILD = document.querySelector('meta[name="caloud-build"]')?.content || "dev";
+$("#build-info").textContent = `版本 ${BUILD}`;
+window.addEventListener("caloud:stale", (e) => {
+  const box = $("#stale-banner");
+  if (!box || box.dataset.build === e.detail) return;
+  box.dataset.build = e.detail;
+  box.innerHTML = `<div class="c-banner c-banner--warning" role="status">${icon("info")}<div class="c-banner__body"><strong>Caloud 已更新到 ${esc(e.detail)}</strong><span class="u-small">這個頁面仍是 ${esc(BUILD)}，重新整理以載入新版。</span></div><button class="c-btn c-btn--sm" id="stale-reload">${icon("refresh")}<span>重新整理</span></button></div>`;
+  $("#stale-reload").addEventListener("click", () => location.reload());
+});
 
 async function appAction(act, app, btn) {
   try {
@@ -645,7 +657,12 @@ function drawDeploy(id, data) {
   const live = d && d.status === "running";
   const head = statusPill("deploy", !d ? "none" : d.in_progress ? "deploying" : live ? "running" : "failed");
   const notes = [];
-  if (d?.error) notes.push(`<div class="c-banner c-banner--danger">${icon("alert")}<div class="c-banner__body"><strong>${live ? "這次部署失敗，仍在執行上一版" : "部署失敗"}</strong><span class="u-small">${esc(d.error)}</span></div></div>`);
+  const short = (c) => (c ? c.slice(0, 7) : "");
+  const target = short(d?.target_commit), running = short(d?.running_commit);
+  if (d?.error) notes.push(`<div class="c-banner c-banner--danger">${icon("alert")}<div class="c-banner__body"><strong>${live && running ? `部署 ${esc(target)} 失敗，仍在執行 ${esc(running)}` : `部署 ${esc(target)} 失敗，服務未正常運作`}</strong><span class="u-small">${esc(d.error)}</span></div></div>`);
+  // ADR 0023：容器實際的映像與執行中版本不一致
+  const odd = (d?.services || []).filter((x) => x.commit && d.running_commit && !d.running_commit.startsWith(x.commit) && !d.in_progress && !d.error);
+  if (odd.length) notes.push(`<div class="c-banner c-banner--warning">${icon("alert")}<div class="c-banner__body"><strong>容器版本與執行中版本不同</strong><span class="u-small u-mono">${odd.map((x) => `${esc(x.name)}：${esc(x.commit.slice(0, 7))}`).join("、")}</span><span class="u-small">請重新部署。</span></div></div>`);
   if (d?.vars_pending) notes.push(`<div class="c-banner c-banner--warning">${icon("info")}<div class="c-banner__body"><strong>環境變數已變更</strong><span class="u-small">重新部署後生效。</span></div></div>`);
   if (d?.missing_vars?.length) notes.push(`<div class="c-banner">${icon("info")}<div class="c-banner__body"><strong>${d.missing_vars.length} 個變數尚未設定</strong><span class="u-small u-mono">${d.missing_vars.map(esc).join("、")}</span><span class="u-small">可在下方「環境變數」設定；未設定也能部署。</span></div></div>`);
   if (d?.pending_changes) notes.push(`<div class="c-banner c-banner--warning">${icon("info")}<div class="c-banner__body"><strong>設定有變動，請重新確認</strong><span class="u-small">最新解析的 compose 與確認版本不同；確認前部署仍使用 ${esc(c.commit.slice(0, 7))} 的程式碼。</span></div></div>`);
@@ -655,12 +672,20 @@ function drawDeploy(id, data) {
       ${!verified && isAdmin() ? `<button class="c-btn c-btn--ghost c-btn--sm" id="pj-force-btn" ${d?.in_progress ? "disabled" : ""}>${icon("alert")}<span>強制部署</span></button>` : ""}
       <button class="c-btn c-btn--primary c-btn--sm" id="pj-deploy-btn" ${d?.in_progress || verifying ? "disabled" : ""}>${icon("upload")}<span>${!verified ? "驗證並部署" : d ? "重新部署" : "部署"}</span></button></div>
     <div class="c-card__body l-stack">
-      ${d ? `<p class="u-small">網址 <a class="u-mono" href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.hostname)}</a>${d.commit ? ` · 版本 <span class="u-mono">${esc(d.commit.slice(0, 7))}</span>` : ""} · ${relTime(d.updated_at)}更新</p>
+      ${d ? `<p class="u-small">網址 <a class="u-mono" href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.hostname)}</a> · ${running ? `執行中 <span class="u-mono">${esc(running)}</span>${d.deployed_at ? `，${relTime(d.deployed_at)}上線` : ""}` : "尚未成功上線"}${d.in_progress && target !== running ? ` · 正在部署 <span class="u-mono">${esc(target)}</span>` : ""}</p>
+        ${branchLine(d)}
         <div class="l-row" role="list" aria-label="部署階段">${DEPLOY_STAGES.map(stageBadge).join("")}</div>`
         : `<p class="u-small u-muted">部署到 production：在 Runner 以隔離的 BuildKit 建置、gVisor 執行，通過健康檢查後開放固定網址 <span class="u-mono">https://&lt;8 碼&gt;.caloud.tw</span>。</p>`}
       ${notes.join("")}
       ${logs ? `<pre class="c-log" aria-label="部署 log" id="pj-log">${esc(logs)}</pre>` : ""}
+      ${d ? `<div id="pj-history"></div>
+        <label class="c-check"><input type="checkbox" id="pj-commit-header" ${data.project?.commit_header !== false ? "checked" : ""}><span class="u-small">網站回應帶 <code class="c-code">X-Caloud-Commit</code>（執行中版本的前 7 碼）</span></label>` : ""}
       <span class="c-field__error" id="pj-deploy-err" role="alert"></span></div></section>`;
+  if (d) drawHistory(id);
+  $("#pj-commit-header")?.addEventListener("change", async (e) => {
+    try { await api(`/api/projects/${encodeURIComponent(id)}`, { method: "PATCH", body: { commit_header: e.currentTarget.checked } }); toast(e.currentTarget.checked ? "已開啟版本標頭" : "已關閉版本標頭"); }
+    catch (err) { e.currentTarget.checked = !e.currentTarget.checked; toast(err.message, "danger"); }
+  });
   const log = $("#pj-log"); if (log) log.scrollTop = log.scrollHeight;
   // ADR 0020：未通過驗證時先驗證，通過後自動部署
   const go = async (btn, body) => {
@@ -678,6 +703,26 @@ function drawDeploy(id, data) {
     go(btn, { force: true });
   });
   if (d?.in_progress) deployTimer = setTimeout(() => pollDeploy(id), 3000);
+}
+/** ADR 0023：分支最新的 commit 與它的驗證狀態 */
+function branchLine(d) {
+  if (!d.branch_commit || (d.running_commit && d.running_commit === d.branch_commit)) return "";
+  const v = { passed: "已通過驗證，尚未部署", failed: "未通過驗證", running: "驗證中", queued: "驗證中", canceled: "驗證已取消", error: "驗證錯誤" }[d.branch_verify] || "尚未驗證";
+  return `<p class="u-small u-muted">分支最新 <span class="u-mono">${esc(d.branch_commit.slice(0, 7))}</span>：${esc(v)}</p>`;
+}
+/** ADR 0023：部署紀錄（最近 20 筆） */
+const DEPLOY_TRIGGER = { manual: "手動", forced: "強制", push: "push" };
+async function drawHistory(id) {
+  let list;
+  try { list = await api(`/api/projects/${encodeURIComponent(id)}/deployments`); } catch { return; }
+  const box = $("#pj-history"); if (!box || !list.length) return;
+  const badge = (x) => x.status === "success" ? '<span class="c-badge c-badge--success">成功</span>'
+    : x.status === "failure" ? `<span class="c-badge c-badge--danger">失敗${x.stage ? `（${esc(x.stage)}）` : ""}</span>` : '<span class="c-badge c-badge--accent">進行中</span>';
+  box.innerHTML = `<details><summary class="u-small">部署紀錄（最近 ${list.length} 次）</summary><div class="c-table-wrap"><table class="c-table">
+    <thead><tr><th>版本</th><th>來源</th><th>結果</th><th>時間</th></tr></thead><tbody>${list.map((x) => `<tr>
+      <td class="u-mono">${esc(x.commit.slice(0, 7))}</td><td class="u-small">${esc(DEPLOY_TRIGGER[x.trigger] || x.trigger)}</td>
+      <td>${badge(x)}${x.error ? `<div class="c-table__secondary u-truncate" title="${esc(x.error)}">${esc(x.error)}</div>` : ""}</td>
+      <td class="u-small u-nowrap">${relTime(x.created_at)}</td></tr>`).join("")}</tbody></table></div></details>`;
 }
 /** FR-ENV-05（ADR 0019）：秘密變數，依環境、只寫不讀；變更後重新部署生效 */
 async function drawVars(id, result) {
@@ -1012,7 +1057,7 @@ async function renderNodes() {
         ? ` <span class="c-badge c-badge--success" title="驅動 ${esc(sp.gpu_driver || "")}，以 gVisor nvproxy 執行">GPU 就緒</span><div class="c-table__secondary">${gpus.map((g) => `${esc(g.name)} · ${Math.round(g.memory_mb / 1024)} GB`).join("、")}</div>`
         : ` <span class="c-badge c-badge--warning">GPU 未就緒</span><div class="c-table__secondary">${esc(gpus.map((g) => g.name).join("、"))}：${esc(sp.gpu_check || "")}</div>`;
     return `<tr data-node="${esc(n.id)}">
-      <td><div class="c-table__primary">${esc(n.name)}</div><div class="c-table__secondary u-mono">${esc(n.id)} · ${sp.cpu_cores} 核 · ${(sp.memory_bytes / GB).toFixed(0)} GB · 磁碟剩 ${(sp.disk_free_bytes / GB).toFixed(0)} GB · agent ${esc(sp.agent_version)}</div></td>
+      <td><div class="c-table__primary">${esc(n.name)}</div><div class="c-table__secondary u-mono">${esc(n.id)} · ${sp.cpu_cores} 核 · ${(sp.memory_bytes / GB).toFixed(0)} GB · 磁碟剩 ${(sp.disk_free_bytes / GB).toFixed(0)} GB · agent ${esc(sp.agent_version)}${sp.agent_commit ? ` ${esc(sp.agent_commit)}` : ""}${sp.agent_commit && sp.agent_commit !== "dev" && BUILD !== "dev" && sp.agent_commit !== BUILD ? ` <span class="c-badge c-badge--warning" title="控制面為 ${esc(BUILD)}">需要更新</span>` : ""}</div></td>
       <td>${statusPill("node", n.status)}</td>
       <td class="u-small">${check}${gpu}</td>
       <td class="u-small u-nowrap u-mono">${n.allocated.cpu_millis}m / ${n.allocatable.cpu_millis}m<br>${(n.allocated.memory_bytes / GB).toFixed(1)} / ${(n.allocatable.memory_bytes / GB).toFixed(1)} GB</td>

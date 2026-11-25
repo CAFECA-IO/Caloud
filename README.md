@@ -144,6 +144,7 @@ CAFECA 身分是一個鏈上的智能合約帳戶，由使用者裝置上的 Pas
 ```bash
 git clone <此 repo> caloud && cd caloud
 cp deploy/.env.example deploy/.env      # 依下方說明修改
+export CALOUD_COMMIT=$(git rev-parse --short HEAD) CALOUD_BUILT_AT=$(date -u +%FT%TZ)   # 建置識別（選填）
 docker compose -f deploy/docker-compose.yml up -d --build
 docker compose -f deploy/docker-compose.yml logs -f caloud
 ```
@@ -203,7 +204,7 @@ ssh -L 8080:localhost:8080 <主機>
 
 GitHub App 的設定：
 
-- **權限**：Contents（Read-only）、Metadata（Read-only）、Checks（Read & write）、Pull requests（Read & write）。
+- **權限**：Contents（Read-only）、Metadata（Read-only）、Checks（Read & write）、Pull requests（Read & write）、Deployments（Read & write）。
 - **事件**：Push、Create、Pull request。
 - **安裝時要求用戶授權**：勾選「Request user authorization (OAuth) during installation」。
 
@@ -214,7 +215,7 @@ GitHub App 的設定：
 | 工作 | 做法 |
 | --- | --- |
 | 備份 | 備份 `caloud-data` volume（`caloud.db`、`apps/`、憑證）與主金鑰；App 自己的資料在各自的具名 volume；專案環境的資料在 Runner 上的具名 volume（備份功能於 M8 規劃） |
-| 升級 | `git pull` 後 `docker compose -f deploy/docker-compose.yml up -d --build`；資料庫 migration 於啟動時自動執行 |
+| 升級 | `git pull` 後，帶上 `CALOUD_COMMIT`（同上）執行 `docker compose -f deploy/docker-compose.yml up -d --build`；資料庫 migration 於啟動時自動執行。<br>用 `curl https://<管理介面>/api/version` 或側欄底部的版本確認是否已是新版；開著的分頁會提示重新整理 |
 | 重啟 | Caloud 重啟不影響已運行的容器；路由表會在啟動時從資料庫載入；Runner 的 agent 會自動重連 |
 | 更新 Runner | 以新版映像中的 `/usr/local/bin/caloud-agent` 取代 `/usr/local/lib/caloud/bin/caloud-agent`，再 `systemctl restart caloud-agent` |
 
@@ -317,6 +318,16 @@ cargo run -p caloud
 - **發布前任務**：來源依序為 `.caloud/verify.yml` 的 `release`、compose 中帶 `profiles` 的 migrate／seed 服務、Prisma migrations。這些任務以新設定執行，成功後才啟動新版。
 - **強制部署**：Admin 可以跳過驗證，會留下稽核紀錄。
 - **建置配額**：建置與驗證沙箱使用的 CPU、記憶體由 Admin 在「Runner 節點」頁的「建置資源」設定。每月建置分鐘依專案擁有者計算，用完時驗證與部署會回錯誤；專案頁顯示本月用量。
+
+- **確認線上版本**（[ADR 0023](docs/adr/0023-versions.md)）：
+  - 專案頁分開顯示「執行中」與「正在部署」的版本。執行中的版本只在健康檢查通過後更新；部署失敗時，會標出仍在執行哪一版。
+  - 專案頁也顯示分支最新的 commit 與它的驗證狀態，並以容器實際的映像核對版本。
+  - 「部署紀錄」列出最近 20 次部署的版本、來源與結果。
+  - 網站回應帶 `X-Caloud-Commit`（前 7 碼），用 `curl -sI https://<網址>` 就能確認；不想公開時可在專案頁關閉。
+  - 以 GitHub App 匯入的專案，部署狀態會同步到 GitHub 的 Deployments（environment `production`）。
+- **App 可讀的版本資訊**：
+  - 從儲存庫建置的服務會拿到 `CALOUD_COMMIT`、`CALOUD_COMMIT_SHORT`、`CALOUD_BRANCH`、`CALOUD_ENV`、`CALOUD_DEPLOYED_AT`，同時作為執行期環境變數與 build arg；
+  - 前端要把版本寫進建置結果時，在 Dockerfile 宣告 `ARG CALOUD_COMMIT`。
 
 ```yaml
 # .caloud/verify.yml（選填）

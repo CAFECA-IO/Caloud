@@ -111,6 +111,15 @@ pub async fn verifications(
     Ok(Json(crate::service::verify::list(&s, &me, &id).await?))
 }
 
+/// ADR 0023
+pub async fn deployments(
+    State(s): State<AppState>,
+    me: CurrentUser,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Vec<crate::service::deploy::DeploymentRecord>>> {
+    Ok(Json(crate::service::deploy::history(&s, &me, &id).await?))
+}
+
 pub async fn verification(State(s): State<AppState>, me: CurrentUser, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     Ok(Json(crate::service::verify::detail(&s, &me, &id).await?))
 }

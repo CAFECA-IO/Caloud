@@ -29,7 +29,11 @@ pub struct Environment {
     pub subdomain: String,
     /// 專案的環境（FR-ENV-12）；維運者開的環境為 None
     pub project: Option<String>,
+    /// 本次部署的目標 commit（ADR 0023）
     pub commit_sha: Option<String>,
+    /// 健康檢查通過、正在執行的 commit 與上線時間（ADR 0023）
+    pub running_commit: Option<String>,
+    pub deployed_at: Option<i64>,
     /// 部署階段（ADR 0018）
     pub stage: Option<String>,
     pub hostname: String,
@@ -51,6 +55,8 @@ struct Row {
     subdomain: String,
     project: Option<String>,
     commit_sha: Option<String>,
+    running_commit: Option<String>,
+    deployed_at: Option<i64>,
     stage: Option<String>,
     hostname: String,
     kind: String,
@@ -73,6 +79,8 @@ impl From<Row> for Environment {
             subdomain: r.subdomain,
             project: r.project,
             commit_sha: r.commit_sha,
+            running_commit: r.running_commit,
+            deployed_at: r.deployed_at,
             stage: r.stage,
             hostname: r.hostname,
             kind: r.kind,
@@ -89,7 +97,7 @@ impl From<Row> for Environment {
     }
 }
 
-const COLUMNS: &str = "subdomain, project, commit_sha, stage, hostname, kind, node, subnet_index, status, error, public_service, public_port, services, created_by, created_at, updated_at";
+const COLUMNS: &str = "subdomain, project, commit_sha, running_commit, deployed_at, stage, hostname, kind, node, subnet_index, status, error, public_service, public_port, services, created_by, created_at, updated_at";
 
 pub(crate) async fn get(s: &AppState, subdomain: &str) -> ApiResult<Environment> {
     let row: Option<Row> = sqlx::query_as(&format!("SELECT {COLUMNS} FROM environments WHERE subdomain = ?"))
@@ -234,7 +242,7 @@ pub async fn create(s: &AppState, me: &CurrentUser, input: EnvInput) -> ApiResul
     s.agents.send(
         &node,
         ServerMsg::Deploy {
-            env: EnvSpec {
+            env: Box::new(EnvSpec {
                 id: subdomain.clone(),
                 kind: kind.as_str().into(),
                 compose: input.compose_yaml.clone(),
@@ -244,7 +252,8 @@ pub async fn create(s: &AppState, me: &CurrentUser, input: EnvInput) -> ApiResul
                 build: None,
                 release: vec![],
                 vars: vec![],
-            },
+                platform_vars: vec![],
+            }),
         },
     );
     audit(
@@ -381,11 +390,15 @@ pub(crate) async fn report(
             sqlx::query("UPDATE environments SET status = ?, stage = COALESCE(?, stage), error = ?, updated_at = ? WHERE subdomain = ?")
                 .bind(if keep { "running" } else { "failed" })
                 .bind(&stage)
-                .bind(err)
+                .bind(&err)
                 .bind(t)
                 .bind(env_id)
                 .execute(&s.db)
                 .await?;
+            // ADR 0023：部署紀錄與 GitHub Deployments
+            if env.project.is_some() {
+                super::deploy::finish(s, env_id, false, stage.as_deref().or(env.stage.as_deref()), Some(&err), keep).await;
+            }
         }
     }
     reload_routes(s).await;

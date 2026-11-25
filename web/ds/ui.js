@@ -17,6 +17,10 @@ const UI = (() => {
     } catch {
       throw new Error("無法連線到伺服器，請檢查網路後再試。");
     }
+    // ADR 0023：伺服器已換版（回應的 X-Caloud-Build 與載入時不同）
+    const build = r.headers.get("x-caloud-build");
+    const mine = document.querySelector('meta[name="caloud-build"]')?.content;
+    if (build && mine && build !== mine) window.dispatchEvent(new CustomEvent("caloud:stale", { detail: build }));
     if (r.status === 204) return null;
     const ct = r.headers.get("content-type") || "";
     // 202 可能沒有本體（例如 App 部署），也可能帶回資源（例如匯入專案、部署專案）

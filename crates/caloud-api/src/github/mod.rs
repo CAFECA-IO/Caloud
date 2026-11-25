@@ -5,6 +5,7 @@
 //! - [`webhook`]：驗簽、去重、事件分派（FR-GH-02）
 pub mod app;
 pub mod checks;
+pub mod deployments;
 pub mod install;
 pub mod webhook;
 

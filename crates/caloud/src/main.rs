@@ -38,6 +38,7 @@ async fn main() -> anyhow::Result<()> {
             upstream: format!("http://127.0.0.1:{port}"),
             passthrough: None,
             node: None,
+            commit: None,
         }]);
     }
     routes.reload(&db).await?;

@@ -10,7 +10,7 @@ use super::projects::owned;
 use crate::error::{ApiError, ApiResult};
 use crate::{AppState, CurrentUser};
 use caloud_analyzer::Analysis;
-use caloud_core::agent::{EnvSource, EnvSpec, ServerMsg};
+use caloud_core::agent::{EnvSource, EnvSpec, PlatformVar, ServerMsg};
 use caloud_core::db::audit;
 use caloud_core::model::{AnalysisRow, Project};
 use caloud_core::now;
@@ -134,7 +134,31 @@ fn in_progress(e: &Environment) -> bool {
     e.error.is_none()
         && now() - e.updated_at < STALE_SECS
         && e.status != "failed"
-        && matches!(e.stage.as_deref(), Some("fetch" | "build" | "start" | "health"))
+        && matches!(e.stage.as_deref(), Some("fetch" | "build" | "release" | "start" | "health"))
+}
+
+/// 平臺變數（ADR 0023）：App 可讀的版本資訊
+pub(crate) fn platform_vars(commit: &str, branch: &str, kind: &str) -> Vec<PlatformVar> {
+    let at = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    [
+        ("CALOUD_COMMIT", commit.to_string()),
+        ("CALOUD_COMMIT_SHORT", commit.chars().take(7).collect()),
+        ("CALOUD_BRANCH", branch.to_string()),
+        ("CALOUD_ENV", kind.to_string()),
+        ("CALOUD_DEPLOYED_AT", at),
+    ]
+    .into_iter()
+    .map(|(n, v)| PlatformVar { name: n.into(), value: v })
+    .collect()
+}
+
+/// 平臺映像 `caloud-env/<env>/<service>:<commit 前 12 碼>` 的 commit；現成映像為 None
+pub(crate) fn image_commit(image: &str) -> Option<String> {
+    let rest = image.strip_prefix("caloud-env/")?;
+    let (_, tag) = rest.rsplit_once(':')?;
+    (!tag.is_empty() && tag.len() <= 40 && tag.bytes().all(|b| b.is_ascii_hexdigit())).then(|| tag.to_string())
 }
 
 /// `POST /api/projects/{id}/deploy` 的選項
@@ -167,7 +191,7 @@ pub async fn deploy(s: &AppState, me: &CurrentUser, id: &str, input: DeployInput
             return Ok(json!({ "verification": v }));
         }
     }
-    let env = start(s, &p).await?;
+    let env = start(s, &p, if input.force { "forced" } else { "manual" }, Some(&me.0.account)).await?;
     let detail = format!(
         "{} {}{}",
         env.hostname,
@@ -185,9 +209,10 @@ pub async fn deploy(s: &AppState, me: &CurrentUser, id: &str, input: DeployInput
     Ok(deployment(s, &p).await?.unwrap_or(Value::Null))
 }
 
-/// 驗證通過後部署（`deploy_after`，ADR 0020）
-pub(crate) async fn deploy_verified(s: &AppState, p: &Project, via: &str) {
-    match start(s, p).await {
+/// 驗證通過後部署（`deploy_after`，ADR 0020）；`by` 為觸發驗證的人
+pub(crate) async fn deploy_verified(s: &AppState, p: &Project, via: &str, by: Option<&str>) {
+    let trigger = if via == "github" { "push" } else { "manual" };
+    match start(s, p, trigger, by).await {
         Ok(env) => {
             audit(
                 &s.db,
@@ -225,7 +250,8 @@ pub(crate) async fn verify_after_push(s: &AppState, project: &str) {
     }
 }
 
-pub(crate) async fn start(s: &AppState, p: &Project) -> ApiResult<Environment> {
+/// 開始部署；`trigger`：`manual`、`forced`、`push`（ADR 0023 部署紀錄）
+pub(crate) async fn start(s: &AppState, p: &Project, trigger: &str, by: Option<&str>) -> ApiResult<Environment> {
     let t = target(s, p).await?;
     // ADR 0021：建置分鐘上限與建置資源
     super::build::check_quota(s, &p.owner).await?;
@@ -298,6 +324,32 @@ pub(crate) async fn start(s: &AppState, p: &Project) -> ApiResult<Environment> {
         .execute(&s.db)
         .await?;
 
+    // ADR 0023：部署紀錄；先前未結束的（agent 中斷等）標為失敗
+    sqlx::query(
+        "UPDATE deployments SET status = 'failure', error = '被新的部署取代', finished_at = ? WHERE env = ? AND status = 'in_progress'",
+    )
+    .bind(ts)
+    .bind(&env.subdomain)
+    .execute(&s.db)
+    .await?;
+    let dep_id = uuid::Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO deployments (id, project, env, commit_sha, trigger, status, created_by, created_at) VALUES (?, ?, ?, ?, ?, 'in_progress', ?, ?)",
+    )
+    .bind(&dep_id)
+    .bind(&p.id)
+    .bind(&env.subdomain)
+    .bind(&t.commit)
+    .bind(trigger)
+    .bind(by)
+    .bind(ts)
+    .execute(&s.db)
+    .await?;
+    let env_url = format!("https://{}", env.hostname);
+    crate::github::deployments::spawn_create(s.clone(), p.clone(), dep_id, t.commit.clone(), env_url);
+    let branch = p.git_ref.clone().or_else(|| p.branch.clone()).unwrap_or_default();
+    let platform_vars = platform_vars(&t.commit, &branch, "production");
+
     // ADR 0018 §3：installation token 只在 Deploy 訊息中
     let auth_header = match p.installation_id {
         Some(inst) => {
@@ -311,7 +363,7 @@ pub(crate) async fn start(s: &AppState, p: &Project) -> ApiResult<Environment> {
     s.agents.send(
         &env.node,
         ServerMsg::Deploy {
-            env: EnvSpec {
+            env: Box::new(EnvSpec {
                 id: env.subdomain.clone(),
                 kind: "production".into(),
                 compose: t.compose,
@@ -335,10 +387,63 @@ pub(crate) async fn start(s: &AppState, p: &Project) -> ApiResult<Environment> {
                     })
                     .collect(),
                 vars,
-            },
+                platform_vars,
+            }),
         },
     );
     envs::get(s, &env.subdomain).await
+}
+
+/// 部署結束（ADR 0023）：更新部署紀錄並回寫 GitHub Deployments。
+/// `kept_old`：失敗時舊版仍在執行（取得原始碼、建置、發布前任務）
+pub(crate) async fn finish(s: &AppState, env_id: &str, ok: bool, stage: Option<&str>, error: Option<&str>, kept_old: bool) {
+    let row: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT id, project, commit_sha FROM deployments WHERE env = ? AND status = 'in_progress' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )
+    .bind(env_id)
+    .fetch_optional(&s.db)
+    .await
+    .ok()
+    .flatten();
+    let Some((dep_id, project, commit)) = row else { return };
+    let error: Option<String> = error.map(|e| e.chars().take(2000).collect());
+    if let Err(e) = sqlx::query("UPDATE deployments SET status = ?, stage = ?, error = ?, finished_at = ? WHERE id = ?")
+        .bind(if ok { "success" } else { "failure" })
+        .bind(if ok { None } else { stage })
+        .bind(&error)
+        .bind(now())
+        .bind(&dep_id)
+        .execute(&s.db)
+        .await
+    {
+        tracing::error!(error = %e, "deployment record not saved");
+    }
+    let Ok(p) = sqlx::query_as::<_, Project>("SELECT * FROM projects WHERE id = ?")
+        .bind(&project)
+        .fetch_one(&s.db)
+        .await
+    else {
+        return;
+    };
+    let hostname: Option<String> = sqlx::query_scalar("SELECT hostname FROM environments WHERE subdomain = ?")
+        .bind(env_id)
+        .fetch_optional(&s.db)
+        .await
+        .ok()
+        .flatten();
+    let short: String = commit.chars().take(7).collect();
+    let description = if ok {
+        format!("已上線 {short}")
+    } else {
+        format!(
+            "{} 階段失敗{}：{}",
+            stage.unwrap_or("部署"),
+            if kept_old { "，仍執行舊版" } else { "" },
+            error.as_deref().unwrap_or("未知錯誤").lines().next().unwrap_or_default()
+        )
+    };
+    let url = hostname.map(|h| format!("https://{h}")).unwrap_or_default();
+    crate::github::deployments::spawn_finish(s.clone(), p, dep_id, ok, description, url);
 }
 
 /// 專案頁的部署資訊（`GET /api/projects/{id}` 的 `deployment`）
@@ -363,6 +468,23 @@ pub(crate) async fn deployment(s: &AppState, p: &Project) -> ApiResult<Option<Va
         Ok(t) => t.pending_changes,
         Err(_) => false,
     };
+    // ADR 0023：實際映像、分支最新 commit 與它的驗證狀態
+    let services: Vec<Value> = e
+        .services
+        .iter()
+        .map(|x| json!({ "name": x.name, "image": x.image, "commit": x.image.as_deref().and_then(image_commit) }))
+        .collect();
+    let branch_commit: Option<String> = latest(s, &p.id).await?.map(|a| a.commit_sha);
+    let branch_verify: Option<String> = match &branch_commit {
+        Some(c) => sqlx::query_scalar(
+            "SELECT status FROM verifications WHERE project = ? AND commit_sha = ? AND trigger != 'pr' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        )
+        .bind(&p.id)
+        .bind(c)
+        .fetch_optional(&s.db)
+        .await?,
+        None => None,
+    };
     Ok(Some(json!({
         "subdomain": e.subdomain,
         "hostname": e.hostname,
@@ -371,6 +493,12 @@ pub(crate) async fn deployment(s: &AppState, p: &Project) -> ApiResult<Option<Va
         "stage": e.stage,
         "error": e.error,
         "commit": e.commit_sha,
+        "target_commit": e.commit_sha,
+        "running_commit": e.running_commit,
+        "deployed_at": e.deployed_at,
+        "services": services,
+        "branch_commit": branch_commit,
+        "branch_verify": branch_verify,
         "node": e.node,
         "updated_at": e.updated_at,
         "in_progress": in_progress(&e),
@@ -379,6 +507,34 @@ pub(crate) async fn deployment(s: &AppState, p: &Project) -> ApiResult<Option<Va
         "missing_vars": missing_vars,
         "logs": logs.into_iter().map(|(stage, line, at)| json!({ "stage": stage, "line": line, "at": at })).collect::<Vec<_>>(),
     })))
+}
+
+/// 部署紀錄（ADR 0023）
+#[derive(Debug, serde::Serialize, sqlx::FromRow)]
+pub struct DeploymentRecord {
+    pub id: String,
+    pub env: String,
+    #[serde(rename = "commit")]
+    pub commit_sha: String,
+    pub trigger: String,
+    pub status: String,
+    pub stage: Option<String>,
+    pub error: Option<String>,
+    pub created_by: Option<String>,
+    pub created_at: i64,
+    pub finished_at: Option<i64>,
+}
+
+/// `GET /api/projects/{id}/deployments`：最近 20 筆
+pub async fn history(s: &AppState, me: &CurrentUser, id: &str) -> ApiResult<Vec<DeploymentRecord>> {
+    owned(s, me, id).await?;
+    Ok(sqlx::query_as(
+        "SELECT id, env, commit_sha, trigger, status, stage, error, created_by, created_at, finished_at FROM deployments \
+         WHERE project = ? ORDER BY created_at DESC, rowid DESC LIMIT 20",
+    )
+    .bind(id)
+    .fetch_all(&s.db)
+    .await?)
 }
 
 /// 經通道對 `target` 發一次 `GET /`；收到任何 HTTP 回應即通過
@@ -427,8 +583,10 @@ pub(crate) fn spawn_health(s: AppState, env: Environment, target: String) {
         };
         let res = if ok {
             log("健康檢查通過，網址已開放".into()).await;
+            // ADR 0023：執行中的版本只在這裡更新
             sqlx::query(
-                "UPDATE environments SET status = 'running', stage = 'done', updated_at = ? WHERE subdomain = ? AND stage = 'health' AND status = 'deploying'",
+                "UPDATE environments SET status = 'running', stage = 'done', running_commit = commit_sha, deployed_at = ?1, updated_at = ?1 \
+                 WHERE subdomain = ?2 AND stage = 'health' AND status = 'deploying'",
             )
             .bind(now())
             .bind(&env.subdomain)
@@ -443,14 +601,19 @@ pub(crate) fn spawn_health(s: AppState, env: Environment, target: String) {
             sqlx::query(
                 "UPDATE environments SET status = 'failed', error = ?, updated_at = ? WHERE subdomain = ? AND stage = 'health' AND status = 'deploying'",
             )
-            .bind(msg)
+            .bind(&msg)
             .bind(now())
             .bind(&env.subdomain)
             .execute(&s.db)
             .await
         };
-        if let Err(e) = res {
-            tracing::error!(error = %e, "health result not saved");
+        match res {
+            Ok(r) if r.rows_affected() > 0 => {
+                let err = (!ok).then(|| format!("{secs} 秒內服務 `{}` 沒有回應 HTTP", env.public_service));
+                finish(&s, &env.subdomain, ok, Some("health"), err.as_deref(), false).await;
+            }
+            Ok(_) => {}
+            Err(e) => tracing::error!(error = %e, "health result not saved"),
         }
         envs::reload_routes(&s).await;
     });
@@ -458,7 +621,21 @@ pub(crate) fn spawn_health(s: AppState, env: Environment, target: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::probe;
+    use super::{image_commit, platform_vars, probe};
+
+    // ADR 0023
+    #[test]
+    fn reads_commit_from_platform_images_and_builds_platform_vars() {
+        assert_eq!(image_commit("caloud-env/k2m9/web:98b705d01234").as_deref(), Some("98b705d01234"));
+        assert_eq!(image_commit("postgres:16"), None);
+        assert_eq!(image_commit("caloud-env/k2m9/web:latest"), None);
+        assert_eq!(image_commit("caloud-env/k2m9/web"), None);
+        let v = platform_vars("98b705d0123456789abcdef0123456789abcdef0", "main", "production");
+        let get = |n: &str| v.iter().find(|x| x.name == n).map(|x| x.value.clone()).unwrap();
+        assert_eq!(get("CALOUD_COMMIT_SHORT"), "98b705d");
+        assert_eq!((get("CALOUD_BRANCH").as_str(), get("CALOUD_ENV").as_str()), ("main", "production"));
+        assert!(get("CALOUD_DEPLOYED_AT").ends_with('Z'));
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     // ADR 0018：任何 HTTP 回應即通過；非 HTTP 或連不上則不通過

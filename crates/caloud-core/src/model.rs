@@ -131,6 +131,8 @@ pub struct Route {
     pub passthrough: Option<String>,
     /// 環境所在的 Runner 節點；有值時經該節點的通道轉發（FR-OPS-09）
     pub node: Option<String>,
+    /// 專案環境的執行中 commit（前 7 碼）；Edge 以 `X-Caloud-Commit` 回應（ADR 0023）
+    pub commit: Option<String>,
 }
 
 /// host 網路 service 的轉發目標（FR-DOM-10）
@@ -164,6 +166,8 @@ pub struct Project {
     /// 以 GitHub App 安裝匯入時的安裝 id 與儲存庫全名（ADR 0017）
     pub installation_id: Option<i64>,
     pub repo_full_name: Option<String>,
+    /// 專案環境的回應帶 `X-Caloud-Commit`（ADR 0023）
+    pub commit_header: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }

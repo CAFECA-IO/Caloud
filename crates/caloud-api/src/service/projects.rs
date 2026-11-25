@@ -81,6 +81,8 @@ pub struct ProjectInput {
     pub git_ref: Option<String>,
     pub root: Option<String>,
     pub name: Option<String>,
+    /// 專案環境的回應帶 `X-Caloud-Commit`（ADR 0023）
+    pub commit_header: Option<bool>,
 }
 
 /// 空字串視為「未指定」
@@ -235,14 +237,19 @@ pub async fn update(s: &AppState, me: &CurrentUser, id: &str, input: ProjectInpu
     if reanalyze && p.status == "analyzing" {
         return Err(ApiError::Conflict("正在解析，請等這次完成後再修改。".into()));
     }
-    sqlx::query("UPDATE projects SET name = ?, git_ref = ?, root = ?, updated_at = ? WHERE id = ?")
+    let commit_header = input.commit_header.unwrap_or(p.commit_header);
+    sqlx::query("UPDATE projects SET name = ?, git_ref = ?, root = ?, commit_header = ?, updated_at = ? WHERE id = ?")
         .bind(&name)
         .bind(&git_ref)
         .bind(&root)
+        .bind(commit_header)
         .bind(now())
         .bind(id)
         .execute(&s.db)
         .await?;
+    if commit_header != p.commit_header {
+        crate::service::environments::reload_routes(s).await;
+    }
     audit(
         &s.db,
         Some(&me.0.account),

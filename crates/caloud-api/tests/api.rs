@@ -42,6 +42,8 @@ struct MockState {
     txt: Arc<Mutex<HashMap<String, String>>>,
     /// 替身 GitHub 收到的 Checks 與留言呼叫：(方法, 路徑, 內容)
     gh: Arc<Mutex<Vec<(String, String, Value)>>>,
+    /// 替身 GitHub 收到的 Deployments 呼叫（ADR 0023）：(路徑, 內容)
+    deploys: Arc<Mutex<Vec<(String, Value)>>>,
 }
 
 async fn spawn_mock() -> (String, MockState) {
@@ -166,6 +168,21 @@ async fn spawn_mock() -> (String, MockState) {
                 Json(json!({ "id": 9001 }))
             }),
         )
+        // Deployments（ADR 0023）
+        .route(
+            "/gh/repos/{o}/{r}/deployments",
+            post(|State(s): State<MockState>, uri: axum::http::Uri, Json(b): Json<Value>| async move {
+                s.deploys.lock().unwrap().push((uri.path().into(), b));
+                (StatusCode::CREATED, Json(json!({ "id": 5001 })))
+            }),
+        )
+        .route(
+            "/gh/repos/{o}/{r}/deployments/{id}/statuses",
+            post(|State(s): State<MockState>, uri: axum::http::Uri, Json(b): Json<Value>| async move {
+                s.deploys.lock().unwrap().push((uri.path().into(), b));
+                (StatusCode::CREATED, Json(json!({ "id": 1 })))
+            }),
+        )
         // TXT 寫入替身 DoH（同名多筆以換行分隔）
         .route(
             "/cf/zones/{zone}/dns_records",
@@ -250,8 +267,8 @@ impl Env {
             &docker,
             format!(
                 "#!/bin/sh\necho \"$*\" >> '{log}'\nif [ -f '{fail}' ]; then echo 'image pull failed: not found' >&2; exit 1; fi\n\
-                 case \"$*\" in *' run --rm -T '*) echo \"RUNENV S=${{SESSION_SECRET:-}}\" >> '{log}'; [ -f '{rfail}' ] && {{ echo 'migration failed' >&2; exit 1; }};; *' ps '*) echo '{{\"Service\":\"web\",\"Name\":\"caloud-x-web-1\",\"State\":\"running\",\"Health\":\"\"}}';; \
-                 *' logs '*) echo 'web-1 | ready';; *caloud-test-*) [ -f '{slow}' ] && sleep 5;; *' up '*) echo \"UPENV P=$3 S=${{SESSION_SECRET:-}} D=${{CALOUD_DB_PASSWORD:-}}\" >> '{log}';; esac\nexit 0\n",
+                 case \"$*\" in *' run --rm -T '*) echo \"RUNENV S=${{SESSION_SECRET:-}}\" >> '{log}'; [ -f '{rfail}' ] && {{ echo 'migration failed' >&2; exit 1; }};; *' ps '*) echo '{{\"Service\":\"web\",\"Name\":\"caloud-x-web-1\",\"Image\":\"caloud-env/x/web:98b705d01234\",\"State\":\"running\",\"Health\":\"\"}}';; \
+                 *' logs '*) echo 'web-1 | ready';; *caloud-test-*) [ -f '{slow}' ] && sleep 5;; *' up '*) echo \"UPENV P=$3 S=${{SESSION_SECRET:-}} D=${{CALOUD_DB_PASSWORD:-}}\" >> '{log}'; echo \"PLATFORM C=${{CALOUD_COMMIT:-}} E=${{CALOUD_ENV:-}}\" >> '{log}';; esac\nexit 0\n",
                 log = dir.join("docker.log").display(),
                 fail = dir.join("docker.fail").display(),
                 slow = dir.join("docker.slow").display(),
@@ -1846,6 +1863,7 @@ async fn edge_forwards_through_runner_tunnel_and_upgrades() {
         upstream,
         passthrough: None,
         node,
+        commit: None,
     };
     routes.replace(vec![
         route("tun.test", format!("http://{app}"), Some(id.clone())),
@@ -2301,7 +2319,8 @@ async fn admin_opens_environment_on_isolated_runner() {
     let running = wait_env(&env, &admin, &sub, Some("running")).await.unwrap();
     assert_eq!(
         running["services"],
-        json!([{ "name": "web", "ip": "10.240.0.10" }, { "name": "cache", "ip": "10.240.0.11" }])
+        // ADR 0023：image 為 `up` 之後容器實際的映像（替身 docker 只回報 web）
+        json!([{ "name": "web", "ip": "10.240.0.10", "image": "caloud-env/x/web:98b705d01234" }, { "name": "cache", "ip": "10.240.0.11" }])
     );
 
     // Edge 路由：經該節點通道到對外服務的固定 IP
@@ -3527,6 +3546,17 @@ async fn public_console_guard() {
 
 // ───────────────────────── Checks、PR 驗證、建置配額、發布前任務（ADR 0021） ─────────────────────────
 
+async fn wait_deploys(env: &Env, n: usize) -> Vec<(String, Value)> {
+    for _ in 0..400 {
+        let v = env.mock.deploys.lock().unwrap().clone();
+        if v.len() >= n {
+            return v;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("GitHub deployments: {:?}", env.mock.deploys.lock().unwrap());
+}
+
 async fn wait_gh(env: &Env, n: usize) -> Vec<(String, String, Value)> {
     for _ in 0..400 {
         let v = env.mock.gh.lock().unwrap().clone();
@@ -3696,17 +3726,93 @@ async fn checks_pr_quota_and_release_tasks() {
         .expect("release with next files");
     let up = lines.iter().rposition(|l| l.contains(" up ")).unwrap();
     assert!(run < up, "{log}");
-    // 發布前任務失敗 → 回報 release 階段失敗，不 up，舊版繼續執行
+    // ADR 0023：執行中版本、實際映像、平臺變數、部署紀錄、Edge 標頭、GitHub Deployments
+    let a = "98b705d0123456789abcdef0123456789abcdef0";
+    let (_, pv) = env.call("GET", &format!("/api/projects/{id}"), &member, None).await;
+    let d = &pv["deployment"];
+    assert_eq!(
+        (d["running_commit"].as_str(), d["target_commit"].as_str()),
+        (Some(a), Some(a)),
+        "{d}"
+    );
+    assert!(d["deployed_at"].as_i64().is_some(), "{d}");
+    assert_eq!(d["services"][0]["commit"], "98b705d01234", "{d}");
+    assert_eq!(d["branch_commit"], a);
+    assert!(log.contains(&format!("PLATFORM C={a} E=production")), "{log}");
+    let host = d["hostname"].as_str().unwrap().to_string();
+    assert_eq!(env.routes.lookup_route(&host).unwrap().commit.as_deref(), Some("98b705d"));
+    let (_, h) = env.call("GET", &format!("/api/projects/{id}/deployments"), &member, None).await;
+    assert_eq!(
+        (h[0]["status"].as_str(), h[0]["trigger"].as_str()),
+        (Some("success"), Some("manual")),
+        "{h}"
+    );
+    let calls = wait_deploys(&env, 3).await;
+    assert_eq!(calls[0].0, "/gh/repos/CAFECA-IO/secret-app/deployments");
+    assert_eq!(
+        (calls[0].1["ref"].as_str(), calls[0].1["environment"].as_str()),
+        (Some(a), Some("production"))
+    );
+    assert_eq!(calls[1].0, "/gh/repos/CAFECA-IO/secret-app/deployments/5001/statuses");
+    assert_eq!(calls[1].1["state"], "in_progress");
+    assert_eq!(calls[2].1["state"], "success");
+    assert_eq!(calls[2].1["environment_url"], format!("https://{host}"));
+    // 關閉版本標頭
+    let (st, _) = env
+        .call(
+            "PATCH",
+            &format!("/api/projects/{id}"),
+            &member,
+            Some(json!({ "commit_header": false })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(env.routes.lookup_route(&host).unwrap().commit.is_none());
+    env.call(
+        "PATCH",
+        &format!("/api/projects/{id}"),
+        &member,
+        Some(json!({ "commit_header": true })),
+    )
+    .await;
+    assert!(env.routes.lookup_route(&host).unwrap().commit.is_some());
+
+    // 新 commit 的發布前任務失敗 → 回報 release 階段失敗，不 up，舊版繼續執行，執行中版本不變
+    let b = "b".repeat(40);
+    std::fs::write(env.dir.join("git.head"), &b).unwrap();
+    env.call("POST", &format!("/api/projects/{id}/analysis"), &member, None).await;
+    wait_project(&env, &member, &id).await;
     std::fs::write(env.dir.join("release.fail"), "").unwrap();
     let ups = env.docker_log().lines().filter(|l| l.contains(" up ")).count();
-    let (st, _) = env.call("POST", &deploy, &member, None).await;
-    assert_eq!(st, StatusCode::ACCEPTED);
+    let (st, r) = env.call("POST", &deploy, &admin, Some(json!({ "force": true }))).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{r}");
     let d = wait_deploy(&env, &member, &id, |d| {
         d["stage"] == "release" && d["error"].is_string() && d["in_progress"] == false
     })
     .await;
     assert_eq!(d["status"], "running", "舊版繼續執行：{d}");
     assert!(d["error"].as_str().unwrap().contains("發布前任務"), "{d}");
+    assert_eq!(
+        (d["target_commit"].as_str(), d["running_commit"].as_str()),
+        (Some(b.as_str()), Some(a)),
+        "{d}"
+    );
+    assert_eq!(env.routes.lookup_route(&host).unwrap().commit.as_deref(), Some("98b705d"));
+    let (_, h) = env.call("GET", &format!("/api/projects/{id}/deployments"), &member, None).await;
+    assert_eq!(
+        (
+            h[0]["status"].as_str(),
+            h[0]["stage"].as_str(),
+            h[0]["trigger"].as_str(),
+            h[0]["commit"].as_str()
+        ),
+        (Some("failure"), Some("release"), Some("forced"), Some(b.as_str())),
+        "{h}"
+    );
+    let calls = wait_deploys(&env, 6).await;
+    assert_eq!(calls[5].1["state"], "failure");
+    assert!(calls[5].1["description"].as_str().unwrap().contains("仍執行舊版"), "{:?}", calls[5]);
+    std::fs::remove_file(env.dir.join("git.head")).unwrap();
     assert_eq!(env.docker_log().lines().filter(|l| l.contains(" up ")).count(), ups);
     let prod: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM environments WHERE project = ? AND kind = 'production' AND status = 'running'")
@@ -3956,4 +4062,31 @@ async fn gpu_projects_only_go_to_gpu_ready_nodes() {
     );
     cpu.abort();
     gpu.abort();
+}
+
+// FR-OPS-15（ADR 0023）：版本、回應標頭、管理介面快取
+#[tokio::test]
+async fn version_header_and_console_caching() {
+    let env = Env::new().await;
+    let r = env.http.get(env.url("/api/version")).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.headers()["x-caloud-build"], caloud_core::build::COMMIT);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["commit"], caloud_core::build::COMMIT);
+    assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
+
+    let r = env.http.get(env.url("/")).send().await.unwrap();
+    assert_eq!(r.headers()["cache-control"], "no-cache");
+    let etag = r.headers()["etag"].to_str().unwrap().to_string();
+    assert_eq!(etag, format!("\"{}\"", caloud_core::build::COMMIT));
+    let html = r.text().await.unwrap();
+    let v = format!("?v={}", caloud_core::build::COMMIT);
+    assert!(html.contains(&format!("<meta name=\"caloud-build\" content=\"{}\">", caloud_core::build::COMMIT)));
+    assert!(html.contains(&format!("/assets/ds/ui.js{v}\"")), "資源網址帶版本");
+    // 本機建置（dev）不長期快取、不回 304
+    let r = env.http.get(env.url("/")).header("if-none-match", &etag).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let r = env.http.get(env.url(&format!("/assets/ds/ui.js{v}"))).send().await.unwrap();
+    assert_eq!(r.headers()["cache-control"], "no-cache");
+    assert!(r.headers().contains_key("x-caloud-build"));
 }

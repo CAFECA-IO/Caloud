@@ -116,6 +116,8 @@ pub async fn guard(State(s): State<AppState>, req: Request, next: Next) -> Respo
     let mut res = next.run(req).await;
     let h = res.headers_mut();
     h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    // ADR 0023：建置識別
+    h.insert("x-caloud-build", HeaderValue::from_static(caloud_core::build::COMMIT));
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("strict-origin-when-cross-origin"));
     h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     if s.cfg.public_origin.starts_with("https://") {

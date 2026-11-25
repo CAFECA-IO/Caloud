@@ -80,6 +80,10 @@
 
 ### 3.0 版本（FR-OPS-15，ADR 0023）
 
+| Method | Path | 權限 | 需求 |
+| --- | --- | --- | --- |
+| GET | `/api/version` | 公開 | FR-OPS-15 |
+
 **GET /api/version**（不需登入）→ `200 { "version": "0.1.0", "commit": "4b8aadd", "built_at": "2026-11-25T08:00:00Z" }`。未以 build arg 建置時 `commit` 與 `built_at` 為 `"dev"`。每個回應都帶 `X-Caloud-Build: <commit>`。
 
 ### 3.1 身分驗證
@@ -311,6 +315,7 @@
 | POST | `/api/projects/{id}/deploy` | 擁有者 | FR-ENV-12 |
 | POST | `/api/projects/{id}/verify` | 擁有者 | FR-CI-01 |
 | GET | `/api/projects/{id}/verifications` | 擁有者 | FR-RPT-02 |
+| GET | `/api/projects/{id}/deployments` | 擁有者 | FR-ENV-14 |
 | GET | `/api/verifications/{id}` | 專案擁有者 | FR-RPT-01 |
 | POST | `/api/verifications/{id}/cancel` | 專案擁有者 | FR-CI-04 |
 | GET | `/api/verifications/{id}/report` | 專案擁有者 | FR-RPT-03 |
