@@ -24,6 +24,7 @@ caloud-auth.workspace = true
 caloud-orchestrator.workspace = true
 caloud-proxy.workspace = true
 caloud-analyzer.workspace = true
+serde_yaml.workspace = true
 tokio-yamux.workspace = true
 futures-util.workspace = true
 bytes.workspace = true

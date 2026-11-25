@@ -11,7 +11,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::{AppState, CurrentUser};
 use caloud_core::agent::{EnvSource, EnvSpec, Issue, ReleaseTask, ServerMsg, VerifyCmd, VerifySpec, SEVERITIES, VERIFY_STAGES};
 use caloud_core::db::audit;
-use caloud_core::model::Project;
+use caloud_core::model::{AnalysisRow, Project};
 use caloud_core::now;
 use caloud_core::subdomain::EnvKind;
 use serde::Serialize;
@@ -66,6 +66,13 @@ pub struct Verification {
     pub check_run_id: Option<i64>,
     pub pr_number: Option<i64>,
     pub build_secs: i64,
+    /// 通過後沒有自動部署的原因（ADR 0024）
+    pub deploy_note: Option<String>,
+    #[serde(serialize_with = "as_json")]
+    pub stage_times: String,
+    /// 驗證時的設定指紋（ADR 0024）
+    #[serde(skip)]
+    pub settings: Option<String>,
 }
 
 fn as_json<S: serde::Serializer>(v: &str, s: S) -> Result<S::Ok, S::Error> {
@@ -128,17 +135,33 @@ async fn owned_run(s: &AppState, me: &CurrentUser, id: &str) -> ApiResult<Verifi
     Ok(v)
 }
 
-/// 部署關卡：這個 commit 在這份確認的設定下已通過驗證
-pub(crate) async fn passed(s: &AppState, project: &str, commit: &str, analysis: &str) -> ApiResult<bool> {
-    let n: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM verifications WHERE project = ? AND commit_sha = ? AND analysis = ? AND status = 'passed' AND trigger != 'pr'",
+/// 驗證時的設定指紋；舊紀錄沒有時由它的解析計算（ADR 0024）
+async fn run_settings(s: &AppState, v_settings: Option<String>, analysis: &str) -> ApiResult<Option<String>> {
+    if v_settings.is_some() {
+        return Ok(v_settings);
+    }
+    let row: Option<AnalysisRow> = sqlx::query_as("SELECT * FROM analyses WHERE id = ?")
+        .bind(analysis)
+        .fetch_optional(&s.db)
+        .await?;
+    Ok(row.as_ref().and_then(deploy::settings_key))
+}
+
+/// 部署關卡：這個 commit 在相同設定（設定指紋，ADR 0024）下已通過驗證
+pub(crate) async fn passed(s: &AppState, project: &str, commit: &str, settings: &str) -> ApiResult<bool> {
+    let runs: Vec<(Option<String>, String)> = sqlx::query_as(
+        "SELECT settings, analysis FROM verifications WHERE project = ? AND commit_sha = ? AND status = 'passed' AND trigger != 'pr'",
     )
     .bind(project)
     .bind(commit)
-    .bind(analysis)
-    .fetch_one(&s.db)
+    .fetch_all(&s.db)
     .await?;
-    Ok(n > 0)
+    for (set, analysis) in runs {
+        if run_settings(s, set, &analysis).await?.as_deref() == Some(settings) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// `POST /api/projects/{id}/verify`
@@ -271,8 +294,8 @@ pub(crate) async fn start(
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "INSERT INTO verifications (id, project, analysis, commit_sha, branch, trigger, status, stage, stages, counts, env, node, deploy_after, keep, created_by, created_at, started_at, pr_number) \
-         VALUES (?, ?, ?, ?, ?, ?, 'running', 'fetch', ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO verifications (id, project, analysis, commit_sha, branch, trigger, status, stage, stages, counts, env, node, deploy_after, keep, created_by, created_at, started_at, pr_number, settings, stage_times) \
+         VALUES (?, ?, ?, ?, ?, ?, 'running', 'fetch', ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, json_object('fetch', json_array(?, NULL)))",
     )
     .bind(&id)
     .bind(&p.id)
@@ -289,6 +312,8 @@ pub(crate) async fn start(
     .bind(ts)
     .bind(ts)
     .bind(pr_number)
+    .bind(&t.settings)
+    .bind(ts)
     .execute(&mut *tx)
     .await?;
     if t.pending_changes {
@@ -413,12 +438,17 @@ pub(crate) async fn on_stage(s: &AppState, node: &str, id: &str, stage: &str, st
     if active(s, node, id).await.is_none() {
         return Ok(());
     }
+    // ADR 0024：各階段的開始與結束時間（running 記開始；結束時補上開始，略過的階段兩者相同）
     sqlx::query(
-        "UPDATE verifications SET stages = json_set(stages, '$.' || ?1, ?2), stage = CASE WHEN ?2 = 'running' THEN ?1 ELSE stage END WHERE id = ?3",
+        "UPDATE verifications SET stages = json_set(stages, '$.' || ?1, ?2), stage = CASE WHEN ?2 = 'running' THEN ?1 ELSE stage END, \
+         stage_times = CASE WHEN ?2 = 'running' THEN json_set(stage_times, '$.' || ?1, json_array(?4, NULL)) \
+           ELSE json_set(stage_times, '$.' || ?1, json_array(COALESCE(json_extract(stage_times, '$.' || ?1 || '[0]'), ?4), ?4)) END \
+         WHERE id = ?3",
     )
     .bind(stage)
     .bind(status)
     .bind(id)
+    .bind(now())
     .execute(&s.db)
     .await?;
     Ok(())
@@ -530,10 +560,27 @@ pub(crate) async fn on_done(s: &AppState, node: &str, id: &str, error: Option<St
             .fetch_one(&s.db)
             .await
         {
-            // 確認的設定在驗證期間沒有變
-            if p.confirmed_analysis.as_deref() == Some(v.analysis.as_str()) {
+            // 確認的設定（設定指紋）在驗證期間沒有變（ADR 0024）
+            let now_settings = deploy::confirmed(s, &p).await.ok().as_ref().and_then(deploy::settings_key);
+            let ran = run_settings(s, v.settings.clone(), &v.analysis).await?;
+            let note = if now_settings.is_none() || now_settings != ran {
+                Some("驗證期間設定有變動，未自動部署；可在紀錄中部署這個版本。".to_string())
+            } else {
                 let via = if v.trigger == "push" { "github" } else { "web" };
-                deploy::deploy_verified(s, &p, via, v.created_by.as_deref()).await;
+                match deploy::deploy_verified(s, &p, &v.commit_sha, via, v.created_by.as_deref()).await {
+                    Ok(()) => None,
+                    Err(e) => {
+                        tracing::warn!(project = %p.id, error = %e, "deploy after verification failed");
+                        Some(format!("未自動部署：{e}"))
+                    }
+                }
+            };
+            if let Some(n) = note {
+                sqlx::query("UPDATE verifications SET deploy_note = ? WHERE id = ?")
+                    .bind(n.chars().take(500).collect::<String>())
+                    .bind(id)
+                    .execute(&s.db)
+                    .await?;
             }
         }
     }
@@ -583,10 +630,19 @@ pub(crate) async fn summary(s: &AppState, p: &Project) -> ApiResult<Value> {
             .fetch_optional(&s.db)
             .await?;
     let verified = match deploy::target(s, p).await {
-        Ok(t) => passed(s, &p.id, &t.commit, &t.analysis).await?,
+        Ok(t) => passed(s, &p.id, &t.commit, &t.settings).await?,
         Err(_) => false,
     };
-    Ok(json!({ "latest": latest, "verified": verified }))
+    // ADR 0024：最近 3 次已結束驗證的平均耗時（預估剩餘時間）
+    let avg: Option<f64> = sqlx::query_scalar(
+        "SELECT AVG(finished_at - started_at) FROM (SELECT finished_at, started_at FROM verifications \
+         WHERE project = ? AND status IN ('passed', 'failed') AND trigger != 'pr' AND started_at IS NOT NULL AND finished_at IS NOT NULL \
+         ORDER BY created_at DESC, rowid DESC LIMIT 3)",
+    )
+    .bind(&p.id)
+    .fetch_one(&s.db)
+    .await?;
+    Ok(json!({ "latest": latest, "verified": verified, "avg_secs": avg.map(|x| x.round() as i64) }))
 }
 
 async fn issues(s: &AppState, id: &str) -> ApiResult<Vec<IssueRow>> {

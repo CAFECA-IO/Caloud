@@ -205,7 +205,10 @@ const PLATFORM_VARS: &[&str] = &["PORT", "PUBLIC_URL", "NODE_ENV", "HOSTNAME"];
 pub(crate) fn scan_env(cx: &mut Ctx, platform: &[String]) -> Vec<EnvVar> {
     let public = crate::runtime::uses_public_prefix(cx.fs);
     let found = cx.code().env.clone();
+    let code = cx.code();
+    let optional = |name: &str| code.in_code.contains(name) && !code.required.contains(name);
     let var = |name: String, provider: Provider, evidence: Vec<Evidence>| EnvVar {
+        optional: optional(&name),
         build_time: crate::runtime::is_build_time(&name, public),
         varies_by_env: crate::runtime::is_build_time(&name, public) && crate::runtime::varies_by_env(&name),
         name,
@@ -241,5 +244,6 @@ pub(crate) fn generated(compose: &str) -> Option<EnvVar> {
         evidence: vec![],
         build_time: false,
         varies_by_env: false,
+        optional: false,
     })
 }

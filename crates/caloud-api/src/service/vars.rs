@@ -32,10 +32,17 @@ pub struct VarItem {
     pub name: String,
     pub set: bool,
     pub hint: Option<String>,
-    /// `user` | `generated`
+    /// `user` | `generated` | `compose`（ADR 0024）
     pub source: &'static str,
+    /// compose `environment` 提供的值（`source: compose`；compose 本來就可見，不是秘密）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
     /// 確認的解析需要用戶提供
     pub needed: bool,
+    /// 程式中有預設值（選填，FR-AN-12）
+    pub optional: bool,
+    /// 用戶標為「不需要」
+    pub ignored: bool,
     pub build_time: bool,
     pub evidence: Vec<Evidence>,
     pub updated_at: Option<i64>,
@@ -56,6 +63,11 @@ pub struct VarsInput {
     pub set: BTreeMap<String, String>,
     #[serde(default)]
     pub unset: Vec<String>,
+    /// 標為「不需要」（ADR 0024）
+    #[serde(default)]
+    pub ignore: Vec<String>,
+    #[serde(default)]
+    pub unignore: Vec<String>,
 }
 
 fn default_env() -> String {
@@ -89,14 +101,63 @@ fn aad_id(project: &str, env: &str, name: &str) -> String {
     format!("{project}:{env}:{name}")
 }
 
-/// 確認的解析
-async fn confirmed(s: &AppState, project: &str) -> ApiResult<Option<Analysis>> {
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT a.result FROM analyses a JOIN projects p ON p.confirmed_analysis = a.id WHERE p.id = ?")
+/// 確認的解析與它的有效 compose
+async fn confirmed(s: &AppState, project: &str) -> ApiResult<Option<(Analysis, Option<String>)>> {
+    let row: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT a.result, a.compose FROM analyses a JOIN projects p ON p.confirmed_analysis = a.id WHERE p.id = ?")
             .bind(project)
             .fetch_optional(&s.db)
             .await?;
-    Ok(row.and_then(|(r,)| serde_json::from_str(&r).ok()))
+    Ok(row.and_then(|(r, c)| {
+        let a: Analysis = serde_json::from_str(&r).ok()?;
+        let compose = c.or_else(|| a.compose.clone());
+        Some((a, compose))
+    }))
+}
+
+/// compose 中任一服務 `environment` 提供的值；`${NAME}`／`$NAME` 引用自己的不算（ADR 0024）
+pub(crate) fn compose_env(compose: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(compose) else {
+        return out;
+    };
+    let Some(svcs) = doc.get("services").and_then(|v| v.as_mapping()) else {
+        return out;
+    };
+    let scalar = |v: &serde_yaml::Value| match v {
+        serde_yaml::Value::String(s) => Some(s.clone()),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        serde_yaml::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    };
+    for (_, svc) in svcs {
+        let pairs: Vec<(String, Option<String>)> = match svc.get("environment") {
+            Some(serde_yaml::Value::Mapping(m)) => m.iter().filter_map(|(k, v)| Some((k.as_str()?.to_string(), scalar(v)))).collect(),
+            Some(serde_yaml::Value::Sequence(l)) => l
+                .iter()
+                .filter_map(|x| {
+                    let (k, v) = x.as_str()?.split_once('=')?;
+                    Some((k.to_string(), Some(v.to_string())))
+                })
+                .collect(),
+            _ => vec![],
+        };
+        for (k, v) in pairs {
+            let Some(v) = v else { continue };
+            if v == format!("${{{k}}}") || v == format!("${k}") {
+                continue;
+            }
+            out.entry(k).or_insert(v);
+        }
+    }
+    out
+}
+
+async fn ignores(s: &AppState, project: &str) -> ApiResult<Vec<String>> {
+    Ok(sqlx::query_scalar("SELECT name FROM project_var_ignores WHERE project = ?")
+        .bind(project)
+        .fetch_all(&s.db)
+        .await?)
 }
 
 async fn rows(s: &AppState, project: &str, env: &str) -> ApiResult<Vec<Row>> {
@@ -119,7 +180,9 @@ pub(crate) async fn rev(s: &AppState, project: &str) -> ApiResult<i64> {
 /// 解析需要的用戶變數＋已設定＋平臺產生
 async fn items(s: &AppState, project: &str, env: &str) -> ApiResult<Vec<VarItem>> {
     let mut out: BTreeMap<String, VarItem> = BTreeMap::new();
-    if let Some(a) = confirmed(s, project).await? {
+    let mut from_compose = BTreeMap::new();
+    if let Some((a, compose)) = confirmed(s, project).await? {
+        from_compose = compose.as_deref().map(compose_env).unwrap_or_default();
         for e in a.env.into_iter().filter(|e| e.provider == Provider::User) {
             out.insert(
                 e.name.clone(),
@@ -128,7 +191,10 @@ async fn items(s: &AppState, project: &str, env: &str) -> ApiResult<Vec<VarItem>
                     set: false,
                     hint: None,
                     source: "user",
+                    value: None,
                     needed: true,
+                    optional: e.optional,
+                    ignored: false,
                     build_time: e.build_time,
                     evidence: e.evidence,
                     updated_at: None,
@@ -142,7 +208,10 @@ async fn items(s: &AppState, project: &str, env: &str) -> ApiResult<Vec<VarItem>
             set: false,
             hint: None,
             source: "user",
+            value: None,
             needed: false,
+            optional: false,
+            ignored: false,
             build_time: false,
             evidence: vec![],
             updated_at: None,
@@ -152,6 +221,20 @@ async fn items(s: &AppState, project: &str, env: &str) -> ApiResult<Vec<VarItem>
         it.updated_at = Some(r.updated_at);
         if r.generated {
             it.source = "generated";
+        }
+    }
+    // ADR 0024：compose 已提供（且沒有另外設定秘密值）的變數不需要填寫
+    for it in out.values_mut() {
+        if !it.set {
+            if let Some(v) = from_compose.get(&it.name) {
+                it.source = "compose";
+                it.value = Some(v.chars().take(500).collect());
+            }
+        }
+    }
+    for n in ignores(s, project).await? {
+        if let Some(it) = out.get_mut(&n) {
+            it.ignored = true;
         }
     }
     Ok(out.into_values().collect())
@@ -173,6 +256,9 @@ pub async fn update(s: &AppState, me: &CurrentUser, id: &str, input: VarsInput) 
     owned(s, me, id).await?;
     check_env(&input.env)?;
     let env = input.env.as_str();
+    if !input.ignore.is_empty() || !input.unignore.is_empty() {
+        mark_ignored(s, me, id, &input.ignore, &input.unignore).await?;
+    }
     if input.set.is_empty() && input.unset.is_empty() {
         return list(s, me, id, env).await;
     }
@@ -255,6 +341,51 @@ pub async fn update(s: &AppState, me: &CurrentUser, id: &str, input: VarsInput) 
     )
     .await;
     list(s, me, id, env).await
+}
+
+/// ADR 0024：標記或取消「不需要」（只影響提示，不影響 `rev` 與部署注入）
+async fn mark_ignored(s: &AppState, me: &CurrentUser, id: &str, ignore: &[String], unignore: &[String]) -> ApiResult<()> {
+    for name in ignore.iter().chain(unignore) {
+        if !valid_name(name) {
+            return Err(bad(format!("變數名稱 `{name}` 只能用英數與底線，且不可以數字開頭。")));
+        }
+    }
+    if ignore.len() + unignore.len() > MAX_VARS as usize {
+        return Err(bad(format!("一次最多 {MAX_VARS} 個變數。")));
+    }
+    let t = now();
+    for name in ignore {
+        sqlx::query("INSERT OR IGNORE INTO project_var_ignores (project, name, created_by, created_at) VALUES (?, ?, ?, ?)")
+            .bind(id)
+            .bind(name)
+            .bind(&me.0.account)
+            .bind(t)
+            .execute(&s.db)
+            .await?;
+    }
+    for name in unignore {
+        sqlx::query("DELETE FROM project_var_ignores WHERE project = ? AND name = ?")
+            .bind(id)
+            .bind(name)
+            .execute(&s.db)
+            .await?;
+    }
+    let mut detail = Vec::new();
+    if !ignore.is_empty() {
+        detail.push(format!("ignore {}", ignore.join(",")));
+    }
+    if !unignore.is_empty() {
+        detail.push(format!("unignore {}", unignore.join(",")));
+    }
+    audit(
+        &s.db,
+        Some(&me.0.account),
+        "project_vars",
+        Some(id),
+        me.audit_detail(Some(&detail.join("; "))).as_deref(),
+    )
+    .await;
+    Ok(())
 }
 
 /// 部署用：解密這個環境的變數；compose 用到資料庫密碼且尚未產生時產生一個
@@ -342,12 +473,12 @@ pub(crate) async fn for_verify(s: &AppState, project: &str, compose: &str, user:
     Ok(out)
 }
 
-/// 部署卡片：需要但未設定的用戶變數
+/// 部署卡片：必填、未設定、不是 compose 提供、沒有標為不需要的變數（ADR 0024）
 pub(crate) async fn missing(s: &AppState, project: &str, env: &str) -> ApiResult<Vec<String>> {
     Ok(items(s, project, env)
         .await?
         .into_iter()
-        .filter(|i| i.needed && !i.set)
+        .filter(|i| i.needed && !i.set && !i.optional && !i.ignored && i.source == "user")
         .map(|i| i.name)
         .collect())
 }
@@ -366,5 +497,17 @@ mod tests {
         assert!(!valid_name("A B"));
         assert_eq!(hint_for("short"), None);
         assert_eq!(hint_for("abcdefghijkLMNO").as_deref(), Some("…LMNO"));
+    }
+
+    #[test]
+    fn compose_environment_values() {
+        let c = "services:\n  web:\n    environment:\n      DATA_DIR: /app/.data\n      PORT: 3000\n      SECRET: ${SECRET}\n      EMPTY:\n  worker:\n    environment:\n      - MODE=worker\n      - TOKEN=$TOKEN\n";
+        let m = compose_env(c);
+        assert_eq!(m.get("DATA_DIR").map(String::as_str), Some("/app/.data"));
+        assert_eq!(m.get("PORT").map(String::as_str), Some("3000"));
+        assert_eq!(m.get("MODE").map(String::as_str), Some("worker"));
+        for n in ["SECRET", "TOKEN", "EMPTY"] {
+            assert!(!m.contains_key(n), "{n}");
+        }
     }
 }

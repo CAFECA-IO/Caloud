@@ -120,6 +120,32 @@ pub async fn deployments(
     Ok(Json(crate::service::deploy::history(&s, &me, &id).await?))
 }
 
+#[derive(serde::Deserialize)]
+pub struct VolumeQuery {
+    pub service: String,
+    pub target: String,
+}
+
+/// ADR 0024：加上 volume 的預覽
+pub async fn volume_preview(
+    State(s): State<AppState>,
+    me: CurrentUser,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<VolumeQuery>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(crate::service::volume::preview(&s, &me, &id, &q.service, &q.target).await?))
+}
+
+/// ADR 0024：加上 volume
+pub async fn volume_apply(
+    State(s): State<AppState>,
+    me: CurrentUser,
+    Path(id): Path<String>,
+    Json(b): Json<crate::service::volume::VolumeInput>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(crate::service::volume::apply(&s, &me, &id, b).await?))
+}
+
 pub async fn verification(State(s): State<AppState>, me: CurrentUser, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     Ok(Json(crate::service::verify::detail(&s, &me, &id).await?))
 }

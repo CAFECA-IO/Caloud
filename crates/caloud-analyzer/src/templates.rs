@@ -33,6 +33,7 @@ impl Out<'_, '_> {
     }
     fn note(&mut self, key: &str, c: Confidence, msg: impl Into<String>, ev: Vec<Evidence>) {
         self.findings.push(Finding {
+            volume: None,
             key: key.into(),
             message: msg.into(),
             confidence: c,
@@ -59,6 +60,7 @@ impl Out<'_, '_> {
             if let Some((var, ev)) = self.sqlite_env {
                 env.push((var.clone(), "file:/app/data/app.db".into()));
                 findings.push(Finding {
+                    volume: None,
                     key: "persistent_dir".into(),
                     message: format!("Prisma 使用 SQLite：範本把 `{var}` 設為 `file:/app/data/app.db` 並以具名 volume 保存 `data/`。"),
                     confidence: Confidence::Medium,
@@ -79,6 +81,7 @@ impl Out<'_, '_> {
         findings.insert(
             0,
             Finding {
+                volume: None,
                 key: "source".into(),
                 message: format!("以 {kind} 範本產生 Dockerfile。"),
                 confidence: Confidence::High,

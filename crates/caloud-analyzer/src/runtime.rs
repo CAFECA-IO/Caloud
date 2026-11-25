@@ -16,6 +16,10 @@ use std::collections::BTreeMap;
 pub(crate) struct CodeScan {
     /// 環境變數名稱 → 依據（最多 3 筆）
     pub env: BTreeMap<String, Vec<Evidence>>,
+    /// 程式中至少有一處沒有預設值的變數（其餘出現在程式中的為選填，FR-AN-12）
+    pub required: std::collections::BTreeSet<String>,
+    /// 程式中有讀取的變數（只出現在 `.env` 範例檔的不算）
+    pub in_code: std::collections::BTreeSet<String>,
     /// 寫入工作目錄下路徑的訊號
     pub writes: Vec<Signal>,
     /// 程式中以 localhost／127.0.0.1 連線的位址（FR-AN-11）
@@ -155,18 +159,55 @@ pub(crate) fn is_name(s: &str) -> bool {
 
 /// 從一行取出 `prefix` 之後的變數名稱（可能被引號包住）
 fn names_after<'a>(line: &'a str, prefix: &str) -> Vec<&'a str> {
+    env_refs(line, prefix).into_iter().map(|(n, _)| n).collect()
+}
+
+/// 一行中 `prefix` 之後讀取的環境變數名稱，與這一處是否有預設值（FR-AN-12，ADR 0024）。
+/// 呼叫與索引形式（`os.getenv(`、`process.env[`…）只接受字串字面量，`os.environ.get(name)` 這類參數不算。
+pub(crate) fn env_refs<'a>(line: &'a str, prefix: &str) -> Vec<(&'a str, bool)> {
+    let call = prefix.ends_with('(') || prefix.ends_with('[');
     let mut out = Vec::new();
     let mut rest = line;
     while let Some(i) = rest.find(prefix) {
         rest = &rest[i + prefix.len()..];
-        let r = rest.trim_start_matches(['"', '\'', '`']);
+        let r = if call {
+            let r = rest.trim_start();
+            if !r.starts_with(['"', '\'', '`']) {
+                continue;
+            }
+            &r[1..]
+        } else {
+            rest
+        };
         let end = r.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(r.len());
         let name = &r[..end];
+        if call && !r[end..].starts_with(['"', '\'', '`']) {
+            continue;
+        }
         if is_name(name) {
-            out.push(name);
+            out.push((name, has_default(prefix, &r[end..])));
         }
     }
     out
+}
+
+/// 變數名稱之後的內容是否給了預設值
+fn has_default(prefix: &str, after: &str) -> bool {
+    if prefix == "os.LookupEnv(" {
+        return true;
+    }
+    let a = after.trim_start_matches(['"', '\'', '`', ']']).trim_start();
+    if a.starts_with("||") || a.starts_with("??") {
+        return true;
+    }
+    if matches!(prefix, "os.environ.get(" | "os.getenv(") && a.starts_with(',') {
+        return true;
+    }
+    if let Some(x) = a.strip_prefix(')') {
+        let x = x.trim_start();
+        return x.starts_with(".unwrap_or") || x.starts_with(".ok()") || x.starts_with("or ") || x.starts_with("||") || x.starts_with("??");
+    }
+    false
 }
 
 /// 一行中的字串字面量（依出現順序）；含 `${` 的樣板字串以 None 佔位
@@ -354,8 +395,12 @@ pub(crate) fn scan_code(fs: &RepoFs) -> CodeScan {
             // 環境變數
             if ENV_PATTERNS.iter().any(|p| l.contains(p)) {
                 for p in ENV_PATTERNS {
-                    for n in names_after(l, p) {
+                    for (n, defaulted) in env_refs(l, p) {
                         add(&mut scan, n, ev(f, i));
+                        scan.in_code.insert(n.to_string());
+                        if !defaulted {
+                            scan.required.insert(n.to_string());
+                        }
                         // `process.env.UPLOAD_DIR || './uploads'`、`os.getenv("DATA_DIR", "./data")`
                         if dirish(n) {
                             let fallback = ["||", "??", ","].iter().find_map(|op| {
@@ -605,6 +650,7 @@ pub(crate) fn persistent(cx: &Ctx) -> (Vec<Persist>, Vec<Finding>) {
             Some(Target::Dir(d)) => merge(d, s.confidence, s.evidence.clone(), &s.why, s.weak),
             Some(Target::CwdFile(_)) if s.weak => {}
             Some(Target::CwdFile(f)) if !blocked.iter().any(|b: &Finding| b.message.contains(&format!("`{f}`"))) => blocked.push(Finding {
+                volume: None,
                 key: "persistent_dir".into(),
                 message: format!(
                     "{}寫在工作目錄的 `{f}`，無法單獨掛 volume，重建後會遺失；建議改放到子目錄（例如 `data/{f}`）。",
@@ -630,6 +676,7 @@ pub(crate) fn persistent(cx: &Ctx) -> (Vec<Persist>, Vec<Finding>) {
             // 只知道是工作目錄下的路徑：已有內容的目錄多半是讀取（例：content/、templates/）
         } else {
             blocked.push(Finding {
+                volume: None,
                 key: "persistent_dir".into(),
                 message: format!(
                     "寫入 `{}/`（{}），但此目錄含原始碼，無法整個掛 volume；資料請改放到獨立目錄。",
@@ -888,6 +935,7 @@ pub(crate) fn plan_install(needs: &[SysNeed], findings: &mut Vec<Finding>) -> In
             ),
         };
         findings.push(Finding {
+            volume: None,
             key: key.into(),
             message: msg,
             confidence: conf,
@@ -931,6 +979,7 @@ pub(crate) fn check_dockerfile(findings: &mut Vec<Finding>, service: &str, file:
             _ => continue,
         };
         findings.push(Finding {
+            volume: None,
             key: if matches!(n.fix, Fix::BuildTools | Fix::Cgo) {
                 "native_module"
             } else {

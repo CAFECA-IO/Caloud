@@ -57,21 +57,72 @@ pub(crate) struct Target {
     pub commit: String,
     /// 最新解析的設定與確認時不同
     pub pending_changes: bool,
-    /// 確認的解析 ID（部署關卡比對，ADR 0020）
+    /// 確認的解析 ID（ADR 0020）
     pub analysis: String,
+    /// 設定指紋（部署關卡與自動部署比對，ADR 0024）
+    pub settings: String,
     /// 驗證計畫（ADR 0020）
     pub verify: caloud_analyzer::VerifyPlan,
     /// 有服務宣告 GPU（ADR 0022）
     pub gpu: bool,
 }
 
-pub(crate) async fn target(s: &AppState, p: &Project) -> ApiResult<Target> {
+/// 設定指紋（ADR 0024）：有效 compose（編輯過的優先）、compose 目錄、對外服務。
+/// 部署與驗證只依這三項建置與啟動；指紋相同即同一份設定。
+pub(crate) fn settings_key(a: &AnalysisRow) -> Option<String> {
+    let r: Analysis = serde_json::from_str(&a.result).ok()?;
+    let compose = a.compose.clone().or(r.compose)?;
+    let raw = format!("{compose}\0{}\0{}", r.compose_dir, a.public_service.as_deref().unwrap_or_default());
+    Some(hex::encode(
+        &ring::digest::digest(&ring::digest::SHA256, raw.as_bytes()).as_ref()[..16],
+    ))
+}
+
+/// 改動一筆解析的確認內容前，先把引用它、還沒有記錄設定指紋的驗證固定下來（ADR 0024）
+pub(crate) async fn freeze_settings(s: &AppState, a: &AnalysisRow) -> ApiResult<()> {
+    if let Some(key) = settings_key(a) {
+        sqlx::query("UPDATE verifications SET settings = ? WHERE analysis = ? AND settings IS NULL")
+            .bind(key)
+            .bind(&a.id)
+            .execute(&s.db)
+            .await?;
+    }
+    Ok(())
+}
+
+/// 確認的解析
+pub(crate) async fn confirmed(s: &AppState, p: &Project) -> ApiResult<AnalysisRow> {
     let cid = p
         .confirmed_analysis
         .as_deref()
         .ok_or_else(|| conflict("請先確認解析結果再部署。"))?;
-    let c = analysis(s, cid).await?.ok_or_else(|| conflict("請先確認解析結果再部署。"))?;
+    analysis(s, cid).await?.ok_or_else(|| conflict("請先確認解析結果再部署。"))
+}
+
+/// 最新解析產生的設定與確認時相同（compose 與 compose 目錄）
+fn same_generated(a: &Analysis, b: &Analysis) -> bool {
+    a.compose.is_some() && a.compose == b.compose && a.compose_dir == b.compose_dir
+}
+
+pub(crate) async fn target(s: &AppState, p: &Project) -> ApiResult<Target> {
+    let c = confirmed(s, p).await?;
     let ca = parse(&c)?;
+    let (commit, pending_changes) = match latest(s, &p.id).await? {
+        Some(l) if l.id != c.id => {
+            if same_generated(&parse(&l)?, &ca) && !l.commit_sha.is_empty() {
+                (l.commit_sha, false)
+            } else {
+                (c.commit_sha.clone(), true)
+            }
+        }
+        _ => (c.commit_sha.clone(), false),
+    };
+    target_for(&c, commit, pending_changes)
+}
+
+/// 以一筆（已確認的）解析與指定 commit 組成部署內容（ADR 0024：部署指定版本）
+pub(crate) fn target_for(c: &AnalysisRow, commit: String, pending_changes: bool) -> ApiResult<Target> {
+    let ca = parse(c)?;
     let compose = c
         .compose
         .clone()
@@ -90,19 +141,9 @@ pub(crate) async fn target(s: &AppState, p: &Project) -> ApiResult<Target> {
                 "對外服務 `{public_service}` 沒有偵測到連接埠，請在 compose 加上 expose 後重新解析。"
             ))
         })?;
-    let (commit, pending_changes) = match latest(s, &p.id).await? {
-        Some(l) if l.id != c.id => {
-            let la = parse(&l)?;
-            if la.compose == ca.compose && la.compose_dir == ca.compose_dir && !l.commit_sha.is_empty() {
-                (l.commit_sha, false)
-            } else {
-                (c.commit_sha.clone(), true)
-            }
-        }
-        _ => (c.commit_sha.clone(), false),
-    };
     Ok(Target {
         analysis: c.id.clone(),
+        settings: settings_key(c).unwrap_or_default(),
         verify: ca.verify.clone(),
         compose,
         compose_dir: ca.compose_dir,
@@ -167,16 +208,78 @@ pub struct DeployInput {
     /// admin+：略過驗證（ADR 0020）
     #[serde(default)]
     pub force: bool,
+    /// 部署指定版本（ADR 0024）：已通過驗證或曾成功上線的 commit
+    #[serde(default)]
+    pub commit: Option<String>,
 }
 
-/// `POST /api/projects/{id}/deploy`：目標 commit 未通過驗證時先驗證（ADR 0020）
+/// 指定版本使用的設定（ADR 0024）：最近一次通過驗證所用的解析；沒有時用曾成功部署時的解析。
+/// 回傳（解析、是否為回到舊版）
+async fn analysis_for_commit(s: &AppState, project: &str, commit: &str) -> ApiResult<(AnalysisRow, bool)> {
+    let verified: Option<String> = sqlx::query_scalar(
+        "SELECT analysis FROM verifications WHERE project = ? AND commit_sha = ? AND status = 'passed' AND trigger != 'pr' \
+         ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )
+    .bind(project)
+    .bind(commit)
+    .fetch_optional(&s.db)
+    .await?;
+    if let Some(a) = verified {
+        if let Some(row) = analysis(s, &a).await? {
+            return Ok((row, false));
+        }
+    }
+    let deployed: Option<String> = sqlx::query_scalar(
+        "SELECT analysis FROM deployments WHERE project = ? AND commit_sha = ? AND status = 'success' AND analysis IS NOT NULL \
+         ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )
+    .bind(project)
+    .bind(commit)
+    .fetch_optional(&s.db)
+    .await?;
+    if let Some(a) = deployed {
+        if let Some(row) = analysis(s, &a).await? {
+            return Ok((row, true));
+        }
+    }
+    Err(conflict("這個版本沒有通過驗證，也沒有成功上線過，不能直接部署。"))
+}
+
+/// `POST /api/projects/{id}/deploy`：目標 commit 未通過驗證時先驗證（ADR 0020）；
+/// 帶 `commit` 時部署指定版本（ADR 0024）
 pub async fn deploy(s: &AppState, me: &CurrentUser, id: &str, input: DeployInput) -> ApiResult<Value> {
     let p = owned(s, me, id).await?;
+    if let Some(commit) = input.commit.as_deref() {
+        if input.force {
+            return Err(ApiError::BadRequest("指定版本時不能同時強制部署。".into()));
+        }
+        if commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(ApiError::BadRequest("commit 需為 40 碼的 sha。".into()));
+        }
+        let (row, rollback) = analysis_for_commit(s, &p.id, commit).await?;
+        let t = target_for(&row, commit.to_string(), false)?;
+        let env = start_target(s, &p, t, "manual", Some(&me.0.account)).await?;
+        let detail = format!(
+            "{} {}{}",
+            env.hostname,
+            &commit[..12],
+            if rollback { " rollback" } else { " pinned" }
+        );
+        audit(
+            &s.db,
+            Some(&me.0.account),
+            "project_deploy",
+            Some(id),
+            me.audit_detail(Some(&detail)).as_deref(),
+        )
+        .await;
+        return Ok(deployment(s, &p).await?.unwrap_or(Value::Null));
+    }
     if input.force {
         me.require_admin()?;
     } else {
         let t = target(s, &p).await?;
-        if !super::verify::passed(s, &p.id, &t.commit, &t.analysis).await? {
+        if !super::verify::passed(s, &p.id, &t.commit, &t.settings).await? {
             let v = super::verify::start(
                 s,
                 &p,
@@ -209,26 +312,25 @@ pub async fn deploy(s: &AppState, me: &CurrentUser, id: &str, input: DeployInput
     Ok(deployment(s, &p).await?.unwrap_or(Value::Null))
 }
 
-/// 驗證通過後部署（`deploy_after`，ADR 0020）；`by` 為觸發驗證的人
-pub(crate) async fn deploy_verified(s: &AppState, p: &Project, via: &str, by: Option<&str>) {
+/// 驗證通過後部署（`deploy_after`，ADR 0020）：部署通過驗證的那個 commit；`by` 為觸發驗證的人
+pub(crate) async fn deploy_verified(s: &AppState, p: &Project, commit: &str, via: &str, by: Option<&str>) -> ApiResult<()> {
     let trigger = if via == "github" { "push" } else { "manual" };
-    match start(s, p, trigger, by).await {
-        Ok(env) => {
-            audit(
-                &s.db,
-                None,
-                "project_deploy",
-                Some(&p.id),
-                Some(&format!(
-                    "via={via}; {} {} verified",
-                    env.hostname,
-                    env.commit_sha.as_deref().unwrap_or_default().chars().take(12).collect::<String>()
-                )),
-            )
-            .await
-        }
-        Err(e) => tracing::warn!(project = %p.id, error = %e, "deploy after verification failed"),
-    }
+    let c = confirmed(s, p).await?;
+    let t = target_for(&c, commit.to_string(), false)?;
+    let env = start_target(s, p, t, trigger, by).await?;
+    audit(
+        &s.db,
+        None,
+        "project_deploy",
+        Some(&p.id),
+        Some(&format!(
+            "via={via}; {} {} verified",
+            env.hostname,
+            env.commit_sha.as_deref().unwrap_or_default().chars().take(12).collect::<String>()
+        )),
+    )
+    .await;
+    Ok(())
 }
 
 /// GitHub push 後：驗證；已部署且設定未變動時，通過後自動重新部署（ADR 0020）
@@ -250,9 +352,14 @@ pub(crate) async fn verify_after_push(s: &AppState, project: &str) {
     }
 }
 
-/// 開始部署；`trigger`：`manual`、`forced`、`push`（ADR 0023 部署紀錄）
+/// 以確認的設定開始部署；`trigger`：`manual`、`forced`、`push`（ADR 0023 部署紀錄）
 pub(crate) async fn start(s: &AppState, p: &Project, trigger: &str, by: Option<&str>) -> ApiResult<Environment> {
     let t = target(s, p).await?;
+    start_target(s, p, t, trigger, by).await
+}
+
+/// 以指定的部署內容開始部署
+pub(crate) async fn start_target(s: &AppState, p: &Project, t: Target, trigger: &str, by: Option<&str>) -> ApiResult<Environment> {
     // ADR 0021：建置分鐘上限與建置資源
     super::build::check_quota(s, &p.owner).await?;
     let build = super::build::limits(s).await?;
@@ -334,7 +441,7 @@ pub(crate) async fn start(s: &AppState, p: &Project, trigger: &str, by: Option<&
     .await?;
     let dep_id = uuid::Uuid::new_v4().to_string();
     sqlx::query(
-        "INSERT INTO deployments (id, project, env, commit_sha, trigger, status, created_by, created_at) VALUES (?, ?, ?, ?, ?, 'in_progress', ?, ?)",
+        "INSERT INTO deployments (id, project, env, commit_sha, trigger, status, created_by, created_at, analysis) VALUES (?, ?, ?, ?, ?, 'in_progress', ?, ?, ?)",
     )
     .bind(&dep_id)
     .bind(&p.id)
@@ -343,6 +450,7 @@ pub(crate) async fn start(s: &AppState, p: &Project, trigger: &str, by: Option<&
     .bind(trigger)
     .bind(by)
     .bind(ts)
+    .bind(&t.analysis)
     .execute(&s.db)
     .await?;
     let env_url = format!("https://{}", env.hostname);
@@ -523,15 +631,21 @@ pub struct DeploymentRecord {
     pub created_by: Option<String>,
     pub created_at: i64,
     pub finished_at: Option<i64>,
+    /// 可「回到這個版本」（ADR 0024）
+    pub rollback: bool,
 }
 
 /// `GET /api/projects/{id}/deployments`：最近 20 筆
 pub async fn history(s: &AppState, me: &CurrentUser, id: &str) -> ApiResult<Vec<DeploymentRecord>> {
     owned(s, me, id).await?;
+    let running: Option<String> = production(s, id).await?.and_then(|e| e.running_commit);
     Ok(sqlx::query_as(
-        "SELECT id, env, commit_sha, trigger, status, stage, error, created_by, created_at, finished_at FROM deployments \
-         WHERE project = ? ORDER BY created_at DESC, rowid DESC LIMIT 20",
+        "SELECT d.id, d.env, d.commit_sha, d.trigger, d.status, d.stage, d.error, d.created_by, d.created_at, d.finished_at, \
+         (d.status = 'success' AND d.commit_sha != COALESCE(?, '') AND (d.analysis IS NOT NULL OR EXISTS ( \
+            SELECT 1 FROM verifications v WHERE v.project = d.project AND v.commit_sha = d.commit_sha AND v.status = 'passed' AND v.trigger != 'pr'))) AS rollback \
+         FROM deployments d WHERE d.project = ? ORDER BY d.created_at DESC, d.rowid DESC LIMIT 20",
     )
+    .bind(running)
     .bind(id)
     .fetch_all(&s.db)
     .await?)

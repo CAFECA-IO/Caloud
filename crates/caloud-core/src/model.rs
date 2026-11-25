@@ -186,4 +186,6 @@ pub struct AnalysisRow {
     pub confirmed_by: Option<String>,
     pub confirmed_at: Option<i64>,
     pub created_at: i64,
+    /// `user` | `auto`（ADR 0024）
+    pub confirmed_via: Option<String>,
 }

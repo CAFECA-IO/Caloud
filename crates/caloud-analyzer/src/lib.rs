@@ -48,6 +48,16 @@ pub struct Finding {
     pub message: String,
     pub confidence: Confidence,
     pub evidence: Vec<Evidence>,
+    /// `persistent_dir`：可一鍵加上具名 volume 的位置（ADR 0024）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<VolumeFix>,
+}
+
+/// 持久化目錄的掛載位置（服務、容器內絕對路徑）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VolumeFix {
+    pub service: String,
+    pub target: String,
 }
 
 /// 解析來源（設計稿 §6 的順序）
@@ -106,6 +116,9 @@ pub struct EnvVar {
     /// 值隨環境不同（網址、origin 類）：staging 與 production 需各自建置
     #[serde(default)]
     pub varies_by_env: bool,
+    /// 程式中有預設值，不設定也能執行（FR-AN-12）
+    #[serde(default)]
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,6 +165,7 @@ impl Ctx<'_> {
 
     pub fn note(&mut self, key: &str, confidence: Confidence, message: impl Into<String>, evidence: Vec<Evidence>) {
         self.findings.push(Finding {
+            volume: None,
             key: key.into(),
             message: message.into(),
             confidence,
@@ -387,7 +401,7 @@ fn check_existing(cx: &mut Ctx, doc: &Value, compose_dir: &str) {
             if covered {
                 continue;
             }
-            let at = target.map(|t| format!("（容器內 `{t}`）")).unwrap_or_default();
+            let at = target.as_ref().map(|t| format!("（容器內 `{t}`）")).unwrap_or_default();
             findings.push(Finding {
                 key: "persistent_dir".into(),
                 message: format!(
@@ -397,6 +411,10 @@ fn check_existing(cx: &mut Ctx, doc: &Value, compose_dir: &str) {
                 ),
                 confidence: Confidence::Medium,
                 evidence: p.evidence.clone(),
+                volume: target.map(|target| VolumeFix {
+                    service: name.clone(),
+                    target,
+                }),
             });
         }
     }

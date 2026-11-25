@@ -182,6 +182,7 @@ fn analysis_json(a: &AnalysisRow) -> Value {
         "id": a.id, "git_ref": a.git_ref, "commit": a.commit_sha, "created_at": a.created_at,
         "result": result, "compose": a.compose, "public_service": a.public_service,
         "acknowledged": acknowledged, "confirmed_by": a.confirmed_by, "confirmed_at": a.confirmed_at,
+        "confirmed_via": a.confirmed_via,
     })
 }
 
@@ -198,6 +199,16 @@ pub async fn get(s: &AppState, me: &CurrentUser, id: &str) -> ApiResult<Value> {
         }
         None => None,
     };
+    // ADR 0024：最新解析未沿用確認時，與確認版本的 compose 差異
+    let confirmed_diff = match (&last, &confirmed) {
+        (Some(l), Some(c)) if l.id != c.id => {
+            let parse = |a: &AnalysisRow| serde_json::from_str::<Analysis>(&a.result).ok();
+            let before = parse(c).and_then(|r| effective_compose(c, &r));
+            let after = parse(l).and_then(|r| r.compose);
+            (before != after).then(|| json!({ "before": before, "after": after }))
+        }
+        _ => None,
+    };
     let deployment = super::deploy::deployment(s, &p).await?;
     let verification = super::verify::summary(s, &p).await?;
     let build_usage = json!({
@@ -208,6 +219,7 @@ pub async fn get(s: &AppState, me: &CurrentUser, id: &str) -> ApiResult<Value> {
         "project": p,
         "analysis": last.as_ref().map(analysis_json),
         "confirmed": confirmed.as_ref().map(analysis_json),
+        "confirmed_diff": confirmed_diff,
         "deployment": deployment,
         "verification": verification,
         "build_usage": build_usage,
@@ -403,8 +415,9 @@ async fn run_analysis(s: &AppState, p: &Project) -> Result<(), String> {
     let result = serde_json::to_string(&analysis).map_err(|_| "解析結果無法保存。".to_string())?;
     let git_ref = p.git_ref.clone().unwrap_or_else(|| "HEAD".into());
     let t = now();
+    let new_id = uuid::Uuid::new_v4().to_string();
     let ins = sqlx::query("INSERT INTO analyses (id, project, git_ref, commit_sha, result, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&new_id)
         .bind(&p.id)
         .bind(&git_ref)
         .bind(&fetched.commit)
@@ -417,10 +430,104 @@ async fn run_analysis(s: &AppState, p: &Project) -> Result<(), String> {
         .bind(&p.id)
         .execute(&s.db)
         .await;
-    ins.and(branch).map(|_| ()).map_err(|e| {
+    ins.and(branch).map_err(|e| {
         tracing::error!(error = %e, "analysis insert failed");
         "解析結果無法保存。".to_string()
-    })
+    })?;
+    if let Err(e) = auto_confirm(s, &p.id, &new_id).await {
+        tracing::warn!(project = %p.id, error = %e, "auto confirm failed");
+    }
+    Ok(())
+}
+
+/// 有效 compose：用戶編輯版，否則解析產生的版本
+fn effective_compose(a: &AnalysisRow, r: &Analysis) -> Option<String> {
+    a.compose.clone().or_else(|| r.compose.clone())
+}
+
+/// ADR 0024：新解析產生的設定與確認時相同、對外服務仍在、沒有新的低信心項目時，沿用上一份確認。
+/// 回傳是否沿用
+pub(crate) async fn auto_confirm(s: &AppState, project: &str, new_id: &str) -> ApiResult<bool> {
+    let p = get_project(s, project).await?;
+    let Some(cid) = p.confirmed_analysis.clone() else {
+        return Ok(false);
+    };
+    if cid == new_id {
+        return Ok(false);
+    }
+    let fetch = |id: String| async move {
+        sqlx::query_as::<_, AnalysisRow>("SELECT * FROM analyses WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&s.db)
+            .await
+    };
+    let (Some(c), Some(n)) = (fetch(cid.clone()).await?, fetch(new_id.to_string()).await?) else {
+        return Ok(false);
+    };
+    let parse = |a: &AnalysisRow| serde_json::from_str::<Analysis>(&a.result).ok();
+    let (Some(ca), Some(na)) = (parse(&c), parse(&n)) else {
+        return Ok(false);
+    };
+    if na.compose.is_none() || na.compose != ca.compose || na.compose_dir != ca.compose_dir || !na.errors.is_empty() {
+        return Ok(false);
+    }
+    let Some(public) = c.public_service.clone() else { return Ok(false) };
+    let Some(yaml) = effective_compose(&c, &na) else { return Ok(false) };
+    let depth = na.compose_dir.split('/').filter(|x| !x.is_empty()).count();
+    match validate_with(&yaml, Policy::platform(depth)) {
+        Ok(v) if v.services.contains(&public) => {}
+        _ => return Ok(false),
+    }
+    // 低信心項目：新的每一項都要在上次確認時勾選過（以訊息比對）
+    let acked: Vec<usize> = serde_json::from_str(&c.acknowledged).unwrap_or_default();
+    let acked_msgs: std::collections::HashSet<&str> = acked
+        .iter()
+        .filter_map(|i| ca.findings.get(*i))
+        .map(|f| f.message.as_str())
+        .collect();
+    let mut ack = Vec::new();
+    for (i, f) in na.findings.iter().enumerate().filter(|(_, f)| f.confidence == Confidence::Low) {
+        if !acked_msgs.contains(f.message.as_str()) {
+            return Ok(false);
+        }
+        ack.push(i);
+    }
+    sqlx::query(
+        "UPDATE analyses SET compose = ?, public_service = ?, acknowledged = ?, confirmed_by = ?, confirmed_at = ?, confirmed_via = 'auto' WHERE id = ?",
+    )
+    .bind(&c.compose)
+    .bind(&public)
+    .bind(serde_json::to_string(&ack).unwrap_or_else(|_| "[]".into()))
+    .bind(&c.confirmed_by)
+    .bind(c.confirmed_at)
+    .bind(new_id)
+    .execute(&s.db)
+    .await?;
+    // 只在確認沒有被同時改掉時切換
+    let switched = sqlx::query("UPDATE projects SET confirmed_analysis = ?, updated_at = ? WHERE id = ? AND confirmed_analysis = ?")
+        .bind(new_id)
+        .bind(now())
+        .bind(project)
+        .bind(&cid)
+        .execute(&s.db)
+        .await?
+        .rows_affected();
+    if switched == 0 {
+        return Ok(false);
+    }
+    audit(
+        &s.db,
+        None,
+        "project_confirm",
+        Some(project),
+        Some(&format!("via=auto; {} 設定相同，沿用確認", n_commit(&n))),
+    )
+    .await;
+    Ok(true)
+}
+
+fn n_commit(a: &AnalysisRow) -> String {
+    a.commit_sha.chars().take(12).collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -471,9 +578,10 @@ pub async fn confirm(s: &AppState, me: &CurrentUser, id: &str, input: ConfirmInp
     }
 
     let edited = edited.filter(|c| Some(c) != analysis.compose.as_ref());
+    super::deploy::freeze_settings(s, &row).await?;
     let t = now();
     let ack = serde_json::to_string(&input.acknowledged).unwrap_or_else(|_| "[]".into());
-    sqlx::query("UPDATE analyses SET compose = ?, public_service = ?, acknowledged = ?, confirmed_by = ?, confirmed_at = ? WHERE id = ?")
+    sqlx::query("UPDATE analyses SET compose = ?, public_service = ?, acknowledged = ?, confirmed_by = ?, confirmed_at = ?, confirmed_via = 'user' WHERE id = ?")
         .bind(&edited)
         .bind(&public)
         .bind(&ack)

@@ -638,6 +638,14 @@ fn existing_dockerfile_is_checked_not_modified() {
     assert!(!a.findings.iter().any(|f| f.message.contains("`bcrypt`")), "已安裝編譯工具");
     let p = finding(&a, "persistent_dir", "`uploads/`");
     assert!(p.message.contains("/srv/uploads"), "{}", p.message);
+    // ADR 0024：附上可一鍵加上 volume 的位置
+    assert_eq!(
+        p.volume,
+        Some(VolumeFix {
+            service: "api".into(),
+            target: "/srv/uploads".into()
+        })
+    );
     assert!(
         !a.findings
             .iter()
@@ -915,5 +923,45 @@ fn gpu_detection() {
         "from tensorflow/tensorflow:2.17.0-gpu AS base",
     ] {
         assert!(crate::gpu::cuda_base(l), "{l}");
+    }
+}
+
+// FR-AN-12（ADR 0024）：呼叫形式只收字串字面量；有預設值者為選填，任一處沒有預設值即必填
+#[test]
+fn env_vars_required_and_optional() {
+    let py = "import os\n\
+def get(name):\n    return os.environ.get(name)\n\
+A = os.getenv(\"API_KEY\")\n\
+B = os.environ.get(\"LOG_LEVEL\", \"info\")\n\
+C = os.getenv('TIMEOUT') or '30'\n\
+D = os.environ[\"SECRET\"]\n";
+    let js = "const a = process.env.MODE || 'dev';\nconst b = process.env['TOKEN'];\nconst c = process.env.MODE;\nconst d = process.env[key];\nconst e = process.env.REGION ?? 'tw';\n";
+    let rs = "fn main() {\n let a = std::env::var(\"DATABASE_HOST\").unwrap_or_else(|_| \"x\".into());\n let b = env::var(\"API_SECRET\").expect(\"x\");\n let c = env::var(\"FLAG\").ok();\n let d = env::var(var_name);\n}\n";
+    let go = "package main\nfunc main() {\n v, ok := os.LookupEnv(\"OPT_GO\")\n x := os.Getenv(\"REQ_GO\")\n}\n";
+    let r = Repo::new(
+        "env-optional",
+        &[
+            ("package.json", "{\"dependencies\":{\"express\":\"4\"}}"),
+            ("server.js", js),
+            ("tools/app.py", py),
+            ("tools/main.rs", rs),
+            ("tools/main.go", go),
+        ],
+    );
+    let a = r.analyze("");
+    let get = |n: &str| {
+        a.env
+            .iter()
+            .find(|e| e.name == n)
+            .unwrap_or_else(|| panic!("缺少 {n}: {:?}", a.env.iter().map(|e| &e.name).collect::<Vec<_>>()))
+    };
+    for n in ["name", "key", "var_name"] {
+        assert!(!a.env.iter().any(|e| e.name == n), "`{n}` 是參數，不是變數名稱");
+    }
+    for n in ["API_KEY", "SECRET", "TOKEN", "MODE", "API_SECRET", "REQ_GO"] {
+        assert!(!get(n).optional, "{n} 必填");
+    }
+    for n in ["LOG_LEVEL", "TIMEOUT", "REGION", "DATABASE_HOST", "FLAG", "OPT_GO"] {
+        assert!(get(n).optional, "{n} 選填");
     }
 }

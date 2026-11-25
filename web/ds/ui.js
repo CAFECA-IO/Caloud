@@ -89,13 +89,15 @@ const UI = (() => {
     setTimeout(() => el.remove(), 4000);
   }
 
-  /** ConfirmDialog：回傳 Promise<boolean>。不得使用 window.confirm */
-  function confirmDialog({ title, body, confirmText, tone = "danger" }) {
+  /** ConfirmDialog：回傳 Promise<boolean>。不得使用 window.confirm。
+   *  html：已轉義的內容（取代 body）；setup(dialog)：綁定事件；wide：較寬的對話框 */
+  function confirmDialog({ title, body = "", html, confirmText, tone = "danger", wide = false, setup }) {
     const d = document.createElement("dialog");
-    d.className = "c-dialog";
-    d.innerHTML = `<div class="c-dialog__body"><h2 class="c-dialog__title">${esc(title)}</h2><p class="u-muted">${esc(body)}</p></div>
+    d.className = `c-dialog${wide ? " c-dialog--wide" : ""}`;
+    d.innerHTML = `<div class="c-dialog__body"><h2 class="c-dialog__title">${esc(title)}</h2>${html ?? `<p class="u-muted">${esc(body)}</p>`}</div>
       <div class="c-dialog__actions"><button class="c-btn" data-v="0">取消</button><button class="c-btn c-btn--primary ${tone === "danger" ? "c-btn--danger" : ""}" data-v="1">${esc(confirmText)}</button></div>`;
     document.body.append(d);
+    if (setup) setup(d);
     return new Promise((resolve) => {
       const done = (v) => { d.close(); d.remove(); resolve(v); };
       d.addEventListener("click", (e) => { const v = e.target.closest("[data-v]"); if (v) done(v.dataset.v === "1"); });
@@ -103,6 +105,35 @@ const UI = (() => {
       d.showModal();
       $("[data-v='0']", d).focus();
     });
+  }
+
+  /** Switch：開關型設定（ADR 0024） */
+  const switchHtml = ({ id, label, hint = "", checked = false }) =>
+    `<label class="c-switch"><span class="c-switch__text"><span>${esc(label)}</span>${hint ? `<span class="u-small u-muted">${esc(hint)}</span>` : ""}</span>` +
+    `<input type="checkbox" role="switch" id="${esc(id)}" ${checked ? "checked" : ""}><span class="c-switch__track" aria-hidden="true"></span></label>`;
+
+  /** 逐行差異（LCS）的 c-diff HTML；相同的行只保留變動附近 3 行 */
+  function diffLines(before, after) {
+    const a = String(before ?? "").replace(/\n$/, "").split("\n"), b = String(after ?? "").replace(/\n$/, "").split("\n");
+    const n = a.length, m = b.length;
+    const L = Array.from({ length: n + 1 }, () => new Int32Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i][j] = a[i] === b[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+    const ops = [];
+    let i = 0, j = 0;
+    while (i < n || j < m) {
+      if (i < n && j < m && a[i] === b[j]) { ops.push([" ", a[i]]); i++; j++; }
+      else if (j < m && (i >= n || L[i][j + 1] >= L[i + 1][j])) { ops.push(["+", b[j]]); j++; }
+      else { ops.push(["-", a[i]]); i++; }
+    }
+    const near = ops.map((_, k) => ops.slice(Math.max(0, k - 3), k + 4).some((o) => o[0] !== " "));
+    let out = "", gap = false;
+    ops.forEach(([op, line], k) => {
+      if (op === " " && !near[k]) { if (!gap) out += `<span class="c-diff__line u-muted">…</span>`; gap = true; return; }
+      gap = false;
+      const cls = op === "+" ? " c-diff__line--add" : op === "-" ? " c-diff__line--del" : "";
+      out += `<span class="c-diff__line${cls}">${op === " " ? "  " : op + " "}${esc(line)}</span>`;
+    });
+    return `<pre class="c-diff" aria-label="修改內容">${out}</pre>`;
   }
 
   /** Drawer：從右側滑出的面板。回傳 { el, body, footer, close } */
@@ -196,5 +227,5 @@ const UI = (() => {
   }
 
 
-  return { $, $$, esc, api, ts, relTime, statusPill, showMsg, toast, confirmDialog, drawer, busy, copy, copyField, empty, skeletonRows, icon, initTheme, toggleTheme };
+  return { $, $$, esc, api, ts, relTime, statusPill, showMsg, toast, confirmDialog, switchHtml, diffLines, drawer, busy, copy, copyField, empty, skeletonRows, icon, initTheme, toggleTheme };
 })();

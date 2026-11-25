@@ -3021,6 +3021,262 @@ async fn verification_reports_gate_and_compare() {
     agent.abort();
 }
 
+// ADR 0024（FR-AN-04、FR-AN-12、FR-ENV-15）：設定相同時沿用確認、驗證期間重新確認不影響自動部署、
+// 部署指定版本與回滾、變數分類與「不需要」、加上 volume、驗證耗時
+#[tokio::test]
+#[allow(clippy::async_yields_async)]
+async fn settings_carry_over_rollback_vars_and_volume() {
+    use caloud_runner::client::{run_once, Options};
+    use caloud_runner::envs::EnvRunner;
+    use caloud_runner::selfcheck::SelfCheck;
+    let env = Env::new().await;
+    let (admin, member) = admin_and_member(&env).await;
+    env.call(
+        "POST",
+        "/api/admin/domain-pools",
+        &admin,
+        Some(json!({ "root": "caloud.tw", "purposes": ["production", "staging", "verify"] })),
+    )
+    .await;
+    let pkg = "{\n  \"scripts\": { \"build\": \"next build\", \"start\": \"next start\", \"test\": \"jest\" },\n  \"dependencies\": { \"next\": \"15\" }\n}\n";
+    let code = "const k = process.env.API_KEY;\nconst m = process.env.MODE || 'dev';\nconst d = process.env.DATA_DIR;\n";
+    let files = |extra: &'static str| -> Vec<(&'static str, String)> {
+        vec![
+            ("package.json", pkg.to_string()),
+            ("package-lock.json", "{}".to_string()),
+            ("src/a.ts", code.to_string()),
+            ("README.md", extra.to_string()),
+        ]
+    };
+    let put_repo = |f: Vec<(&'static str, String)>| {
+        let v: Vec<(&str, &str)> = f.iter().map(|(a, b)| (*a, b.as_str())).collect();
+        set_repo(&env, &v);
+    };
+    let head = |c: &str| std::fs::write(env.dir.join("git.head"), format!("{c}\n")).unwrap();
+    let c1 = "1111111111111111111111111111111111111111";
+    let c2 = "2222222222222222222222222222222222222222";
+    let c3 = "3333333333333333333333333333333333333333";
+    head(c1);
+    put_repo(files("v1"));
+    let (_, p) = env
+        .call(
+            "POST",
+            "/api/projects",
+            &member,
+            Some(json!({ "repo_url": "https://github.com/CAFECA-IO/SwarmStorage" })),
+        )
+        .await;
+    let id = p["id"].as_str().unwrap().to_string();
+    let v = wait_project(&env, &member, &id).await;
+    let env_of = |v: &Value, n: &str| {
+        v["analysis"]["result"]["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == n)
+            .cloned()
+            .unwrap_or_else(|| panic!("{n}"))
+    };
+    assert_eq!(env_of(&v, "MODE")["optional"], true);
+    assert_eq!(env_of(&v, "API_KEY")["optional"], false);
+    // 用戶在 compose 提供 DATA_DIR
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(v["analysis"]["result"]["compose"].as_str().unwrap()).unwrap();
+    doc["services"]["web"]["environment"]["DATA_DIR"] = "/app/.data".into();
+    let edited = serde_yaml::to_string(&doc).unwrap();
+    let (st, e) = env
+        .call(
+            "PUT",
+            &format!("/api/projects/{id}/analysis"),
+            &member,
+            Some(json!({ "public_service": "web", "compose": edited })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+
+    // 變數分類：必填、選填、compose 提供；「不需要」
+    let vars = format!("/api/projects/{id}/vars");
+    let (_, l) = env.call("GET", &vars, &member, None).await;
+    let item = |l: &Value, n: &str| l["items"].as_array().unwrap().iter().find(|i| i["name"] == n).cloned().unwrap();
+    assert_eq!(item(&l, "MODE")["optional"], true);
+    assert_eq!(
+        (item(&l, "DATA_DIR")["source"].as_str(), item(&l, "DATA_DIR")["value"].as_str()),
+        (Some("compose"), Some("/app/.data"))
+    );
+    let (_, v) = env.call("GET", &format!("/api/projects/{id}"), &member, None).await;
+    assert_eq!(v["confirmed"]["confirmed_via"], "user");
+    let (st, l) = env.call("PUT", &vars, &member, Some(json!({ "ignore": ["API_KEY"] }))).await;
+    assert_eq!(st, StatusCode::OK, "{l}");
+    assert_eq!(item(&l, "API_KEY")["ignored"], true);
+    let (_, l) = env.call("PUT", &vars, &member, Some(json!({ "unignore": ["API_KEY"] }))).await;
+    assert_eq!(item(&l, "API_KEY")["ignored"], false);
+    let (st, _) = env.call("PUT", &vars, &member, Some(json!({ "ignore": ["1bad"] }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    let (_, jt) = env.call("POST", "/api/admin/nodes/join-tokens", &admin, Some(json!({}))).await;
+    let mut runner = EnvRunner::new(
+        env.dir.join("fake-docker.sh").display().to_string(),
+        env.dir.join("runner-s"),
+        vec!["1.1.1.1".into()],
+    );
+    runner.git_bin = env.dir.join("fake-git.sh").display().to_string();
+    runner.smoke_target = Some(smoke_server().await);
+    let opts = Options {
+        server: env.base.clone(),
+        join_token: Some(jt["token"].as_str().unwrap().to_string()),
+        name: "runner-s".into(),
+        state_dir: env.dir.join("runner-s"),
+        envs: runner,
+        check: SelfCheck {
+            gvisor: true,
+            isolation: true,
+            buildkit: true,
+            reason: None,
+            ..Default::default()
+        },
+    };
+    let agent = tokio::spawn(async move { run_once(&opts).await });
+    wait_node(&env, &admin, "runner-s", "active").await;
+
+    // 1. 第一次部署：先驗證，通過後自動部署 c1
+    let deploy = format!("/api/projects/{id}/deploy");
+    let (_, g) = env.call("POST", &deploy, &member, None).await;
+    let vid = g["verification"]["id"].as_str().expect("先驗證").to_string();
+    let d = wait_verification(&env, &member, &vid).await;
+    assert_eq!(d["verification"]["status"], "passed", "{d}");
+    assert!(
+        d["verification"]["stage_times"]["fetch"][0].is_i64(),
+        "{}",
+        d["verification"]["stage_times"]
+    );
+    let dep = wait_deploy(&env, &member, &id, |d| d["running_commit"] == c1).await;
+    assert_eq!(dep["missing_vars"], json!(["API_KEY"]), "選填與 compose 提供的不算");
+
+    // 2. push（相同設定）：自動沿用確認；驗證期間手動重新確認也不影響自動部署
+    head(c2);
+    put_repo(files("v2"));
+    env.call("POST", &format!("/api/projects/{id}/analysis"), &member, None).await;
+    let v = wait_project(&env, &member, &id).await;
+    assert_eq!(v["confirmed"]["id"], v["analysis"]["id"], "沿用確認：{v}");
+    assert_eq!(v["confirmed"]["confirmed_via"], "auto");
+    assert_eq!(v["confirmed"]["compose"].as_str(), Some(edited.as_str()), "沿用編輯過的 compose");
+    assert!(v["confirmed_diff"].is_null());
+    assert_eq!(v["deployment"]["pending_changes"], false);
+    assert!(v["verification"]["avg_secs"].is_i64(), "{}", v["verification"]);
+    std::fs::write(env.dir.join("docker.slow"), "").unwrap();
+    let (_, g) = env.call("POST", &deploy, &member, None).await;
+    let vid2 = g["verification"]["id"].as_str().expect("c2 未驗證").to_string();
+    let (st, e) = env
+        .call(
+            "PUT",
+            &format!("/api/projects/{id}/analysis"),
+            &member,
+            Some(json!({ "public_service": "web", "compose": edited })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    let (_, now) = env.call("GET", &format!("/api/verifications/{vid2}"), &member, None).await;
+    assert_eq!(now["verification"]["status"], "running", "驗證期間重新確認");
+    std::fs::remove_file(env.dir.join("docker.slow")).unwrap();
+    let d = wait_verification(&env, &member, &vid2).await;
+    assert_eq!(d["verification"]["status"], "passed", "{d}");
+    assert!(d["verification"]["deploy_note"].is_null(), "{d}");
+    wait_deploy(&env, &member, &id, |d| d["running_commit"] == c2 && d["stage"] == "done").await;
+
+    // 3. 回到 c1；不能部署沒驗證也沒上線過的版本
+    let (st, e) = env.call("POST", &deploy, &member, Some(json!({ "commit": c3 }))).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{e}");
+    let (st, _) = env.call("POST", &deploy, &member, Some(json!({ "commit": "abc" }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, _) = env
+        .call("POST", &deploy, &admin, Some(json!({ "commit": c1, "force": true })))
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    head(c1); // 替身 git 只回傳 git.head
+    let (st, e) = env.call("POST", &deploy, &member, Some(json!({ "commit": c1 }))).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{e}");
+    wait_deploy(&env, &member, &id, |d| d["running_commit"] == c1 && d["stage"] == "done").await;
+    head(c2);
+    let (_, h) = env.call("GET", &format!("/api/projects/{id}/deployments"), &member, None).await;
+    let rows = h.as_array().unwrap();
+    assert!(
+        rows.iter()
+            .any(|r| r["commit"] == c2 && r["status"] == "success" && r["rollback"] == true),
+        "{h}"
+    );
+    assert!(
+        rows.iter().all(|r| !(r["commit"] == c1 && r["rollback"] == true)),
+        "線上版本不顯示回到：{h}"
+    );
+    let analysis: Option<String> =
+        sqlx::query_scalar("SELECT analysis FROM deployments WHERE project = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+            .bind(&id)
+            .fetch_one(&env.db)
+            .await
+            .unwrap();
+    assert!(analysis.is_some(), "部署記錄使用的解析");
+
+    // 4. 加上 volume：預覽差異 → 寫入確認的 compose；設定改變，需要重新驗證
+    let (st, pv) = env
+        .call(
+            "GET",
+            &format!("/api/projects/{id}/volume-fix?service=web&target=/app/.data"),
+            &member,
+            None,
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{pv}");
+    assert_eq!(pv["volume"], "web-data");
+    assert!(pv["after"].as_str().unwrap().contains("web-data:/app/.data") && !pv["before"].as_str().unwrap().contains("web-data"));
+    let (st, _) = env
+        .call(
+            "GET",
+            &format!("/api/projects/{id}/volume-fix?service=nope&target=/x"),
+            &member,
+            None,
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, r) = env
+        .call(
+            "POST",
+            &format!("/api/projects/{id}/volume-fix"),
+            &member,
+            Some(json!({ "service": "web", "target": "/app/.data" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert!(r["deployment"].is_null() && r["verification"].is_null(), "預設不部署");
+    let (_, v) = env.call("GET", &format!("/api/projects/{id}"), &member, None).await;
+    assert!(v["confirmed"]["compose"].as_str().unwrap().contains("web-data:/app/.data"));
+    assert_eq!(v["verification"]["verified"], false, "新設定尚未驗證");
+    let (_, g) = env.call("POST", &deploy, &member, None).await;
+    assert!(g["verification"].is_object(), "{g}");
+    wait_verification(&env, &member, g["verification"]["id"].as_str().unwrap()).await;
+
+    // 5. 設定改變的推送：不沿用確認，列出差異
+    head(c3);
+    put_repo(vec![
+        (
+            "package.json",
+            "{\n  \"scripts\": { \"build\": \"vite build\" },\n  \"dependencies\": { \"vite\": \"5\" }\n}\n".to_string(),
+        ),
+        ("index.html", "<html></html>".to_string()),
+    ]);
+    env.call("POST", &format!("/api/projects/{id}/analysis"), &member, None).await;
+    let v = wait_project(&env, &member, &id).await;
+    assert_ne!(v["confirmed"]["id"], v["analysis"]["id"]);
+    assert!(v["confirmed_diff"]["before"].is_string(), "{v}");
+    assert_eq!(v["deployment"]["pending_changes"], true);
+
+    let audit: Vec<String> =
+        sqlx::query_scalar("SELECT COALESCE(detail, '') FROM audit_log WHERE action IN ('project_confirm', 'project_volume_fix')")
+            .fetch_all(&env.db)
+            .await
+            .unwrap();
+    assert!(audit.iter().any(|d| d.starts_with("via=auto")), "{audit:?}");
+    agent.abort();
+}
+
 // ───────────────────────── Edge TLS 與憑證（ADR 0016） ─────────────────────────
 
 // FR-OPS-03、FR-OPS-14：Cloudflare 權杖經驗證後加密保存，只回傳提示；FR-OPS-10、FR-DOM-05、FR-DOM-08：需要的憑證

@@ -18,9 +18,10 @@ pub(crate) fn hash_token(t: &str) -> String {
     hex::encode(keccak256(t.as_bytes()))
 }
 
-/// 前端初始化 CafecaConnect 用
+/// 前端初始化 CafecaConnect 用；`first_user`：還沒有任何使用者（ADR 0024 登入頁說明）
 pub async fn config(State(s): State<AppState>) -> Json<Value> {
-    Json(json!({ "wallet": s.verifier.wallet(), "domain": s.cfg.public_origin }))
+    let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users").fetch_one(&s.db).await.unwrap_or(1);
+    Json(json!({ "wallet": s.verifier.wallet(), "domain": s.cfg.public_origin, "first_user": users == 0 }))
 }
 
 pub async fn nonce(State(s): State<AppState>) -> ApiResult<Json<Value>> {
