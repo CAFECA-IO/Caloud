@@ -152,9 +152,10 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 
 | 編號 | 需求 | 優先 | 里程碑 |
 | --- | --- | --- | --- |
-| FR-GH-01 | 透過 GitHub App 授權儲存庫，只申請 contents:read、metadata:read、checks:write、pull_requests:write；使用 1 小時 installation token，不存長期憑證；安裝時以一次性使用者授權確認安裝者，再綁定到 Caloud 帳號（[ADR 0017](adr/0017-github-app-public-console.md)） | P0 | M5 |
+| FR-GH-01 | 透過 GitHub App 授權儲存庫，只申請 contents:read、metadata:read、checks:write、pull_requests:write、deployments:write；使用 1 小時 installation token，不存長期憑證；安裝時以一次性使用者授權確認安裝者，再綁定到 Caloud 帳號（[ADR 0017](adr/0017-github-app-public-console.md)） | P0 | M5 |
 | FR-GH-02 | 接收 push、create（branch）、pull_request 事件（HMAC 驗簽、delivery 去重）並觸發驗證；驗證（M6）完成前先觸發重新解析 | P0 | M5 |
 | FR-GH-03 | 驗證狀態與摘要回寫 GitHub Checks；PR 留言附報告連結：也驗證以專案分支為 base 的 PR（不注入秘密變數、不部署），每個 PR 一則留言並更新（[ADR 0021](adr/0021-checks-quota-release.md)） | P1 | M6 |
+| FR-GH-06 | 部署狀態回寫 GitHub Deployments（environment `production`，進行中、成功、失敗與環境網址），只限以 GitHub App 匯入的專案（[ADR 0023](adr/0023-versions.md)） | P1 | M7 |
 | FR-GH-04 | 公開儲存庫可直接以網址匯入（無事件，手動觸發） | P2 | M5 |
 | FR-GH-05 | 維運者在後台設定 GitHub App 憑證（App ID、Client ID、client secret、私鑰、webhook secret），機密以主金鑰加密保存、只顯示末 4 碼；設定時以 GitHub API 確認私鑰與 App 相符 | P0 | M5 |
 
@@ -190,6 +191,7 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-ENV-11 | 建置時變數隨環境不同時，依環境分別建置；發布記錄每個環境的映像 digest，報告註明 | P1 | M7 |
 | FR-ENV-12 | 專案確認後可一鍵部署到 production 環境（8 字元子網域）：在 Runner 以 gVisor 隔離的 BuildKit 建置、gVisor 執行、健康檢查通過後對外；顯示階段（取得原始碼、建置、啟動、健康檢查）與 log；以 GitHub 安裝匯入的專案 push 到該分支時自動重新部署。部署前須通過驗證（未驗證時先驗證再部署；admin 可強制並留稽核，ADR 0020）。M6／M7 完成前的簡化流程（[ADR 0018](adr/0018-minimal-deploy.md)） | P0 | M7 |
 | FR-ENV-13 | GPU 服務：compose 以 `deploy.resources.reservations.devices`（`capabilities: [gpu]`）宣告，或由解析器依 CUDA 基底映像與 GPU 依賴產生（低信心、須確認）；在 `gpu_ready` 的平臺節點以 gVisor nvproxy（runtime `runsc-gpu`）執行，多個環境分時共用、不隔離顯示記憶體；執行期與驗證（含測試沙箱）可用，建置不給（[ADR 0022](adr/0022-gpu.md)） | P1 | M7 |
+| FR-ENV-14 | 專案的版本可見性：分開「執行中」與「目標」版本（只在健康檢查通過後更新執行中版本）、以容器實際映像核對、注入 `CALOUD_COMMIT` 等平臺變數、Edge 回應帶 `X-Caloud-Commit`（可依專案關閉）、部署紀錄（[ADR 0023](adr/0023-versions.md)） | P0 | M7 |
 | FR-ENV-07 | 子網域 ID 由 a-z、0-9 組成，以字母開頭且同時含字母與數字；長度即環境種類（預設 8／12／16，後台可調）；以 CSPRNG 產生，排除使用中、保留字（含包含保留字者）與封鎖清單 | P0 | M4 |
 
 ### 2.12 平臺：驗證與報告 CI、RPT
@@ -233,6 +235,7 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-OPS-11 | 用戶容器以 gVisor 執行；環境之間網路不通；封鎖雲端 metadata、平臺內網、Runner 主機本身與外連 25 port（[ADR 0015](adr/0015-runner-sandbox.md)） | P0 | M4 |
 | FR-OPS-12 | Runner 啟動時自我檢查（gVisor runtime、防火牆、磁碟剩餘、以探測環境實際驗證隔離），結果顯示在節點規格；未通過的節點不接平臺環境 | P0 | M4 |
 | FR-OPS-13 | 維運者可經 Admin API 在節點開出、列出、刪除環境（image 版 compose），以「子網域 ID＋網域池根網域」經 Runner 通道對外 | P0 | M4 |
+| FR-OPS-15 | 控制面與 agent 以編譯時寫入的 commit 識別版本：`GET /api/version`、回應標頭 `X-Caloud-Build`、主控台顯示版本並在伺服器更新後提示重新整理；節點頁標示 agent 版本與控制面不同（[ADR 0023](adr/0023-versions.md)） | P0 | M7 |
 | FR-OPS-14 | 祕密（Cloudflare 權杖，之後的祕密變數）以主金鑰 `CALOUD_MASTER_KEY` 加密保存（ChaCha20-Poly1305）；主金鑰只來自環境變數，不寫入資料庫、日誌或 API 回應；未設定時拒絕設定祕密 | P0 | M4 |
 
 ### 2.15 平臺：既有服務遷移 MIG

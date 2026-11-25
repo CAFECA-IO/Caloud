@@ -78,6 +78,10 @@
 
 ## 3. 端點
 
+### 3.0 版本（FR-OPS-15，ADR 0023）
+
+**GET /api/version**（不需登入）→ `200 { "version": "0.1.0", "commit": "4b8aadd", "built_at": "2026-11-25T08:00:00Z" }`。未以 build arg 建置時 `commit` 與 `built_at` 為 `"dev"`。每個回應都帶 `X-Caloud-Build: <commit>`。
+
 ### 3.1 身分驗證
 
 | Method | Path | 權限 | 需求 |
@@ -254,7 +258,7 @@
 ```json
 { "id": "uuid", "name": "runner-tky-01", "owner": null, "status": "active",
   "specs": { "cpu_cores": 16, "arch": "x86_64", "memory_bytes": 68719476736, "disk_free_bytes": 1932735283200,
-             "os": "Ubuntu 24.04", "gvisor": true, "buildkit": true, "isolation": true, "self_check": null, "agent_version": "0.1.0",
+             "os": "Ubuntu 24.04", "gvisor": true, "buildkit": true, "isolation": true, "self_check": null, "agent_version": "0.1.0", "agent_commit": "4b8aadd",
              "gpus": [ { "name": "NVIDIA GeForce RTX 4060 Ti", "memory_mb": 16380 } ], "gpu_driver": "580.178.04", "gpu_ready": true, "gpu_check": null },
   "allocatable": { "cpu_millis": 14400, "memory_bytes": 61847529062 },
   "allocated": { "cpu_millis": 0, "memory_bytes": 0 },
@@ -345,7 +349,7 @@
 - `env[].build_time`：建置時寫入前端的變數（FR-AN-09）；`env[].varies_by_env`：值隨環境不同（網址、origin 類），staging 與 production 需各自建置。舊紀錄缺少時視為 false。
 - M5-08 新增的 finding `key`：`persistent_dir`（FR-AN-07）、`system_package`、`native_module`（FR-AN-08）、`build_env`（FR-AN-09）。
 
-**PATCH /api/projects/{id}** `{ "name"?, "git_ref"?, "root"? }` → `200 Project`；`git_ref` 或 `root` 改變時重新解析（`git_ref` 給空字串表示預設分支）。
+**PATCH /api/projects/{id}** `{ "name"?, "git_ref"?, "root"?, "commit_header"? }` → `200 Project`；`commit_header`（布林，預設 true）控制專案環境的回應是否帶 `X-Caloud-Commit`（ADR 0023）；`git_ref` 或 `root` 改變時重新解析（`git_ref` 給空字串表示預設分支）。
 
 **DELETE /api/projects/{id}** → `204`；同時刪除解析紀錄與取得的原始碼。
 
@@ -363,12 +367,16 @@
 ```json
 { "subdomain": "q7v2m4kx", "hostname": "q7v2m4kx.caloud.tw", "url": "https://q7v2m4kx.caloud.tw",
   "status": "deploying", "stage": "build", "in_progress": true, "pending_changes": false,
-  "commit": "98b705d…", "error": null, "node": "uuid", "updated_at": 0,
+  "commit": "98b705d…", "target_commit": "98b705d…", "running_commit": "4c1e2f0…", "deployed_at": 0,
+  "services": [ { "name": "web", "image": "caloud-env/q7v2m4kx/web:98b705d01234", "commit": "98b705d01234" } ],
+  "branch_commit": "98b705d…", "branch_verify": "passed",
+  "error": null, "node": "uuid", "updated_at": 0,
   "vars_pending": false, "missing_vars": [ "SESSION_SECRET" ],
   "logs": [ { "stage": "build", "line": "#5 [2/4] RUN npm ci", "at": 0 } ] }
 ```
 
-- `status`：`deploying` → `running` | `failed`；`stage`：`fetch`、`build`、`start`、`health`，成功後為 `done`。`logs` 為最近 300 行。
+- `status`：`deploying` → `running` | `failed`；`stage`：`fetch`、`build`、`release`、`start`、`health`，成功後為 `done`。
+- 版本（ADR 0023）：`target_commit`（同 `commit`）是本次部署的目標；`running_commit` 與 `deployed_at` 只在健康檢查通過時更新，部署失敗時仍是上一個成功的版本（從未成功為 null）；`services[].image` 是容器實際的映像，`commit` 由平臺映像標籤取得（現成映像為 null）；`branch_commit` 為最新解析的 commit，`branch_verify` 為它最近一次驗證的狀態（沒有時為 null）。`logs` 為最近 300 行。
 - 重新部署時，`fetch`、`build` 階段舊版仍在執行（`status` 維持 `running`）；這兩個階段失敗時 `status` 仍為 `running`，`error` 與 `stage` 指出失敗的階段。進入 `start` 後舊版停止，路由暫時移除，健康檢查通過後恢復。
 - `pending_changes`：最新解析的 compose 與確認版本不同；確認前部署仍使用確認時的 commit。設定相同時部署最新解析的 commit。
 - 需要有通過自我檢查且具備建置環境（`specs.buildkit`）的平臺節點；compose 宣告 GPU 時另需 `specs.gpu_ready`，沒有時回 `409`「沒有可用 GPU 的 Runner 節點」（ADR 0022）。
@@ -394,6 +402,8 @@
 - 階段狀態：`pending`、`running`、`passed`、`failed`、`skipped`。
 
 **GET /api/projects/{id}/verifications** → `200 [Verification]`（新到舊，最多 50 筆）。
+
+**GET /api/projects/{id}/deployments** → `200 [{ "id", "env", "commit", "trigger", "status", "stage", "error", "created_by", "created_at", "finished_at" }]`（新到舊，最多 20 筆，ADR 0023）。`trigger`：`manual`、`forced`、`push`；`status`：`in_progress`、`success`、`failure`；失敗時 `stage` 為失敗的階段。
 
 **GET /api/verifications/{id}** → `200 { "verification": Verification, "issues": [Issue], "fixed": [Issue], "previous": "uuid" | null, "logs": [ { "stage", "line", "at" } ] }`；`Issue`：
 
@@ -533,7 +543,7 @@
 | --- | --- | --- |
 | `register` | `join_token` 或 `node_token`（擇一）、`name`、`specs`（同 Node.specs） | 必須是第一則，10 秒內未收到即關閉。首次以加入權杖註冊；之後以節點權杖重連 |
 | `heartbeat` | `used`（`cpu_millis`、`memory_bytes`，主機目前用量） | 每 `heartbeat_secs` 秒一次；第一則在 `ack` 後立即送出 |
-| `env_status` | `env_id`、`status`（`deploying`／`running`／`failed`／`destroyed`）、`stage`?（`fetch`／`build`／`release`／`start`；`failed` 時為失敗的階段）、`error`?、`services`（`[{name, ip}]`） | 部署進度與結果；`deploying` 只用於回報目前階段（ADR 0018） |
+| `env_status` | `env_id`、`status`（`deploying`／`running`／`failed`／`destroyed`）、`stage`?（`fetch`／`build`／`release`／`start`；`failed` 時為失敗的階段）、`error`?、`services`（`[{name, ip, image?}]`；`image` 為 `up` 之後容器實際的映像，ADR 0023） | 部署進度與結果；`deploying` 只用於回報目前階段（ADR 0018） |
 | `env_log` | `env_id`、`stage`、`line` | 部署過程的輸出，逐行；每行最多 500 字、每階段最多 2000 行 |
 | `verify_stage` | `id`、`stage`、`status`（`running`／`passed`／`failed`／`skipped`） | 驗證階段（ADR 0020） |
 | `verify_issue` | `id`、`issue`（`severity`、`stage`、`rule`、`title`、`detail`、`file`?、`line`?） | 驗證發現的問題；值已遮蔽 |
@@ -547,7 +557,7 @@
 | --- | --- | --- |
 | `ack` | `node_id`、`node_token`（只在以加入權杖註冊時出現）、`status`、`heartbeat_secs` | 註冊成功 |
 | `status` | `status` | 維運者排空或恢復節點時通知 |
-| `deploy` | `env`（`id`、`kind`、`compose`、`subnet_index`、`public_service`、`source`?、`vars`?、`build`?、`release`?） | 部署或重新部署環境（FR-OPS-13）；agent 以平臺政策再檢查 compose。`source`（ADR 0018）：`repo_url`、`commit`、`git_ref`?、`compose_dir`、`auth_header`?；有 source 時 compose 可含 `build`（只限儲存庫內路徑與 `dockerfile_inline`），agent 先取得原始碼、在 gVisor BuildKit 建置後改寫為 image。`vars`（ADR 0019）：`[{name, value, user}]`，`docker compose up` 時放進行程環境變數；`user: true` 的名稱列入建置服務的 `environment`；build args 的 `${NAME}` 以此內插；log 與錯誤中的值遮蔽為 `***`。`build`（ADR 0021）：`{cpus, memory_mb}` 建置與沙箱資源；`release`：`[{service, command?}]` 發布前任務，以新設定 `docker compose run` 成功後才 `up`，失敗時回報 `stage: release` 並保留舊版 |
+| `deploy` | `env`（`id`、`kind`、`compose`、`subnet_index`、`public_service`、`source`?、`vars`?、`build`?、`release`?、`platform_vars`?） | 部署或重新部署環境（FR-OPS-13）；agent 以平臺政策再檢查 compose。`source`（ADR 0018）：`repo_url`、`commit`、`git_ref`?、`compose_dir`、`auth_header`?；有 source 時 compose 可含 `build`（只限儲存庫內路徑與 `dockerfile_inline`），agent 先取得原始碼、在 gVisor BuildKit 建置後改寫為 image。`vars`（ADR 0019）：`[{name, value, user}]`，`docker compose up` 時放進行程環境變數；`user: true` 的名稱列入建置服務的 `environment`；build args 的 `${NAME}` 以此內插；log 與錯誤中的值遮蔽為 `***`。`build`（ADR 0021）：`{cpus, memory_mb}` 建置與沙箱資源；`release`：`[{service, command?}]` 發布前任務，以新設定 `docker compose run` 成功後才 `up`，失敗時回報 `stage: release` 並保留舊版。`platform_vars`（ADR 0023）：`[{name, value}]` 平臺提供的非秘密變數（`CALOUD_COMMIT` 等），對建置的服務同時作為執行期環境變數與 build arg，不遮蔽 |
 | `destroy` | `env_id` | 停止並刪除環境與其 volume |
 | `verify` | `run`（`id`、`env`（同 `deploy`，kind `verify`）、`public_port`、`test`?、`lint`?（`image`、`setup`、`command`）、`smoke`（路徑）、`keep_on_failure`） | 執行驗證的十個階段中由 agent 負責的部分並逐步回報（ADR 0020） |
 | `cancel_verify` | `id` | 取消驗證；agent 終止子程序並銷毀環境 |

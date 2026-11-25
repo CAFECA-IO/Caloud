@@ -172,7 +172,9 @@
 
 建置在 Runner 上以 rootless BuildKit 執行，不使用主機 Docker 的建置；建置可連外網但封鎖雲端 metadata 與平臺內網。實作（[ADR 0018](adr/0018-minimal-deploy.md)）：每次建置一個 gVisor（runsc）臨時容器（`buildctl-daemonless.sh`），接在介面名稱 `cldbuild` 的網路上而受 ADR 0015 防火牆規則管控；限 4 CPU、8 GB、4096 pids；快取只在同一環境的 volume 內共用。
 
-PR 驗證（[ADR 0021](adr/0021-checks-quota-release.md)）的程式碼可能來自 fork，不注入任何秘密變數。GitHub App 只要求必要的權限：Contents（read）、Metadata（read）、Checks（write）、Pull requests（write）。
+PR 驗證（[ADR 0021](adr/0021-checks-quota-release.md)）的程式碼可能來自 fork，不注入任何秘密變數。GitHub App 只要求必要的權限：Contents（read）、Metadata（read）、Checks（write）、Pull requests（write）、Deployments（write，[ADR 0023](adr/0023-versions.md)）。
+
+版本資訊（ADR 0023）：`GET /api/version` 與 `X-Caloud-Build` 只揭露短 commit 與建置時間，不含路徑或設定；專案的 `X-Caloud-Commit` 預設開啟，可依專案關閉；`CALOUD_COMMIT` 等平臺變數不是秘密，不做遮蔽。
 
 驗證（[ADR 0020](adr/0020-verification.md)）的專案測試、lint 與漏洞掃描同樣在 gVisor（runsc）臨時容器中執行，接在 `caloud-build` 網路（可連外網，封鎖內網、metadata 與主機），限 4 CPU、8 GB、4096 pids，逾時 15 分鐘；測試沙箱不注入任何秘密變數。osv-scanner 映像以 digest 固定。秘密外洩掃描在 agent 內以規則比對，回報只含規則、位置與遮蔽後的片段（前 4 與後 4 字元）。
 

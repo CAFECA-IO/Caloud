@@ -145,6 +145,8 @@
 | M7-14 | 帳號驗收：逐筆比對、hosts 預覽、驗收清單 | FR-MIG-07 | ⬜ |
 | M7-15 | 寫入凍結、最後同步、切換、監控、回退、遷移報告與畫面 | FR-MIG-08～10 | ⬜ |
 | M7-16 | 最小部署流程：確認後建置（gVisor BuildKit）、啟動、健康檢查、開出 production 網址；push 自動重新部署（[ADR 0018](adr/0018-minimal-deploy.md)） | FR-ENV-12 | ✅ |
+| M7-18 | 建置識別與版本可見性：控制面與 agent 版本、主控台快取與更新提示、專案執行中版本、平臺變數、`X-Caloud-Commit`、部署紀錄（[ADR 0023](adr/0023-versions.md)） | FR-OPS-15、FR-ENV-14 | 🚧 |
+| M7-19 | GitHub Deployments（ADR 0023） | FR-GH-06 | 🚧 |
 | M7-17 | GPU 執行環境：`runsc-gpu`（nvproxy）、GPU 偵測與自我檢查、調度、解析器偵測（[ADR 0022](adr/0022-gpu.md)） | FR-ENV-13 | 🚧 |
 
 ### M8 訂閱與上線

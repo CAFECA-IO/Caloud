@@ -180,7 +180,8 @@ MCP 用戶端 ──POST /mcp (Bearer cld_…)──► mcp.rs ──► service
 | `github_installations` | `id`（GitHub installation id） | 擁有者（Caloud 帳號）、GitHub 帳號名稱與類型、是否暫停 | FR-GH-01 |
 | `github_deliveries` | `delivery_id` | webhook 去重：事件類型、收到時間（保留 7 天） | FR-GH-02 |
 | `analyses` | `id`（UUID） | 專案、ref、commit、解析結果（`caloud_analyzer::Analysis` JSON）、用戶編輯的 compose、對外服務、已確認的低信心項目、確認者與時間 | FR-AN-03、FR-AN-04、FR-AN-10 |
-| `environments` | `subdomain` | 環境：所屬專案、部署的 commit 與階段（fetch／build／start／health／done）、主機名稱、用途（production／staging／verify）、所在節點、節點內網段索引、compose、對外服務與 port、狀態（deploying／running／failed／destroying）、錯誤、服務 IP、建立者 | FR-OPS-13 |
+| `environments` | `subdomain` | 環境：所屬專案、本次部署的目標 commit 與階段（fetch／build／release／start／health／done）、執行中的 commit 與上線時間（健康檢查通過才更新，ADR 0023）、主機名稱、用途（production／staging／verify）、所在節點、節點內網段索引、compose、對外服務與 port、狀態（deploying／running／failed／destroying）、錯誤、服務 IP、建立者 | FR-OPS-13 |
+| `deployments` | `id`（UUID） | 部署紀錄：專案、環境、commit、觸發（manual／forced／push）、狀態（in_progress／success／failure）、失敗階段、錯誤、GitHub deployment ID、建立者、開始與結束時間（ADR 0023） | FR-ENV-14、FR-GH-06 |
 | `deploy_logs` | 自增 `id` | 部署 log：環境、階段、內容、時間；每個環境保留最近 2000 行（ADR 0018） | FR-ENV-12 |
 | `project_vars` | `(project, env, name)` | 秘密變數：值以主金鑰加密、提示（末 4 碼）、是否平臺產生、更新者與時間；`projects.vars_rev` 每次變更加 1，`environments.vars_rev` 記錄部署時的版本（ADR 0019） | FR-ENV-05、FR-APP-11 |
 | `verifications` | `id`（UUID） | 驗證執行（另含 GitHub check run ID、PR 編號、建置秒數，ADR 0021）：專案、commit、分支、觸發（push／manual／deploy）、狀態（queued／running／passed／failed／canceled／error）、目前階段、各階段狀態、驗證環境與節點、驗證後部署、保留到期、問題計數、時間（ADR 0020） | FR-CI-01～05、FR-RPT-01 |
