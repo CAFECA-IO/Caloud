@@ -170,6 +170,9 @@ pub struct Project {
     pub commit_header: bool,
     pub created_at: i64,
     pub updated_at: i64,
+    /// 記憶體與 CPU 的合計上限；None＝每個服務 1 GB、1 核（ADR 0025）
+    pub memory_limit_mb: Option<i64>,
+    pub cpu_limit: Option<f64>,
 }
 
 /// 一次解析的紀錄；`result` 為 `caloud_analyzer::Analysis` JSON

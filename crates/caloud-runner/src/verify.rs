@@ -787,6 +787,7 @@ mod tests {
                 build: None,
                 release: vec![],
                 platform_vars: vec![],
+                limits: vec![],
                 vars: vec![EnvValue {
                     name: "S".into(),
                     value: "FATAL boom".into(),

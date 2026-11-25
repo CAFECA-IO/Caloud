@@ -209,6 +209,7 @@ pub async fn get(s: &AppState, me: &CurrentUser, id: &str) -> ApiResult<Value> {
         }
         _ => None,
     };
+    let limits = super::limits::view(&p, super::deploy::confirmed_compose(s, &p).await?.as_ref());
     let deployment = super::deploy::deployment(s, &p).await?;
     let verification = super::verify::summary(s, &p).await?;
     let build_usage = json!({
@@ -220,6 +221,7 @@ pub async fn get(s: &AppState, me: &CurrentUser, id: &str) -> ApiResult<Value> {
         "analysis": last.as_ref().map(analysis_json),
         "confirmed": confirmed.as_ref().map(analysis_json),
         "confirmed_diff": confirmed_diff,
+        "limits": limits,
         "deployment": deployment,
         "verification": verification,
         "build_usage": build_usage,
@@ -576,6 +578,8 @@ pub async fn confirm(s: &AppState, me: &CurrentUser, id: &str, input: ConfirmInp
     if !compose.services.contains(&public) {
         return Err(bad(format!("compose 中沒有服務 `{public}`。")));
     }
+    // ADR 0025：宣告的資源不可超過專案上限
+    super::limits::resolve(&compose, p.memory_limit_mb, p.cpu_limit).map_err(bad)?;
 
     let edited = edited.filter(|c| Some(c) != analysis.compose.as_ref());
     super::deploy::freeze_settings(s, &row).await?;

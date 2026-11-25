@@ -14,6 +14,7 @@ pub mod admin;
 pub mod build;
 pub mod deploy;
 pub mod environments;
+pub mod limits;
 pub mod projects;
 pub mod vars;
 pub mod verify;

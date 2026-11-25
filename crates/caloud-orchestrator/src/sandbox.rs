@@ -36,17 +36,24 @@ pub fn declares_gpu(yaml: &str) -> bool {
 }
 
 /// 清掉用戶的 GPU 宣告（Docker 的 `--gpus` 要重啟 daemon 才能用），改由 CDI 裝置掛入所有 GPU（分時共用）
-fn gpu_reservation() -> Value {
-    let mut reservations = Mapping::new();
-    reservations.insert(
-        "devices".into(),
-        Value::Tagged(Box::new(TaggedValue {
-            tag: Tag::new("reset"),
-            value: Value::Sequence(vec![]),
-        })),
-    );
+fn reset(v: Value) -> Value {
+    Value::Tagged(Box::new(TaggedValue {
+        tag: Tag::new("reset"),
+        value: v,
+    }))
+}
+
+/// override 的 `deploy`：GPU 改以 CDI 裝置掛入（移除 reservations.devices）；移除原本的 resources.limits
+fn deploy_override(gpu: bool, reset_limits: bool) -> Value {
     let mut resources = Mapping::new();
-    resources.insert("reservations".into(), Value::Mapping(reservations));
+    if gpu {
+        let mut reservations = Mapping::new();
+        reservations.insert("devices".into(), reset(Value::Sequence(vec![])));
+        resources.insert("reservations".into(), Value::Mapping(reservations));
+    }
+    if reset_limits {
+        resources.insert("limits".into(), reset(Value::Mapping(Mapping::new())));
+    }
     let mut deploy = Mapping::new();
     deploy.insert("resources".into(), Value::Mapping(resources));
     Value::Mapping(deploy)
@@ -122,6 +129,77 @@ impl Default for Limits {
     }
 }
 
+/// compose 中服務宣告的資源（ADR 0025）
+#[derive(Debug, Clone, PartialEq)]
+pub struct Declared {
+    pub service: String,
+    pub memory_mb: Option<u64>,
+    pub cpus: Option<f64>,
+}
+
+/// `12g`、`512m`、`1.5G`、`1073741824` → MB（無條件捨去）
+pub fn parse_memory_mb(v: &Value) -> Option<u64> {
+    let bytes = match v {
+        Value::Number(n) => n.as_f64()?,
+        Value::String(s) => {
+            let s = s.trim().to_ascii_lowercase();
+            let s = s
+                .strip_suffix('b')
+                .filter(|x| !x.is_empty() && !x.ends_with(|c: char| c.is_ascii_digit() || c == '.'))
+                .unwrap_or(&s);
+            let (num, mult) = match s.chars().last()? {
+                'k' => (&s[..s.len() - 1], 1024f64),
+                'm' => (&s[..s.len() - 1], 1024f64 * 1024.0),
+                'g' => (&s[..s.len() - 1], 1024f64 * 1024.0 * 1024.0),
+                'b' => (&s[..s.len() - 1], 1f64),
+                _ => (s, 1f64),
+            };
+            num.trim().parse::<f64>().ok()? * mult
+        }
+        _ => return None,
+    };
+    (bytes.is_finite() && bytes >= 0.0).then(|| (bytes / (1024.0 * 1024.0)) as u64)
+}
+
+fn parse_cpus(v: &Value) -> Option<f64> {
+    let c = match v {
+        Value::Number(n) => n.as_f64()?,
+        Value::String(s) => s.trim().parse().ok()?,
+        _ => return None,
+    };
+    (c.is_finite() && c >= 0.0).then_some(c)
+}
+
+/// 各服務在 compose 宣告的記憶體與 CPU（`mem_limit`／`cpus` 或 `deploy.resources.limits`，兩者皆有取較小值）
+pub fn declared_limits(compose: &ValidatedCompose) -> Vec<Declared> {
+    let min_opt = |a: Option<f64>, b: Option<f64>| match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (x, y) => x.or(y),
+    };
+    compose
+        .services
+        .iter()
+        .map(|name| {
+            let svc = &compose.doc["services"][name.as_str()];
+            let lim = svc.get("deploy").and_then(|d| d.get("resources")).and_then(|r| r.get("limits"));
+            let mem = min_opt(
+                svc.get("mem_limit").and_then(parse_memory_mb).map(|x| x as f64),
+                lim.and_then(|l| l.get("memory")).and_then(parse_memory_mb).map(|x| x as f64),
+            )
+            .map(|x| x as u64);
+            let cpus = min_opt(
+                svc.get("cpus").and_then(parse_cpus),
+                lim.and_then(|l| l.get("cpus")).and_then(parse_cpus),
+            );
+            Declared {
+                service: name.clone(),
+                memory_mb: mem,
+                cpus,
+            }
+        })
+        .collect()
+}
+
 /// 環境的 compose project 名稱
 pub fn project(env_id: &str) -> String {
     format!("caloud-env-{env_id}")
@@ -175,6 +253,18 @@ pub fn env_override_with(
     limits: Limits,
     inject: &[(String, Vec<String>)],
 ) -> Result<String, String> {
+    env_override_limits(env_id, compose, net, limits, &[], inject)
+}
+
+/// 同 [`env_override_with`]，`per_service` 列出的服務改用各自的上限（ADR 0025）
+pub fn env_override_limits(
+    env_id: &str,
+    compose: &ValidatedCompose,
+    net: &EnvNet,
+    limits: Limits,
+    per_service: &[(String, Limits)],
+    inject: &[(String, Vec<String>)],
+) -> Result<String, String> {
     check_image_only(compose)?;
     let ips = service_ips(compose, net);
     let hosts: Vec<Value> = ips.iter().map(|(n, ip)| Value::String(format!("{n}:{ip}"))).collect();
@@ -182,10 +272,20 @@ pub fn env_override_with(
     for (name, ip) in &ips {
         let orig = compose.doc["services"][name.as_str()].as_mapping().cloned().unwrap_or_default();
         let mut svc = Mapping::new();
-        if compose.gpu_services.contains(name) {
+        let limits = per_service.iter().find(|(s, _)| s == name).map(|(_, l)| *l).unwrap_or(limits);
+        let gpu = compose.gpu_services.contains(name);
+        // 原本的 deploy.resources.limits 由 mem_limit／cpus 取代，避免兩者不一致（ADR 0025）
+        let had_limits = orig
+            .get("deploy")
+            .and_then(|d| d.get("resources"))
+            .and_then(|r| r.get("limits"))
+            .is_some();
+        if gpu || had_limits {
+            svc.insert("deploy".into(), deploy_override(gpu, had_limits));
+        }
+        if gpu {
             svc.insert("runtime".into(), RUNTIME_GPU.into());
             svc.insert("devices".into(), Value::Sequence(vec![GPU_DEVICE.into()]));
-            svc.insert("deploy".into(), gpu_reservation());
         } else {
             svc.insert("runtime".into(), RUNTIME.into());
         }
@@ -334,5 +434,58 @@ mod tests {
         assert_eq!(d["services"]["infer"]["devices"][0], GPU_DEVICE);
         assert!(d["services"]["web"].get("devices").is_none());
         assert!(declares_gpu(y) && !declares_gpu("services: {web: {image: y}}") && !declares_gpu("::"));
+    }
+
+    // ADR 0025：compose 宣告的資源、各服務的上限
+    #[test]
+    fn declared_and_per_service_limits() {
+        let mb = |s: &str| parse_memory_mb(&Value::String(s.into()));
+        assert_eq!(mb("12g"), Some(12288));
+        assert_eq!(mb("1.5G"), Some(1536));
+        assert_eq!(mb("512m"), Some(512));
+        assert_eq!(mb("512mb"), Some(512));
+        assert_eq!(mb("2048k"), Some(2));
+        assert_eq!(mb("1073741824"), Some(1024));
+        assert_eq!(parse_memory_mb(&Value::Number(2147483648u64.into())), Some(2048));
+        assert_eq!(mb("x"), None);
+        assert_eq!(mb("-1g"), None);
+        let y = "services:\n  infer:\n    image: x\n    mem_limit: 12g\n    cpus: 4\n    deploy: {resources: {limits: {memory: 8G, cpus: '6'}}}\n  web:\n    image: y\n";
+        let c = validate_with(y, Policy::platform(0)).unwrap();
+        let d = declared_limits(&c);
+        assert_eq!(
+            d,
+            vec![
+                Declared {
+                    service: "infer".into(),
+                    memory_mb: Some(8192),
+                    cpus: Some(4.0)
+                },
+                Declared {
+                    service: "web".into(),
+                    memory_mb: None,
+                    cpus: None
+                },
+            ]
+        );
+        let big = Limits {
+            cpus: 4.0,
+            memory_mb: 8192,
+            pids: 512,
+        };
+        let o = env_override_limits(
+            "l1l1l1l1",
+            &c,
+            &EnvNet::new(2).unwrap(),
+            Limits::default(),
+            &[("infer".into(), big)],
+            &[],
+        )
+        .unwrap();
+        let v: Value = serde_yaml::from_str(&o).unwrap();
+        assert_eq!(v["services"]["infer"]["mem_limit"], "8192m");
+        assert_eq!(v["services"]["infer"]["cpus"], 4.0);
+        assert_eq!(v["services"]["web"]["mem_limit"], "1024m");
+        assert!(o.contains("limits: !reset {}"), "原本的 deploy.resources.limits 移除：{o}");
+        assert!(v["services"]["web"].get("deploy").is_none());
     }
 }

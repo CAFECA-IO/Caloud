@@ -126,6 +126,16 @@ pub struct VolumeQuery {
     pub target: String,
 }
 
+/// ADR 0025：專案資源上限（admin+）
+pub async fn set_limits(
+    State(s): State<AppState>,
+    me: CurrentUser,
+    Path(id): Path<String>,
+    Json(b): Json<crate::service::limits::LimitsInput>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(crate::service::limits::set(&s, &me, &id, b).await?))
+}
+
 /// ADR 0024：加上 volume 的預覽
 pub async fn volume_preview(
     State(s): State<AppState>,

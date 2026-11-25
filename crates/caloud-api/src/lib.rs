@@ -94,6 +94,7 @@ pub fn router(state: AppState) -> Router {
             "/api/projects/{id}/volume-fix",
             get(projects::volume_preview).post(projects::volume_apply),
         )
+        .route("/api/projects/{id}/limits", put(projects::set_limits))
         .route("/api/version", get(assets::version))
         .route("/api/verifications/{id}", get(projects::verification))
         .route("/api/verifications/{id}/cancel", post(projects::cancel_verification))

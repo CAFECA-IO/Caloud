@@ -3277,6 +3277,125 @@ async fn settings_carry_over_rollback_vars_and_volume() {
     agent.abort();
 }
 
+// FR-ENV-16（ADR 0025）：Admin 設專案上限、compose 宣告服務用量、套用到 override
+#[tokio::test]
+#[allow(clippy::async_yields_async)]
+async fn project_resource_limits() {
+    use caloud_runner::client::{run_once, Options};
+    use caloud_runner::envs::EnvRunner;
+    use caloud_runner::selfcheck::SelfCheck;
+    let env = Env::new().await;
+    let (admin, member) = admin_and_member(&env).await;
+    env.call(
+        "POST",
+        "/api/admin/domain-pools",
+        &admin,
+        Some(json!({ "root": "caloud.tw", "purposes": ["production", "staging", "verify"] })),
+    )
+    .await;
+    set_repo(
+        &env,
+        &[(
+            "package.json",
+            "{\n  \"scripts\": { \"build\": \"next build\", \"start\": \"next start\" },\n  \"dependencies\": { \"next\": \"15\" }\n}\n",
+        )],
+    );
+    let (_, p) = env
+        .call(
+            "POST",
+            "/api/projects",
+            &member,
+            Some(json!({ "repo_url": "https://github.com/CAFECA-IO/SwarmStorage" })),
+        )
+        .await;
+    let id = p["id"].as_str().unwrap().to_string();
+    let v = wait_project(&env, &member, &id).await;
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(v["analysis"]["result"]["compose"].as_str().unwrap()).unwrap();
+    doc["services"]["web"]["mem_limit"] = "2g".into();
+    let compose = serde_yaml::to_string(&doc).unwrap();
+    let confirm = format!("/api/projects/{id}/analysis");
+    let body = json!({ "public_service": "web", "compose": compose });
+
+    // 沒有放寬上限：每個服務最多 1 GB
+    let (st, e) = env.call("PUT", &confirm, &member, Some(body.clone())).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("聯絡 Admin"), "{e}");
+    let limits = format!("/api/projects/{id}/limits");
+    let (st, _) = env.call("PUT", &limits, &member, Some(json!({ "memory_mb": 4096 }))).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, _) = env.call("PUT", &limits, &admin, Some(json!({ "memory_mb": 100 }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, l) = env.call("PUT", &limits, &admin, Some(json!({ "memory_mb": 4096 }))).await;
+    assert_eq!(st, StatusCode::OK, "{l}");
+    assert_eq!(l["memory_mb"], 4096);
+    let (st, e) = env.call("PUT", &confirm, &member, Some(body)).await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    let (_, v) = env.call("GET", &format!("/api/projects/{id}"), &member, None).await;
+    let web = v["limits"]["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["service"] == "web")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (web["memory_mb"].as_u64(), web["declared"].as_bool()),
+        (Some(2048), Some(true)),
+        "{}",
+        v["limits"]
+    );
+    assert!(v["limits"]["error"].is_null());
+
+    let (_, jt) = env.call("POST", "/api/admin/nodes/join-tokens", &admin, Some(json!({}))).await;
+    let mut runner = EnvRunner::new(
+        env.dir.join("fake-docker.sh").display().to_string(),
+        env.dir.join("runner-l"),
+        vec!["1.1.1.1".into()],
+    );
+    runner.git_bin = env.dir.join("fake-git.sh").display().to_string();
+    runner.smoke_target = Some(smoke_server().await);
+    let opts = Options {
+        server: env.base.clone(),
+        join_token: Some(jt["token"].as_str().unwrap().to_string()),
+        name: "runner-l".into(),
+        state_dir: env.dir.join("runner-l"),
+        envs: runner,
+        check: SelfCheck {
+            gvisor: true,
+            isolation: true,
+            buildkit: true,
+            reason: None,
+            ..Default::default()
+        },
+    };
+    let agent = tokio::spawn(async move { run_once(&opts).await });
+    wait_node(&env, &admin, "runner-l", "active").await;
+
+    let deploy = format!("/api/projects/{id}/deploy");
+    let (st, d) = env.call("POST", &deploy, &admin, Some(json!({ "force": true }))).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    let sub = d["subdomain"].as_str().unwrap().to_string();
+    wait_deploy(&env, &member, &id, |d| d["stage"] == "done").await;
+    let o = std::fs::read_to_string(env.dir.join("runner-l/envs").join(&sub).join("caloud.override.yml")).unwrap();
+    let ov: serde_yaml::Value = serde_yaml::from_str(&o).unwrap();
+    assert_eq!(ov["services"]["web"]["mem_limit"], "2048m", "{o}");
+    // 排程預留：宣告的 2 GB
+    let mem: i64 = sqlx::query_scalar("SELECT memory_bytes FROM environments WHERE subdomain = ?")
+        .bind(&sub)
+        .fetch_one(&env.db)
+        .await
+        .unwrap();
+    assert_eq!(mem, 2048 * 1024 * 1024);
+
+    // 上限調低後，部署回 409
+    env.call("PUT", &limits, &admin, Some(json!({ "memory_mb": null }))).await;
+    let (st, e) = env.call("POST", &deploy, &admin, Some(json!({ "force": true }))).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{e}");
+    let (_, v) = env.call("GET", &format!("/api/projects/{id}"), &member, None).await;
+    assert!(v["limits"]["error"].as_str().is_some_and(|e| e.contains("1 GB")), "{}", v["limits"]);
+    agent.abort();
+}
+
 // ───────────────────────── Edge TLS 與憑證（ADR 0016） ─────────────────────────
 
 // FR-OPS-03、FR-OPS-14：Cloudflare 權杖經驗證後加密保存，只回傳提示；FR-OPS-10、FR-DOM-05、FR-DOM-08：需要的憑證

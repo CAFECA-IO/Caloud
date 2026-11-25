@@ -873,6 +873,23 @@ function drawSettings(id, box) {
       <button class="c-btn c-btn--primary" id="pj-confirm">${icon("check")}<span>${isConfirmedLatest ? "儲存變更" : c ? "確認新設定" : "確認設定"}</span></button></div>`);
   }
 
+  // ADR 0025：資源
+  const lim = pj.data.limits;
+  if (lim) {
+    const fmtGb = (mb) => `${+(mb / 1024).toFixed(1)} GB`;
+    const fmtCpu = (c) => `${+(+c).toFixed(2)} 核`;
+    const rows = lim.services.map((x) => `<tr><td class="c-table__primary u-mono">${esc(x.service)}</td><td>${fmtGb(x.memory_mb)}</td><td>${fmtCpu(x.cpus)}</td><td class="u-small u-muted">${x.declared ? "compose 宣告" : "預設"}</td></tr>`).join("");
+    const capText = `記憶體 ${lim.memory_mb ? `合計上限 ${fmtGb(lim.memory_mb)}` : "每個服務最多 1 GB"}；CPU ${lim.cpus ? `合計上限 ${fmtCpu(lim.cpus)}` : "每個服務最多 1 核"}`;
+    out.push(card("資源", `${lim.error ? banner("danger", "alert", "超過資源上限", `${esc(lim.error)}<br>調整 compose 的 <code class="c-code">mem_limit</code>／<code class="c-code">cpus</code>${isAdmin() ? "，或放寬專案上限" : "，或請 Admin 放寬專案上限"}。`) : ""}
+      ${rows ? `<div class="c-table-wrap"><table class="c-table"><thead><tr><th>服務</th><th>記憶體</th><th>CPU</th><th>來源</th></tr></thead><tbody>${rows}
+        <tr><td class="c-table__primary">合計</td><td>${fmtGb(lim.total_memory_mb)}</td><td>${fmtCpu(lim.total_cpus)}</td><td></td></tr></tbody></table></div>` : '<p class="u-small u-muted">確認設定後顯示各服務的資源。</p>'}
+      <p class="u-small u-muted">${esc(capText)}。服務在 compose 以 <code class="c-code">mem_limit</code>、<code class="c-code">cpus</code>（或 <code class="c-code">deploy.resources.limits</code>）宣告用量，沒有宣告以 1 GB、1 核計。${isAdmin() ? "" : "需要更多請聯絡 Admin。"}</p>
+      ${isAdmin() ? `<div class="l-grid">
+        <label class="c-field"><span class="c-field__label">記憶體合計上限（GB）</span><input class="c-input" id="pl-mem" type="number" min="1" max="128" step="1" value="${lim.memory_mb ? lim.memory_mb / 1024 : ""}" placeholder="預設：每個服務 1 GB"></label>
+        <label class="c-field"><span class="c-field__label">CPU 合計上限（核）</span><input class="c-input" id="pl-cpu" type="number" min="1" max="64" step="0.5" value="${lim.cpus ?? ""}" placeholder="預設：每個服務 1 核"></label></div>
+        <div class="l-row"><span class="c-field__error" id="pl-err" role="alert"></span><span class="l-spacer"></span><span class="u-small u-muted">只有 Admin 能調整；留空恢復預設。</span><button class="c-btn" id="pl-save">儲存上限</button></div>` : ""}`));
+  }
+
   // 專案設定
   out.push(card("專案設定", `<div class="l-grid">
       <label class="c-field"><span class="c-field__label">分支／標籤</span><input class="c-input u-mono" id="ps-ref" value="${esc(p.git_ref || "")}" placeholder="預設分支（${esc(p.branch || "—")}）"></label>
@@ -931,6 +948,15 @@ function drawSettings(id, box) {
     try { await busy(b, api(`/api/projects/${id}`, { method: "PATCH", body: { root: b.dataset.root } })); renderProject(id); }
     catch (err) { toast(err.message, "danger"); }
   }));
+  $("#pl-save")?.addEventListener("click", async (e) => {
+    showMsg($("#pl-err"), null);
+    const num = (sel) => { const v = $(sel).value.trim(); return v === "" ? null : Number(v); };
+    const mem = num("#pl-mem");
+    try {
+      await busy(e.currentTarget, api(`/api/projects/${encodeURIComponent(id)}/limits`, { method: "PUT", body: { memory_mb: mem == null ? null : Math.round(mem * 1024), cpus: num("#pl-cpu") } }));
+      toast("已更新資源上限，下次部署生效"); renderProject(id);
+    } catch (err) { showMsg($("#pl-err"), err); }
+  });
   $("#ps-save").addEventListener("click", async (e) => {
     showMsg($("#ps-err"), null);
     try { await busy(e.currentTarget, api(`/api/projects/${encodeURIComponent(id)}`, { method: "PATCH", body: { git_ref: $("#ps-ref").value.trim(), root: $("#ps-root").value.trim() } })); toast("已儲存"); renderProject(id); }

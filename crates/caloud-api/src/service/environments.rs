@@ -253,6 +253,7 @@ pub async fn create(s: &AppState, me: &CurrentUser, input: EnvInput) -> ApiResul
                 release: vec![],
                 vars: vec![],
                 platform_vars: vec![],
+                limits: vec![],
             }),
         },
     );

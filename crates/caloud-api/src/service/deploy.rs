@@ -53,7 +53,6 @@ pub(crate) struct Target {
     pub compose_dir: String,
     pub public_service: String,
     pub public_port: i64,
-    pub services: usize,
     pub commit: String,
     /// 最新解析的設定與確認時不同
     pub pending_changes: bool,
@@ -65,6 +64,9 @@ pub(crate) struct Target {
     pub verify: caloud_analyzer::VerifyPlan,
     /// 有服務宣告 GPU（ADR 0022）
     pub gpu: bool,
+    /// 各服務的資源上限與排程預留量（ADR 0025）
+    pub limits: Vec<caloud_core::agent::ServiceLimit>,
+    pub need: caloud_core::placement::Resources,
 }
 
 /// 設定指紋（ADR 0024）：有效 compose（編輯過的優先）、compose 目錄、對外服務。
@@ -117,11 +119,25 @@ pub(crate) async fn target(s: &AppState, p: &Project) -> ApiResult<Target> {
         }
         _ => (c.commit_sha.clone(), false),
     };
-    target_for(&c, commit, pending_changes)
+    target_for(p, &c, commit, pending_changes)
+}
+
+/// 確認的有效 compose（通過平臺政策）；沒有確認時為 None
+pub(crate) async fn confirmed_compose(s: &AppState, p: &Project) -> ApiResult<Option<caloud_orchestrator::ValidatedCompose>> {
+    let Some(cid) = p.confirmed_analysis.as_deref() else {
+        return Ok(None);
+    };
+    let Some(c) = analysis(s, cid).await? else { return Ok(None) };
+    let ca = parse(&c)?;
+    let depth = ca.compose_dir.split('/').filter(|x| !x.is_empty()).count();
+    Ok(c.compose
+        .clone()
+        .or(ca.compose)
+        .and_then(|y| validate_with(&y, Policy::platform(depth)).ok()))
 }
 
 /// 以一筆（已確認的）解析與指定 commit 組成部署內容（ADR 0024：部署指定版本）
-pub(crate) fn target_for(c: &AnalysisRow, commit: String, pending_changes: bool) -> ApiResult<Target> {
+pub(crate) fn target_for(p: &Project, c: &AnalysisRow, commit: String, pending_changes: bool) -> ApiResult<Target> {
     let ca = parse(c)?;
     let compose = c
         .compose
@@ -141,7 +157,11 @@ pub(crate) fn target_for(c: &AnalysisRow, commit: String, pending_changes: bool)
                 "對外服務 `{public_service}` 沒有偵測到連接埠，請在 compose 加上 expose 後重新解析。"
             ))
         })?;
+    // ADR 0025：依專案上限決定各服務資源
+    let resolved = super::limits::resolve(&v, p.memory_limit_mb, p.cpu_limit).map_err(conflict)?;
     Ok(Target {
+        need: super::limits::need(&resolved),
+        limits: resolved.into_iter().map(|r| r.limit).collect(),
         analysis: c.id.clone(),
         settings: settings_key(c).unwrap_or_default(),
         verify: ca.verify.clone(),
@@ -149,7 +169,6 @@ pub(crate) fn target_for(c: &AnalysisRow, commit: String, pending_changes: bool)
         compose_dir: ca.compose_dir,
         public_service,
         public_port: i64::from(public_port),
-        services: v.services.len(),
         gpu: caloud_orchestrator::sandbox::needs_gpu(&v),
         commit,
         pending_changes,
@@ -257,7 +276,7 @@ pub async fn deploy(s: &AppState, me: &CurrentUser, id: &str, input: DeployInput
             return Err(ApiError::BadRequest("commit 需為 40 碼的 sha。".into()));
         }
         let (row, rollback) = analysis_for_commit(s, &p.id, commit).await?;
-        let t = target_for(&row, commit.to_string(), false)?;
+        let t = target_for(&p, &row, commit.to_string(), false)?;
         let env = start_target(s, &p, t, "manual", Some(&me.0.account)).await?;
         let detail = format!(
             "{} {}{}",
@@ -316,7 +335,7 @@ pub async fn deploy(s: &AppState, me: &CurrentUser, id: &str, input: DeployInput
 pub(crate) async fn deploy_verified(s: &AppState, p: &Project, commit: &str, via: &str, by: Option<&str>) -> ApiResult<()> {
     let trigger = if via == "github" { "push" } else { "manual" };
     let c = confirmed(s, p).await?;
-    let t = target_for(&c, commit.to_string(), false)?;
+    let t = target_for(p, &c, commit.to_string(), false)?;
     let env = start_target(s, p, t, trigger, by).await?;
     audit(
         &s.db,
@@ -366,7 +385,7 @@ pub(crate) async fn start_target(s: &AppState, p: &Project, t: Target, trigger: 
     // ADR 0019：秘密變數（先讀版本，產生資料庫密碼不算變更）
     let vars_rev = super::vars::rev(s, &p.id).await?;
     let vars = super::vars::for_deploy(s, &p.id, "production", &t.compose).await?;
-    let need = envs::need_for(t.services);
+    let need = t.need;
     let ts = now();
     let env = match production(s, &p.id).await? {
         Some(e) => {
@@ -496,6 +515,7 @@ pub(crate) async fn start_target(s: &AppState, p: &Project, t: Target, trigger: 
                     .collect(),
                 vars,
                 platform_vars,
+                limits: t.limits.clone(),
             }),
         },
     );

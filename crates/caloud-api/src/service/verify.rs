@@ -248,7 +248,7 @@ pub(crate) async fn start(
         cancel_run(s, v, "同分支有新的驗證").await?;
     }
 
-    let need = envs::need_for(t.services);
+    let need = t.need;
     let (node, index) = envs::place(s, need, None, true, t.gpu).await?;
     let (subdomain, hostname) = super::admin::new_env_id(s, EnvKind::Verify).await?;
     let vars = super::vars::for_verify(s, &p.id, &t.compose, pr.is_none()).await?;
@@ -370,6 +370,7 @@ pub(crate) async fn start(
                         .collect(),
                     platform_vars: deploy::platform_vars(&t.commit, &branch, "verify"),
                     vars,
+                    limits: t.limits.clone(),
                 },
                 public_port: t.public_port as u16,
                 test: t.verify.test.as_ref().map(cmd),

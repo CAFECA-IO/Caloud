@@ -559,7 +559,23 @@ impl EnvRunner {
             anyhow::bail!("compose 中沒有服務 `{}`", env.public_service);
         }
         let net = EnvNet::new(env.subnet_index).ok_or_else(|| anyhow::anyhow!("網段索引超出範圍"))?;
-        let overlay = sandbox::env_override_with(&env.id, &compose, &net, Limits::default(), inject).map_err(|e| anyhow::anyhow!(e))?;
+        // ADR 0025：控制面依專案上限決定的各服務資源
+        let per: Vec<(String, Limits)> = env
+            .limits
+            .iter()
+            .map(|l| {
+                (
+                    l.service.clone(),
+                    Limits {
+                        memory_mb: l.memory_mb.max(64),
+                        cpus: (l.cpu_millis.max(100) as f64) / 1000.0,
+                        ..Limits::default()
+                    },
+                )
+            })
+            .collect();
+        let overlay =
+            sandbox::env_override_limits(&env.id, &compose, &net, Limits::default(), &per, inject).map_err(|e| anyhow::anyhow!(e))?;
         let dir = self.dir.join(&env.id);
         tokio::fs::create_dir_all(&dir).await?;
         let (c, o) = self.files(&env.id, next);
@@ -680,6 +696,7 @@ mod tests {
             build: None,
             release: vec![],
             platform_vars: vec![],
+            limits: vec![],
             vars: vec![],
         };
         let ok = "services:\n  web:\n    image: nginx:1.27\n  db:\n    image: postgres:16\n";
@@ -784,6 +801,7 @@ mod tests {
             public_service: "web".into(),
             build: None,
             release: vec![],
+            limits: vec![],
             platform_vars: vec![caloud_core::agent::PlatformVar {
                 name: "CALOUD_COMMIT".into(),
                 value: "98b705d0123456789abcdef0123456789abcdef0".into(),
@@ -940,6 +958,7 @@ mod tests {
             build: Some(caloud_core::agent::BuildLimits { cpus: 2, memory_mb: 3072 }),
             release: vec![ReleaseTask { service: "migrate".into(), command: None }],
             platform_vars: vec![],
+            limits: vec![],
             vars: vec![EnvValue {
                 name: "S".into(),
                 value: "secret-value".into(),

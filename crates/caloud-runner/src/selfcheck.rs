@@ -223,6 +223,7 @@ async fn probe(env: &EnvRunner) -> Result<(), String> {
         release: vec![],
         platform_vars: vec![],
         vars: vec![],
+        limits: vec![],
     };
     let b = EnvSpec {
         id: PROBE_B.into(),

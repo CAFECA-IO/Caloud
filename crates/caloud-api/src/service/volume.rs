@@ -118,7 +118,9 @@ pub async fn apply(s: &AppState, me: &CurrentUser, id: &str, input: VolumeInput)
     let (c, a, before) = current(s, me, id).await?;
     let (volume, after) = patch(&before, &input.service, &input.target).map_err(bad)?;
     let depth = a.compose_dir.split('/').filter(|x| !x.is_empty()).count();
-    validate_with(&after, Policy::platform(depth)).map_err(|e| bad(e.to_string()))?;
+    let v = validate_with(&after, Policy::platform(depth)).map_err(|e| bad(e.to_string()))?;
+    let p = owned(s, me, id).await?;
+    super::limits::resolve(&v, p.memory_limit_mb, p.cpu_limit).map_err(bad)?;
     // 先固定舊驗證的設定指紋，再改確認的 compose
     deploy::freeze_settings(s, &c).await?;
     sqlx::query("UPDATE analyses SET compose = ? WHERE id = ?")

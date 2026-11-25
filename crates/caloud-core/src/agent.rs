@@ -82,6 +82,18 @@ pub struct EnvSpec {
     /// 平臺提供的非秘密變數（ADR 0023）：建置的服務同時作為執行期環境變數與 build arg，不遮蔽
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub platform_vars: Vec<PlatformVar>,
+    /// 各服務的資源上限（ADR 0025）；沒有列出的服務用預設 1 GB、1 核
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limits: Vec<ServiceLimit>,
+}
+
+/// 服務的資源上限（ADR 0025）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceLimit {
+    pub service: String,
+    pub memory_mb: u64,
+    /// 千分之一核
+    pub cpu_millis: u64,
 }
 
 /// 平臺變數（`CALOUD_COMMIT` 等，ADR 0023）
