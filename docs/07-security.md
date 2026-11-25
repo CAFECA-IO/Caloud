@@ -168,7 +168,7 @@
 | 主機路徑掛載、`docker.sock` | 禁止 | 禁止；需要持久化的路徑改為具名 volume（FR-AN-07） | 禁止 |
 | `profiles` | 允許 | 允許；`profiles` 中的一次性 service（例如 `migrate`）可指定為發布前任務（FR-ENV-08） | 允許 |
 | `deploy.resources.reservations.devices`（GPU） | 禁止 | 只允許 `capabilities: [gpu]`（`driver` 只能是 `nvidia`）；改以 CDI 裝置 `caloud.dev/gpu=all` 掛入，以 `runsc-gpu` 執行（ADR 0022） | 禁止 |
-| 資源上限 | 1g、512 pids | 依方案（FR-CI-06 另計建置資源） | 不設 |
+| 資源上限 | 1g、512 pids | 每個服務預設 1 GB、1 核、512 pids；compose 的 `mem_limit`／`cpus`（或 `deploy.resources.limits`）在 Admin 設定的專案合計上限內採用，override 寫入並移除原本的 `deploy.resources.limits`（ADR 0025）；建置資源另計（FR-CI-06） | 不設 |
 
 建置在 Runner 上以 rootless BuildKit 執行，不使用主機 Docker 的建置；建置可連外網但封鎖雲端 metadata 與平臺內網。實作（[ADR 0018](adr/0018-minimal-deploy.md)）：每次建置一個 gVisor（runsc）臨時容器（`buildctl-daemonless.sh`），接在介面名稱 `cldbuild` 的網路上而受 ADR 0015 防火牆規則管控；限 4 CPU、8 GB、4096 pids；快取只在同一環境的 volume 內共用。
 

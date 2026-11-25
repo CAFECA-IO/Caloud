@@ -195,6 +195,7 @@ Caloud 是自架的容器托管平台。管理者以 CAFECA 身分登入 Web 介
 | FR-ENV-13 | GPU 服務：compose 以 `deploy.resources.reservations.devices`（`capabilities: [gpu]`）宣告，或由解析器依 CUDA 基底映像與 GPU 依賴產生（低信心、須確認）；在 `gpu_ready` 的平臺節點以 gVisor nvproxy（runtime `runsc-gpu`）執行，多個環境分時共用、不隔離顯示記憶體；執行期與驗證（含測試沙箱）可用，建置不給（[ADR 0022](adr/0022-gpu.md)） | P1 | M7 |
 | FR-ENV-14 | 專案的版本可見性：分開「執行中」與「目標」版本（只在健康檢查通過後更新執行中版本）、以容器實際映像核對、注入 `CALOUD_COMMIT` 等平臺變數、Edge 回應帶 `X-Caloud-Commit`（可依專案關閉）、部署紀錄（[ADR 0023](adr/0023-versions.md)） | P0 | M7 |
 | FR-ENV-15 | 部署指定版本與回滾：已通過驗證的 commit 可直接部署，曾成功上線的 commit 可「回到這個版本」（以當時的設定，不還原資料與秘密變數）；持久化目錄未掛 volume 時，可預覽 compose 修改後一鍵加上具名 volume（[ADR 0024](adr/0024-project-page.md)） | P0 | M7 |
+| FR-ENV-16 | 專案資源上限：Admin 為專案設定記憶體與 CPU 的合計上限；服務在 compose 以 `mem_limit`／`cpus`（或 `deploy.resources.limits`）宣告用量，合計不超過上限即採用；未設定上限時每個服務最多 1 GB、1 核（[ADR 0025](adr/0025-project-limits.md)） | P1 | M7 |
 | FR-ENV-07 | 子網域 ID 由 a-z、0-9 組成，以字母開頭且同時含字母與數字；長度即環境種類（預設 8／12／16，後台可調）；以 CSPRNG 產生，排除使用中、保留字（含包含保留字者）與封鎖清單 | P0 | M4 |
 
 ### 2.12 平臺：驗證與報告 CI、RPT

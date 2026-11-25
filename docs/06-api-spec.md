@@ -323,6 +323,7 @@
 | PUT | `/api/projects/{id}/vars` | 擁有者 | FR-ENV-05 |
 | PUT | `/api/projects/{id}/analysis` | 擁有者 | FR-AN-03、FR-AN-04 |
 | GET | `/api/projects/{id}/volume-fix` | 擁有者 | FR-ENV-15 |
+| PUT | `/api/projects/{id}/limits` | admin+ | FR-ENV-16 |
 | POST | `/api/projects/{id}/volume-fix` | 擁有者 | FR-ENV-15 |
 
 **Project**
@@ -454,6 +455,19 @@
 - ADR 0024（FR-AN-12）：`optional` 為程式中有預設值（選填）；確認的 compose 任一服務 `environment` 已提供值（不是 `${NAME}` 引用）且未設定秘密值時，`source` 為 `compose` 並附 `value`；`ignored` 為用戶標為「不需要」。
 
 **PUT /api/projects/{id}/vars** `{ "env": "production", "set": { "NAME": "value" }, "unset": ["NAME"] }` → `200`（同 GET）。名稱須為 `[A-Za-z_][A-Za-z0-9_]*`，`CALOUD_` 開頭保留給平臺（`400`）；值最長 32 KB、每個環境最多 200 個（`400`）；未設定主金鑰回 `409`。值不出現在回應、稽核與 log。另可帶 `"ignore": ["NAME"]`、`"unignore": ["NAME"]` 標記或取消「不需要」（不影響 `rev` 與部署注入）。
+
+**資源上限**（FR-ENV-16，[ADR 0025](adr/0025-project-limits.md)）：`GET /api/projects/{id}` 另回 `limits`：
+
+```json
+{ "memory_mb": 16384, "cpus": null,
+  "services": [ { "service": "inference", "memory_mb": 15360, "cpus": 1.0, "declared": true },
+                { "service": "web", "memory_mb": 1024, "cpus": 1.0, "declared": false } ],
+  "total_memory_mb": 16384, "total_cpus": 2.0, "error": null }
+```
+
+- `memory_mb`、`cpus` 為專案合計上限（null＝每個服務最多 1 GB、1 核）；`services` 依確認的有效 compose 計算（沒有確認時為空）；`declared` 表示由 compose 宣告；`error` 為超過上限的說明。
+- **PUT /api/projects/{id}/limits** `{ "memory_mb": 16384 | null, "cpus": 8 | null }` → `200`（同 `limits`）：admin+（member `403`）；範圍：記憶體 1024–131072、CPU 1–64（`400`）；稽核 `project_limits`。
+- 確認設定、加上 volume 時宣告超過上限回 `400`；部署、驗證時回 `409`。部署給 agent 的 `EnvSpec` 帶 `limits: [ { "service", "memory_mb", "cpu_millis" } ]`。
 
 **GET /api/projects/{id}/volume-fix?service=web&target=/app/.data** → `200 { "volume": "web-data", "before": "services: …", "after": "services: …" }`（FR-ENV-15，ADR 0024）：以確認的有效 compose 產生加上具名 volume 的修改；服務不存在、目標不是絕對路徑或已有掛載回 `400`；未確認回 `409`。
 

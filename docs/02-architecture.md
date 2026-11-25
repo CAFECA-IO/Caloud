@@ -175,7 +175,7 @@ MCP 用戶端 ──POST /mcp (Bearer cld_…)──► mcp.rs ──► service
 | `blocked_hosts` | `hostname` | 封鎖的主機名稱、理由、操作者 | FR-OPS-03 |
 | `nodes` | `id`（UUID） | 名稱、擁有者（空值＝平臺節點）、偵測規格、可配置量、已配置量、狀態（active／draining／offline）、節點權杖雜湊、最後心跳 | FR-OPS-04、FR-OPS-06 |
 | `node_join_tokens` | `token_hash` | 一次性加入權杖、擁有者、到期、使用時間 | FR-OPS-04 |
-| `projects` | `id`（UUID） | 平臺專案：擁有者、名稱、儲存庫網址、ref、預設分支、根目錄、狀態（analyzing／needs_review／confirmed／error）、錯誤、已確認的解析、GitHub 安裝與儲存庫全名（私有儲存庫） | FR-GH-01、FR-GH-04、FR-AN-06、FR-AN-10 |
+| `projects` | `id`（UUID） | 平臺專案：擁有者、名稱、儲存庫網址、ref、預設分支、根目錄、狀態（analyzing／needs_review／confirmed／error）、錯誤、已確認的解析、GitHub 安裝與儲存庫全名（私有儲存庫）、記憶體與 CPU 合計上限（NULL＝每個服務 1 GB、1 核，ADR 0025） | FR-GH-01、FR-GH-04、FR-AN-06、FR-AN-10 |
 | `github_app` | `id`（固定 1） | GitHub App：App ID、slug、Client ID；client secret、私鑰、webhook secret 的密文與提示 | FR-GH-05 |
 | `github_installations` | `id`（GitHub installation id） | 擁有者（Caloud 帳號）、GitHub 帳號名稱與類型、是否暫停 | FR-GH-01 |
 | `github_deliveries` | `delivery_id` | webhook 去重：事件類型、收到時間（保留 7 天） | FR-GH-02 |
